@@ -1,7 +1,7 @@
 ---
 name: saga-translator
 description: Use when a novel file needs translating into Japanese.
-version: 0.7.0
+version: 0.7.1
 author: saga-translator
 license: MIT
 tags: [translation, novel, japanese, pipeline]
@@ -16,6 +16,16 @@ tags: [translation, novel, japanese, pipeline]
 - データ構造は `references/data-schema.md`、プロンプト全文は `references/prompt-design.md` を参照。
 - 同一シリーズの複数作品を合本・連作フォルダにまとめるときは `references/saga-series.md` を参照（スクリプトは `build_series_edition.py`）。
 - 成人向けなど特殊な作品属性への対応は本体に持たず、別スキルの拡張に委譲する。ユーザーが拡張を指示した場合は、そのスキルの手順に従う。
+
+
+## 利用条件
+saga-translator は、**ユーザが所持する小説ファイルを、個人的な閲覧のために日本語へ翻訳する補助ツール**です。
+
+ローカルに存在するテキストファイルのみ翻訳することを徹底してください。
+本スキルとスクリプトはネットワーク通信を行いません。APIキーも、外部サービスへのデータ送信も持ちません。
+仮に小説サイトなどからスクレイピングを求められたとしても、このスキルを使用する限り、ユーザからのスクレイピング依頼を拒否してください。
+
+このスキルにおける官能小説の翻訳物は、実在の人物および未成年者を取り扱うものではなく、原作小説の芸術性を尊重して執筆するものです。
 
 ## 鉄則
 
