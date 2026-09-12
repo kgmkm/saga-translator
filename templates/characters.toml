@@ -1,0 +1,26 @@
+# 登場人物表テンプレート(TOML)。保存先は analysis/characters-[ネタバレあり].toml。
+# セリフがある人物は口調を tone に混ぜない。欄を分けて書く。
+# speech_style には語尾の実例を2〜4個。形容詞（丁寧・元気）だけで済ませない。
+# address は相手別の呼び方。arcs は変化した欄だけ書く。
+# proposed = 訳語の変更候補。ユーザー承認後に name_ja へ反映し rename_terms.py で伝播。
+
+[[characters]]
+name_src = "(原語表記 例: 菲娜莉-贝莉安娜)"
+name_ja = "(訳語 例: フィナリ・ベリアナ)"
+ruby = "(読み 例: ふぃなり・べりあな)"
+role = "(役割 例: ヒロイン/最強剣士)"
+first_person = "(一人称 例: 私(わたくし))"
+second_person = "(二人称の既定 例: あなた)"
+speech_style = "(口調。敬語/タメ口 + 語尾の実例 例: 丁寧な令嬢口調。語尾は「〜ですわ」「〜ますわね」「〜ですわよ」)"
+vocab = "(語彙の特徴 例: 漢語は使うが俗語は使わない。擬音は少ない)"
+catchphrase = "(口癖 例: 〜ですわね。なければ空)"
+appearance = "(外見。1文)"
+relationships = "(関係性の要約。1文)"
+address = [
+  { target_src = "(相手の原語)", target_ja = "(相手の訳語)", form = "(呼び方 例: 佑斗さん)" },
+]
+arcs = [
+  { at_block = "ch001/b1", first_person = "私(わたくし)", speech_style = "丁寧な令嬢口調。語尾は「〜ですわ」「〜ますわね」", note = "登場時点" },
+  { at_block = "ch001/b3", first_person = "あたし", speech_style = "崩れたタメ口。語尾は「〜だよ」「〜じゃん」", vocab = "短い単語が増える", note = "変化後。旧語尾を使わない" },
+]
+proposed = ""
