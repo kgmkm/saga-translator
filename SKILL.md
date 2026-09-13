@@ -1,7 +1,7 @@
 ---
 name: saga-translator
 description: Use when a novel file needs translating into Japanese.
-version: 0.7.1
+version: 0.8.0
 author: saga-translator
 license: MIT
 tags: [translation, novel, japanese, pipeline]
@@ -137,7 +137,7 @@ python3 <skill>/scripts/build_context.py <workdir> --chapter ch001 --block b1
    python3 <skill>/scripts/qa_translation.py <workdir> --chapter ch001 --block b1 --emit
    ```
    検証は段落番号の連続性・段落数一致・訳語チェック（登場人物表の原語が訳文に残っていないか）・非 JIS 漢字チェック（CP932 外＋言語 pack の NON_JIS_HAN）。詳細は `references/data-schema.md` の「処理フローでの参照関係」。
-   合格なら `output/chXXX/bY_ja.md` を確定。不合格なら終了コード 1 で止まるので、指摘を直して再提出する。対訳は出さない。
+   合格なら `output/chXXX/bY_ja.md` を確定。不合格なら終了コード 1 で止まるので、指摘を直して再提出する。
 5. 記録：
    ```bash
    python3 <skill>/scripts/record_meta.py <workdir> --chapter ch001 --block b1 --model <model> --prompt-version <ver> --tokens-in <n> --tokens-out <n>
@@ -146,7 +146,7 @@ python3 <skill>/scripts/build_context.py <workdir> --chapter ch001 --block b1
    ```bash
    python3 <skill>/scripts/assemble.py <workdir>
    ```
-   章訳文 `output/chXXX_ja.md`・`output/目次.md`・全文訳文を生成する。確定後は原文・中間物を削除する（`--keep-source` で残す）。入力元ファイルは触らない。`images_missing` が残っていたら、ユーザーに「`output/images/` へ ID 入りのファイルを入れて assemble を再実行」と伝える。ダウンロードはしない。旧配置 `work/images/` があれば output/images/ へ自動移動する。
+   章訳文 `output/chXXX_ja.md`・`output/目次.md`・全文訳文を生成する。`--parallel` 指定、または年齢正規化の記録（`analysis/age_policy_report-[ネタバレあり].md`）がある作品では対訳（`output/chXXX_parallel.md`・`output/全文_対訳.md`。原文に `> [Pnnn]` 付き）も生成・保存する。確定後は原文・中間物を削除する（`--keep-source` で残す）。入力元ファイルは触らない。`images_missing` が残っていたら、ユーザーに「`output/images/` へ ID 入りのファイルを入れて assemble を再実行」と伝える。ダウンロードはしない。旧配置 `work/images/` があれば output/images/ へ自動移動する。
 
 ### 5. 後からの修正
 
@@ -165,7 +165,7 @@ python3 <skill>/scripts/build_context.py <workdir> --chapter ch001 --block b1
 | 「○○の訳語を△△にして」 | rename_terms で伝播 |
 | 「登場人物表見せて」 | analysis/characters-[ネタバレあり].toml を要約表示 |
 | 「続きを翻訳して」 | 未完了ブロックを検出して続行 |
-| 「対訳で出力して」 | 対訳は出さない。原文は完了後に消す |
+| 「対訳で出力して」 | `assemble.py --parallel` で対訳を生成（年齢正規化の記録がある作品は自動） |
 | 「画像が無い」 | `output/images/` に ID を含む画像を置くよう案内。assemble 再実行でタグを埋め込む |
 | 「成人向け作品を訳したい」 | 本体では対応しない（拡張ポイント）。ユーザーが拡張スキルを指示した場合は、そのスキルに従う |
 | 「全体を一気に訳して」 | 1M 以上の context モデルなら例外として許可。ただし章単位を推奨 |

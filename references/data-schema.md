@@ -1,6 +1,6 @@
 # データスキーマ
 
-作業中と完了後で残るファイルが違う。構造化データは TOML（旧JSONも読む）。対訳は出さない。
+作業中と完了後で残るファイルが違う。構造化データは TOML（旧JSONも読む）。対訳（原文＋訳文の対照）は `--parallel`、または年齢正規化の記録（`analysis/age_policy_report-[ネタバレあり].md`）がある作品で出力する。
 
 ## ディレクトリ
 
@@ -22,14 +22,17 @@
 ├── output/
 │   ├── images/              # 画像置き場。訳文からは常に images/… で参照
 │   ├── chNNN/bY_ja.md       # 完了後に章ファイルへ吸収して削除
+│   ├── chNNN/bY_parallel.md # 対訳の中間物。assemble が章・全文対訳を作る
 │   ├── chNNN_ja.md
+│   ├── chNNN_parallel.md    # --parallel、または年齢正規化の記録がある作品で出力
 │   ├── 全文_訳文.md
+│   ├── 全文_対訳.md         # 同上。> [Pnnn] 付きで原文と訳文を対にする
 │   ├── 目次.md
 │   └── _work/               # 確定後に削除
 └── logs/
 ```
 
-完了後（assemble 既定）: 原文・段落・中間コンテキスト・ブロック訳・対訳は無い。残るのは訳文・output/images・分析・manifest・目次。入力元ファイルは触らない。`--keep-source` で作業中のまま残せる。旧配置 `work/images/` があれば assemble が output/images/ へ移動する。
+完了後（assemble 既定）: 原文・段落・中間コンテキスト・ブロック訳は無い。対訳（`全文_対訳.md`・章対訳）は `--parallel`、または年齢正規化の記録がある作品でのみ残る。残るのは訳文・output/images・分析・manifest・目次。入力元ファイルは触らない。`--keep-source` で作業中のまま残せる。旧配置 `work/images/` があれば assemble が output/images/ へ移動する。
 
 ※ 旧 `.json` / 旧 `characters.toml` も読む。新規は TOML。JSONテンプレは置かない。
 
@@ -164,4 +167,4 @@ paras = [13, 40]
 - `build_context.py` は characters/terms/plot + 前章末尾 + 次章冒頭 + 対象ブロックを1つの md に束ねる
 - `qa_translation.py` は段落整合（連番一致・段落数一致）と訳語残留（登場人物表の原語が訳文に残っていないか）を検証する
 - `rename_terms.py` は旧訳語→新訳語の機械置換。影響箇所を一覧化し、確認のうえ適用する
-- `assemble.py` は全ブロック確定後に章訳文・全文・目次を統合し、原文と中間物を消す。対訳は出さない
+- `assemble.py` は全ブロック確定後に章訳文・全文・目次を統合し、原文と中間物を消す。対訳（章対訳・`全文_対訳.md`）は `--parallel`、または年齢正規化の記録がある作品で出力する（`> [Pnnn]` 付き）

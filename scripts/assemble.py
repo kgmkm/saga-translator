@@ -1,4 +1,6 @@
-"""確定済みブロックの結合: 章訳文・目次・全文。対訳は作らない。
+"""確定済みブロックの結合: 章訳文・対訳・目次・全文。
+対訳(章対訳・全文_対訳.md)は --parallel 指定で生成する。年齢正規化の記録
+(analysis/age_policy_report-[ネタバレあり].md)がある作品では自動で有効。
 全ブロック確定後は原文と中間物を消す(--keep-source で残す)。"""
 from __future__ import annotations
 
@@ -13,12 +15,16 @@ from _lib import (  # noqa: E402
 )
 from ingest import missing_image_notice, relink_markdown_files, retarget_md_images  # noqa: E402
 
+AGE_REPORT = "age_policy_report-[ネタバレあり].md"
+
 
 def main() -> None:
     utf8()
     ap = argparse.ArgumentParser(description="出力の結合")
     ap.add_argument("work")
     ap.add_argument("--keep-source", action="store_true", help="原文・中間物を残す(既定は全ブロック確定後に削除)")
+    ap.add_argument("--parallel", action="store_true",
+                    help="対訳(章対訳・全文_対訳.md)を生成する。年齢正規化の記録がある作品では指定不要(自動)")
     args = ap.parse_args()
 
     work = Path(args.work)
@@ -27,13 +33,16 @@ def main() -> None:
     title_ja = (titles.get("title_ja") or "").strip()
     ch_titles = {c.get("id"): c for c in (titles.get("chapters") or []) if c.get("id")}
     out = work / "output"
+    make_parallel = args.parallel or (work / "analysis" / AGE_REPORT).exists()
     toc = [f"# {title_ja}", "", "# 目次", ""] if title_ja else ["# 目次", ""]
     full_ja: list[str] = []
+    full_par: list[str] = []
     done_any = False
 
     for c in meta["chapters"]:
         cid = c["id"]
         ch_ja: list[str] = []
+        ch_par: list[str] = []
         blocks = c.get("blocks") or []
         n_done = 0
         heading = (ch_titles.get(cid) or {}).get("ja") or c.get("title") or cid
@@ -44,25 +53,39 @@ def main() -> None:
             if not f_ja.exists():
                 continue
             ch_ja.append(f_ja.read_text(encoding="utf-8").strip())
+            if make_parallel:
+                f_par = out / cid / f"{b['id']}_parallel.md"
+                if f_par.exists():
+                    ch_par.append(f_par.read_text(encoding="utf-8").strip())
+                else:
+                    print(f"[assemble] WARN: 対訳がありません(スキップ): {cid}/{b['id']}")
             n_done += 1
             done_any = True
         if ch_ja:
-            ch_path = out / f"{cid}_ja.md"
             body = "\n\n".join(ch_ja) + "\n"
-            atomic_write_text(ch_path, retarget_md_images(body))
+            atomic_write_text(out / f"{cid}_ja.md", retarget_md_images(body))
             title = (ch_titles.get(cid) or {}).get("ja") or c.get("title") or cid
-            toc.append(f"- [{title}]({cid}_ja.md)")
+            if make_parallel and ch_par:
+                atomic_write_text(out / f"{cid}_parallel.md",
+                                  retarget_md_images("\n\n".join(ch_par) + "\n"))
+                toc.append(f"- [{title}]({cid}_ja.md)（対訳: [{cid}_parallel.md]({cid}_parallel.md)）")
+                full_par.append(f"<!-- {cid} -->\n" + "\n\n".join(ch_par))
+            else:
+                toc.append(f"- [{title}]({cid}_ja.md)")
             full_ja.append(f"<!-- {cid} -->\n" + "\n\n".join(ch_ja))
         c["status"] = "done" if blocks and n_done == len(blocks) else c.get("status", "pending")
 
     if done_any:
         atomic_write_text(out / "目次.md", "\n".join(toc) + "\n")
-        full_path = out / "全文_訳文.md"
         full_body = "\n\n".join(full_ja) + "\n"
         if title_ja:
             full_body = f"# {title_ja}\n\n" + full_body
-        atomic_write_text(full_path, retarget_md_images(full_body))
+        atomic_write_text(out / "全文_訳文.md", retarget_md_images(full_body))
         print(f"[assemble] 目次/全文を出力: {out / '目次.md'}")
+        if make_parallel and full_par:
+            atomic_write_text(out / "全文_対訳.md", retarget_md_images("\n\n".join(full_par) + "\n"))
+            why = "--parallel" if args.parallel else f"年齢正規化の記録({AGE_REPORT})"
+            print(f"[assemble] 対訳を出力: {out / '全文_対訳.md'} ({why})")
     else:
         print("[assemble] 確定済みブロックなし")
 
@@ -81,7 +104,7 @@ def main() -> None:
         print("[assemble] " + notice.replace("\n", "\n[assemble] "))
 
     if all_blocks_emitted(work, meta) and not args.keep_source:
-        removed = purge_source(work)
+        removed = purge_source(work, keep_parallel=make_parallel)
         print(f"[assemble] 原文・中間物を削除 ({len(removed)}): " + ", ".join(removed[:12]) + ("…" if len(removed) > 12 else ""))
     elif args.keep_source:
         print("[assemble] --keep-source: 原文を残した")

@@ -343,6 +343,21 @@ class TestTomlAndPurge(unittest.TestCase):
         self.assertTrue((self.tmp / "output" / "全文_訳文.md").exists())
         self.assertTrue((self.tmp / "analysis" / "characters.toml").exists())
 
+    def test_purge_source_keep_parallel(self):
+        (self.tmp / "manifest.toml").write_text("title = \"x\"\n", encoding="utf-8")
+        (self.tmp / "originals").mkdir()
+        (self.tmp / "originals" / "source.md").write_text("原文。", encoding="utf-8")
+        (self.tmp / "output").mkdir(exist_ok=True)
+        (self.tmp / "output" / "全文_訳文.md").write_text("全文。", encoding="utf-8")
+        (self.tmp / "output" / "全文_対訳.md").write_text("対訳。", encoding="utf-8")
+        (self.tmp / "output" / "ch001_parallel.md").write_text("章対訳。", encoding="utf-8")
+        removed = _lib.purge_source(self.tmp, keep_parallel=True)
+        self.assertTrue((self.tmp / "output" / "全文_対訳.md").exists())
+        self.assertTrue((self.tmp / "output" / "ch001_parallel.md").exists())
+        self.assertTrue((self.tmp / "output" / "全文_訳文.md").exists())
+        self.assertFalse((self.tmp / "originals").exists())
+        self.assertNotIn("output/全文_対訳.md", removed)
+
     def test_load_characters_prefers_spoiler_name(self):
         (self.tmp / "analysis").mkdir(exist_ok=True)
         (self.tmp / "analysis" / "characters.toml").write_text(
@@ -390,17 +405,79 @@ class TestTomlAndPurge(unittest.TestCase):
         with self.assertRaises(_lib.TomlSyntaxError):
             _lib.load_chapters_meta(self.tmp)
 
-    def test_emit_no_parallel(self):
+    def test_emit_writes_parallel_intermediate(self):
         from qa_translation import emit
-        from _lib import save_chapters_meta
+        from _lib import save_chapters_meta, save_paras
         (self.tmp / "output" / "_work").mkdir(parents=True)
-        (self.tmp / "output" / "_work" / "ch001_b1_ja_numbered.md").write_text("興味深い話だ。本当にそうなら困ったものだ。", encoding="utf-8")
+        (self.tmp / "output" / "_work" / "ch001_b1_ja_numbered.md").write_text("ドラフト。", encoding="utf-8")
+        save_paras(self.tmp, "ch001", {"paras": [{"n": 1, "text": "原一。"}, {"n": 2, "text": "原二。"}]})
         save_chapters_meta(self.tmp, {"chapters": [{"id": "ch001", "status": "pending", "blocks": [{"id": "b1", "status": "pending", "paras": [1, 2], "n_chars": 0}]}]})
         emit(self.tmp, "ch001", "b1", [(1, "訳一。"), (2, "訳二。")])
         ja = (self.tmp / "output" / "ch001" / "b1_ja.md").read_text(encoding="utf-8")
         self.assertIn("訳一。", ja)
-        self.assertFalse((self.tmp / "output" / "ch001" / "b1_parallel.md").exists())
+        par = (self.tmp / "output" / "ch001" / "b1_parallel.md").read_text(encoding="utf-8")
+        self.assertIn("> [P001] 原一。", par)
+        self.assertIn("> [P002] 原二。", par)
+        self.assertIn("訳二。", par)
         self.assertFalse((self.tmp / "output" / "_work" / "ch001_b1_ja_numbered.md").exists())
+
+
+class TestAssemble(unittest.TestCase):
+    def setUp(self):
+        import shutil
+        import tempfile
+        self.tmp = Path(tempfile.mkdtemp())
+        self.shutil = shutil
+
+    def tearDown(self):
+        self.shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _setup_work(self, with_age_report: bool) -> None:
+        from _lib import save_chapters_meta, save_paras
+        (self.tmp / "output" / "ch001").mkdir(parents=True)
+        (self.tmp / "analysis").mkdir()
+        save_chapters_meta(self.tmp, {"work": {"title": "x"}, "chapters": [
+            {"id": "ch001", "title": "", "status": "emitted", "blocks": [
+                {"id": "b1", "paras": [1, 2], "status": "emitted"}]}]})
+        save_paras(self.tmp, "ch001", {"paras": [{"n": 1, "text": "原一。"}, {"n": 2, "text": "原二。"}]})
+        (self.tmp / "output" / "ch001" / "b1_ja.md").write_text("訳一。\n\n訳二。\n", encoding="utf-8")
+        (self.tmp / "output" / "ch001" / "b1_parallel.md").write_text(
+            "> [P001] 原一。\n\n訳一。\n\n> [P002] 原二。\n\n訳二。\n", encoding="utf-8")
+        if with_age_report:
+            (self.tmp / "analysis" / "age_policy_report-[ネタバレあり].md").write_text(
+                "# 年齢・設定変更通知\n", encoding="utf-8")
+
+    def _run(self, *extra: str) -> None:
+        import sys
+        from unittest import mock
+        from assemble import main
+        with mock.patch.object(sys, "argv", ["assemble", str(self.tmp), *extra]):
+            main()
+
+    def test_auto_parallel_when_age_report_exists(self):
+        self._setup_work(True)
+        self._run()
+        self.assertTrue((self.tmp / "output" / "全文_対訳.md").exists())
+        self.assertTrue((self.tmp / "output" / "ch001_parallel.md").exists())
+        par = (self.tmp / "output" / "全文_対訳.md").read_text(encoding="utf-8")
+        self.assertIn("> [P001] 原一。", par)
+        toc = (self.tmp / "output" / "目次.md").read_text(encoding="utf-8")
+        self.assertIn("ch001_parallel.md", toc)
+        # 全ブロック確定済みなので purge が走る。対訳は残り、原文・中間物は消える
+        self.assertFalse((self.tmp / "chapters").exists())
+        self.assertTrue((self.tmp / "output" / "全文_対訳.md").exists())
+        self.assertFalse((self.tmp / "output" / "ch001").exists())
+
+    def test_no_parallel_without_age_report_or_flag(self):
+        self._setup_work(False)
+        self._run()
+        self.assertTrue((self.tmp / "output" / "全文_訳文.md").exists())
+        self.assertFalse((self.tmp / "output" / "全文_対訳.md").exists())
+
+    def test_parallel_flag_forces_output(self):
+        self._setup_work(False)
+        self._run("--parallel")
+        self.assertTrue((self.tmp / "output" / "全文_対訳.md").exists())
 
 
 class TestUploadedImage(unittest.TestCase):

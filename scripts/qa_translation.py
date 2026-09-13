@@ -14,6 +14,7 @@ from _lib import (  # noqa: E402
     load_chapters_meta,
     load_characters,
     load_json,
+    load_paras,
     load_toml,
     save_chapters_meta,
     save_json,
@@ -133,6 +134,10 @@ def emit(work: Path, cid: str, bid: str, items: list[tuple[int, str]]) -> None:
     ja_dir = work / "output" / cid
     clean = layout_lines("\n\n".join(t for _, t in items)) + "\n"
     atomic_write_text(ja_dir / f"{bid}_ja.md", clean)
+    # 対訳(段落対照)を中間物として残す。正式出力(章対訳・全文対訳)は assemble が作る
+    src_map = {p["n"]: p["text"] for p in load_paras(work, cid)["paras"]}
+    pairs = [f"> [P{n:03d}] {src_map.get(n, '')}\n\n{t}\n" for n, t in items]
+    atomic_write_text(ja_dir / f"{bid}_parallel.md", "\n".join(pairs))
     # 確定ブロックの状態を chapters_meta に記録する（record_meta 忘れでも status が進む）
     meta = load_chapters_meta(work)
     for c in meta["chapters"]:

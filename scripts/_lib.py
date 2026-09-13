@@ -10,7 +10,7 @@ from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".config" / "saga-translator"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
-SKILL_VERSION = "0.7.0"
+SKILL_VERSION = "0.8.0"
 
 DEFAULT_CONFIG = """# saga-translator 設定(認証情報は持たない)
 [translation]
@@ -319,9 +319,10 @@ def all_blocks_emitted(work: Path, meta: dict) -> bool:
     return True
 
 
-def purge_source(work: Path) -> list[str]:
+def purge_source(work: Path, keep_parallel: bool = False) -> list[str]:
     """全ブロック確定後に原文と中間物を消す。入力元ファイルは触らない。
-    残す: 訳文(章/全文/目次)、analysis、manifest、output/images、chapters_meta、logs。"""
+    残す: 訳文(章/全文/目次)、analysis、manifest、output/images、chapters_meta、logs。
+    keep_parallel=True のときは output/ 直下の対訳(全文_対訳.md・章対訳)も残す。"""
     work = Path(work).resolve()
     if not (work / "manifest.toml").exists() and not (work / "manifest.json").exists() and not (work / "chapters_meta.toml").exists() and not (work / "chapters_meta.json").exists():
         raise ValueError(f"作品ディレクトリに見えない: {work}")
@@ -341,13 +342,14 @@ def purge_source(work: Path) -> list[str]:
         rm(rel)
     out = work / "output"
     if out.exists():
-        for p in list(out.rglob("*")):
-            if not p.is_file():
-                continue
-            name = p.name
-            if "parallel" in name.lower() or name == "全文_対訳.md":
-                _under_work(work, p).unlink()
-                removed.append(str(p.relative_to(work)).replace("\\", "/"))
+        if not keep_parallel:
+            for p in list(out.rglob("*")):
+                if not p.is_file():
+                    continue
+                name = p.name
+                if "parallel" in name.lower() or name == "全文_対訳.md":
+                    _under_work(work, p).unlink()
+                    removed.append(str(p.relative_to(work)).replace("\\", "/"))
         for p in list(out.iterdir()):
             if p.is_dir() and p.name.startswith("ch"):
                 _under_work(work, p)
