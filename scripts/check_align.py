@@ -58,12 +58,23 @@ def main():
     acked = {int(x.strip().lstrip("Pp")) for x in args.ack.split(",") if x.strip()}
 
     workdir = pathlib.Path(args.root) / args.work_id
-    meta, para_map = load_source(workdir, args.chapter)
-    blk = next(b for b in meta["blocks"] if b["id"] == args.block)
+    allch = tomllib.loads((workdir / "chapters_meta.toml").read_text(encoding="utf-8"))["chapters"]
+    # --chapter に一致し、かつ対象ブロックを持つ章を優先。無ければ全章からブロックで探す
+    ch = next((c for c in allch
+               if c.get("id") == args.chapter
+               and any(b["id"] == args.block for b in c.get("blocks", []))), None)
+    if ch is None:
+        ch = next((c for c in allch if any(b["id"] == args.block for b in c.get("blocks", []))), None)
+    if ch is None:
+        print(f"ブロックが見つかりません: {args.block}")
+        return 1
+    paras = tomllib.loads((workdir / f"chapters/{ch['id']}.paras.toml").read_text(encoding="utf-8"))["paras"]
+    para_map = {p["n"]: p["text"] for p in paras}
+    blk = next(b for b in ch["blocks"] if b["id"] == args.block)
     a, z = blk["paras"]
     expected = list(range(a, z + 1))
 
-    draft_path = workdir / "output/_work" / f"{args.chapter}_{args.block}_ja_numbered.md"
+    draft_path = workdir / "output/_work" / f"{ch['id']}_{args.block}_ja_numbered.md"
     if not draft_path.exists():
         print(f"ドラフトなし: {draft_path}")
         return 1
@@ -82,9 +93,9 @@ def main():
             continue
         src = para_map[n].strip()
         ja = draft[n]
-        # 原文が会話で訳が会話でない場合のみ警告する。
+        # 原文が会話（“ ”か[]括り）で訳が会話でない場合のみ警告する。
         # 訳側だけ「」で始まるのは、原文が鉤括弧を文中に置く場合の正当な語順変更。
-        if src.startswith("“") and not ja.startswith("「"):
+        if src.startswith(("“", "[", "［")) and not ja.startswith(("「", "『", "（", "(")):
             problems.append(f"P{n:03d} 原文は会話だが訳が会話になっていない")
         # 短い段落は日本語化で伸縮が大きいので、長さ比の検査は25字以上に限る
         ratio = len(ja) / max(len(src), 1)

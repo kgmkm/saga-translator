@@ -479,6 +479,34 @@ class TestAssemble(unittest.TestCase):
         self._run("--parallel")
         self.assertTrue((self.tmp / "output" / "全文_対訳.md").exists())
 
+    def test_chapter_heading_paragraph_not_duplicated(self):
+        # 本文先頭の章題段落と同文の自動見出しは二重化するので付けない
+        from _lib import save_chapters_meta, save_paras
+        (self.tmp / "output" / "ch001").mkdir(parents=True)
+        (self.tmp / "output" / "ch002").mkdir()
+        (self.tmp / "analysis").mkdir()
+        save_chapters_meta(self.tmp, {"work": {"title": "x"}, "chapters": [
+            {"id": "ch001", "title": "", "status": "emitted", "blocks": [
+                {"id": "b1", "paras": [1, 1], "status": "emitted"}]},
+            {"id": "ch002", "title": "第二章", "status": "emitted", "blocks": [
+                {"id": "b1", "paras": [1, 2], "status": "emitted"}]}]})
+        save_paras(self.tmp, "ch001", {"paras": [{"n": 1, "text": "前置き。"}]})
+        save_paras(self.tmp, "ch002", {"paras": [{"n": 1, "text": "第二章"}, {"n": 2, "text": "本文。"}]})
+        (self.tmp / "output" / "ch001" / "b1_ja.md").write_text("前置きの訳。\n", encoding="utf-8")
+        (self.tmp / "output" / "ch002" / "b1_ja.md").write_text(
+            "第二章　テスト章\n\n本文の訳。\n", encoding="utf-8")
+        (self.tmp / "analysis" / "titles.toml").write_text(
+            'title_src = "x"\ntitle_ja = "テスト作品"\n\n'
+            '[[chapters]]\nid = "ch001"\nsrc = ""\nja = ""\n\n'
+            '[[chapters]]\nid = "ch002"\nsrc = "第二章"\nja = "第二章　テスト章"\n',
+            encoding="utf-8", newline="\n")
+        self._run()
+        ch2 = (self.tmp / "output" / "ch002_ja.md").read_text(encoding="utf-8")
+        self.assertFalse(ch2.startswith("# "))
+        self.assertEqual(ch2.count("第二章　テスト章"), 1)
+        full = (self.tmp / "output" / "全文_訳文.md").read_text(encoding="utf-8")
+        self.assertEqual(full.count("第二章　テスト章"), 1)
+
 
 class TestUploadedImage(unittest.TestCase):
     def setUp(self):

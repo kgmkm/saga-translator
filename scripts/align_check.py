@@ -21,7 +21,7 @@ import tomllib
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-QUOTE_HEADS = ("「", "『", "（", "(", "“", "‘", '"', "'")  # 原文がASCII引用符の区間あり
+QUOTE_HEADS = ("「", "『", "（", "(", "“", "‘", '"', "'", "[", "［")  # 原文がASCII引用符・[]括り台詞の区間あり
 
 
 def is_dialogue(t: str) -> bool:
@@ -36,13 +36,23 @@ def main() -> int:
     args = ap.parse_args()
 
     wd = pathlib.Path(args.work_id)
-    meta = tomllib.loads((wd/"chapters_meta.toml").read_text(encoding="utf-8"))["chapters"][0]
-    paras = tomllib.loads((wd/f"chapters/{args.chapter}.paras.toml").read_text(encoding="utf-8"))["paras"]
+    chapters = tomllib.loads((wd/"chapters_meta.toml").read_text(encoding="utf-8"))["chapters"]
+    # --chapter に一致し、かつ対象ブロックを持つ章を優先。無ければ全章からブロックで探す
+    # （前置き章+本編章のように章が複数ある作品の ch002 以降でも点検できる）
+    ch = next((c for c in chapters
+               if c.get("id") == args.chapter
+               and any(b["id"] == args.block for b in c.get("blocks", []))), None)
+    if ch is None:
+        ch = next((c for c in chapters if any(b["id"] == args.block for b in c.get("blocks", []))), None)
+    if ch is None:
+        print(f"ブロックが見つかりません: {args.block}")
+        return 1
+    paras = tomllib.loads((wd/f"chapters/{ch['id']}.paras.toml").read_text(encoding="utf-8"))["paras"]
     pm = {p["n"]: p["text"] for p in paras}
-    blk = [b for b in meta["blocks"] if b["id"] == args.block][0]
+    blk = [b for b in ch["blocks"] if b["id"] == args.block][0]
     a, z = blk["paras"]
 
-    f = wd/"output"/"_work"/f"{args.chapter}_{args.block}_ja_numbered.md"
+    f = wd/"output"/"_work"/f"{ch['id']}_{args.block}_ja_numbered.md"
     if not f.exists():
         print(f"[{args.block}] ドラフトが無い（--emit 済み？）: {f}")
         return 1

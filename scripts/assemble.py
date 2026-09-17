@@ -46,7 +46,14 @@ def main() -> None:
         blocks = c.get("blocks") or []
         n_done = 0
         heading = (ch_titles.get(cid) or {}).get("ja") or c.get("title") or cid
-        if heading and heading != title_ja:  # 全文冒頭と同文の見出しは省く
+        # 本文先頭行（章題段落）に同じテキストがある場合は自動見出しを付けない（二重見出し防止）
+        first_line = ""
+        for b_probe in blocks:
+            f_probe = out / cid / f"{b_probe['id']}_ja.md"
+            if f_probe.exists():
+                first_line = (f_probe.read_text(encoding="utf-8").strip().splitlines() or [""])[0].strip()
+                break
+        if heading and heading != title_ja and first_line.lstrip("# ").strip() != heading.strip():  # 全文冒頭と同文の見出しは省く
             ch_ja.append(f"# {heading}")
         for b in blocks:
             f_ja = out / cid / f"{b['id']}_ja.md"
