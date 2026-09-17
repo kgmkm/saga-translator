@@ -1,7 +1,7 @@
 ---
 name: saga-translator
 description: Use when a novel file needs translating into Japanese.
-version: 0.8.2
+version: 0.8.3
 author: saga-translator
 license: MIT
 tags: [translation, novel, japanese, pipeline]
@@ -52,7 +52,7 @@ saga-translator は、ユーザが所持する小説ファイルを、個人的�
     ```
     python3 <skill>/scripts/check_align.py <work_id> --chapter ch001 --block bN
     ```
-    - 両者は別のチェック項目で補完しあっているので両方を必ず実行する。`qa_translation.py --emit` はマーカーを除去するので、align_check は `--emit` の前に走らせる（check_align は `--emit` 後でも走らせられる）。
+    - 両者は別のチェック項目で補完しあっているので両方を必ず実行する。**両ツールとも `output/_work/` のドラフト（`[Pn]` 付き）を読むため、`qa_translation.py --emit` より前に実行する**——`--emit` はドラフトを削除するので、emit 後は「ドラフトが無い」で検査不能になる。emit 後に修正が必要になったら、確定済みの `output/<ch>/bN_parallel.md` からドラフト（`[Pn]` 付き）を復元して再提出する。
 
 ## サブエージェント運用の落とし穴
 
@@ -80,6 +80,7 @@ saga-translator は、ユーザが所持する小説ファイルを、個人的�
 
 ## 落とし穴
 
+- **`qa_translation.py --emit` は `output/_work/` のドラフトを削除する。** jp_fix / align_check / check_align は emit より前に走らせる。順序を誤ってドラフトを失ったら `output/<ch>/bN_parallel.md`（原文＋訳文の対）から `[Pn]` 付きドラフトを復元できる。emit 後の訳語一括置換や誤検知対応はこの復元→再 emit で行う。
 - **日本語フィールドに原語が残る。** 分析 TOML の `note` / `memo` / `arcs` / `text` / `appearance` や訳文本文に、原文の簡体字や中国語語彙（例: 缆・涩・师・铃、星辰・搏動・紅暈・翕動・醇厚・凄絶、`凛老师`・`青涩`・`腼腆`）をそのまま残す事故が多発する。carry で次作へ伝播するので、見つけたら全作品を遡って直す。
   - `*_src` / `target_src` / `term_src` / `title_src` は原文キーなので原字のままが正しい。触らない。
   - 検出は日本語フィールドだけを対象にし、原文字段を除外する。既存のファイルを一括走査する道具を用意して、工程の区切りごとに回す。
