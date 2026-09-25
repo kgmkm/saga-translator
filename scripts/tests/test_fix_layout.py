@@ -46,6 +46,18 @@ class TestAnalyze(unittest.TestCase):
         text = "> [P001] 「あ\n\tい\n\n「訳文」\n"
         self.assertEqual(fix_layout.analyze(text, parallel=True), [])
 
+    def test_parallel_multiline_ja_block_is_not_glued(self):
+        # 対訳の訳文側は複数行(段落内改行)を持ちうる。融合疑いは出さない
+        text = "> [P001] 原文\n\n「司令？」\n神田優の声が沈黙を破った。\n「あなたは……」\n"
+        self.assertEqual(fix_layout.analyze(text, parallel=True), [])
+
+    def test_parallel_missing_tab_is_detected(self):
+        # 原文側ブロックの継続行に \t が無い(旧形式) → 原文タブ欠け
+        text = "> [P001] 原文一行\n原文二行\n原文三行\n\n訳文。\n"
+        issues = fix_layout.analyze(text, parallel=True)
+        kinds = [k for k, _ in issues]
+        self.assertEqual(kinds.count("原文タブ欠け"), 2)
+
 
 class TestFix(unittest.TestCase):
     def test_fix_appends_close_and_separates(self):
@@ -62,6 +74,15 @@ class TestFix(unittest.TestCase):
         self.assertEqual(appended, 0)
         self.assertEqual(blocks, ["「うた\nつづき」"])
 
+    def test_fix_splits_glued_blocks(self):
+        # 収支が途中で 0 に戻るブロックは空行区切りへ再整形して分割する
+        text = "「あ\nい」\nう。\n"
+        blocks, appended = fix_layout.fix_blocks(fix_layout.split_blocks(text.split("\n")), parallel=False)
+        self.assertEqual(appended, 0)
+        fixed = "\n\n".join(blocks) + "\n"
+        self.assertIn("「あ\nい」\n\nう。", fixed)
+        self.assertEqual(fix_layout.analyze(fixed), [])
+
     def test_fix_parallel_keeps_original(self):
         text = "> [P001] “原\n\t文。”\n\n「あ\n続き。\n"
         blocks, appended = fix_layout.fix_blocks(fix_layout.split_blocks(text.split("\n")), parallel=True)
@@ -70,6 +91,20 @@ class TestFix(unittest.TestCase):
         self.assertIn("> [P001] “原\n\t文。”", fixed)
         self.assertIn("「あ」\n\n続き。", fixed)
         self.assertEqual(fix_layout.analyze(fixed, parallel=True), [])
+
+    def test_fix_tabs_adds_tab_to_source_continuation(self):
+        text = "> [P001] 原文一行\n原文二行\n\n訳文。\n"
+        lines, n = fix_layout.fix_tabs(text.split("\n"))
+        self.assertEqual(n, 1)
+        fixed = "\n".join(lines)
+        self.assertIn("> [P001] 原文一行\n\t原文二行", fixed)
+        self.assertEqual(fix_layout.analyze(fixed, parallel=True), [])
+
+    def test_fix_tabs_does_not_touch_ja_side(self):
+        text = "> [P001] 原文\n\n訳文一行\n訳文二行\n"
+        lines, n = fix_layout.fix_tabs(text.split("\n"))
+        self.assertEqual(n, 0)
+        self.assertEqual(lines, text.split("\n"))
 
 
 class TestCli(unittest.TestCase):
@@ -99,6 +134,20 @@ class TestCli(unittest.TestCase):
         got = p.read_text(encoding="utf-8")
         self.assertIn("「？！」", got)
         self.assertIn("\n\n地の文。", got)
+
+    def test_parallel_tab_fix(self):
+        p = self.tmp / "output" / "ch001_parallel.md"
+        p.write_text("> [P001] 原文一行\n原文二行\n\n訳文。\n", encoding="utf-8")
+        self.assertEqual(self._run(), 1)
+        self.assertEqual(self._run("--fix"), 0)
+        got = p.read_text(encoding="utf-8")
+        self.assertIn("> [P001] 原文一行\n\t原文二行", got)
+
+    def test_old_layout_no_output_dir(self):
+        # 旧形式: 出力が work 直下にある場合でも動く
+        (self.tmp / "output").rmdir()
+        (self.tmp / "ch001_ja.md").write_text("問題なし。\n", encoding="utf-8")
+        self.assertEqual(self._run(), 0)
 
     def test_clean_exit_zero(self):
         (self.tmp / "output" / "ch001_ja.md").write_text("問題なし。\n", encoding="utf-8")
