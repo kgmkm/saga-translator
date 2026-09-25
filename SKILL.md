@@ -1,7 +1,7 @@
 ---
 name: saga-translator
 description: Use when a novel file needs translating into Japanese.
-version: 0.8.3
+version: 0.9.0
 author: saga-translator
 license: MIT
 tags: [translation, novel, japanese, pipeline]
@@ -91,7 +91,7 @@ python3 <skill>/scripts/build_context.py <workdir> --chapter ch001 --block b1
    ```bash
    python3 <skill>/scripts/qa_translation.py <workdir> --chapter ch001 --block b1 --emit
    ```
-   検証は段落番号の連続性・段落数一致・訳語チェック（登場人物表の原語が訳文に残っていないか）・非 JIS 漢字チェック（CP932 外＋言語 pack の NON_JIS_HAN）。詳細は `references/data-schema.md` の「処理フローでの参照関係」。
+   検証は段落番号の連続性・段落数一致・訳語チェック（登場人物表の原語が訳文に残っていないか）・非 JIS 漢字チェック（CP932 外＋言語 pack の NON_JIS_HAN）・レイアウト（段落をまたぐ引用の閉じ漏れで段落が融合していないか）。詳細は `references/data-schema.md` の「処理フローでの参照関係」。
    合格なら `output/chXXX/bY_ja.md` を確定。不合格なら終了コード 1 で止まるので、指摘を直して再提出する。
 5. 記録：
    ```bash
@@ -109,6 +109,7 @@ python3 <skill>/scripts/build_context.py <workdir> --chapter ch001 --block b1
 - **この章だけやり直す**：該当ブロックの `_work` ドラフトを消して手順 4 を再実行。
 - **再分析**：該当章の分析分を消して手順 3 をやり直す。
 - **翻訳モデルの指定**：変更はいつでも行える。`record_meta.py` がモデル毎に記録するので品質比較ができる。
+- **レイアウトを直す**：`fix_layout.py <workdir>` で検査、`--fix` で修復（不閉じ行の補完と段落区切りの再整形）。
 
 ## 鉄則
 
@@ -174,12 +175,13 @@ python3 <skill>/scripts/build_context.py <workdir> --chapter ch001 --block b1
 ### 翻訳・検証
 
 - **`qa_translation.py --emit` は `output/_work/` のドラフトを削除する。** jp_fix / align_check / check_align は emit より前に走らせる。順序を誤ってドラフトを失ったら `output/<ch>/bN_parallel.md`（原文＋訳文の対）から `[Pn]` 付きドラフトを復元できる。emit 後の訳語一括置換や誤検知対応はこの復元→再 emit で行う。
+- **段落をまたぐ台詞の `」` 閉じ漏れは emit で段落の区切りを消す。** 中国語原作は台詞が複数段落にまたがるとき各段落頭に `“` を繰り返し置き、最後の段落で一度だけ `”` を閉じる。これをそのまま `「` に写すと閉じの無い行が生まれ、`layout_lines` が次に閉じるまでの段落を空行なしで連結する（90 行超が 1 ブロックに潰れた実例がある）。訳出時は各段落の末尾に `」` を補う。ドラフト段階では `qa_translation.py` の `merged_paragraphs` 検査が段落融合を検出する（2 段落は警告・3 段落以上は不合格）。確定済みの作品に見つけた場合は `scripts/fix_layout.py <workdir> --fix` で修復する（不閉じ行に `」` を補い、段落区切りを再整形。対訳の原文側は触らない）。
 - **日本語フィールドに原語が残る。** 分析 TOML の `note` / `memo` / `arcs` / `text` / `appearance` や訳文本文に、原文の簡体字や中国語語彙（例: 缆・涩・师・铃、星辰・搏動・紅暈・翕動・醇厚・凄絶、`凛老师`・`青涩`・`腼腆`）をそのまま残す事故が多発する。carry で次作へ伝播するので、見つけたら全作品を遡って直す。
   - `*_src` / `target_src` / `term_src` / `title_src` は原文キーなので原字のままが正しい。触らない。
   - 検出は日本語フィールドだけを対象にし、原文字段を除外する。既存のファイルを一括走査する道具を用意して、工程の区切りごとに回す。
   - `凄絶な悲鳴`（中国語の「凄厉」）のように、日本語で成立するが不自然な語は、後続語（悲鳴・絶叫・哀鳴）で判定して `凄まじい悲鳴` に直す。`凄絶` 単体の機械置換はしない。
   - 段落ごと未訳のまま（中国語の語彙を漢字のまま並べただけの）行が紛れることがある。語の置換ではなく原文から訳し直す。
-- **ドラフト検査コード**（鉄則11）。ツールを呼ぶ前に自分で走らせる：
+- **ドラフト検査コード**（鉄則11）。ツールを呼ぶ前に自分で走らせる。鉤括弧の均衡は `qa_translation.py` の `merged_paragraphs` 検査が自動で見る：
   ```python
   import re
   ns = [int(x) for x in re.findall(r"^\[P(\d+)\]", open(F).read(), re.M)]

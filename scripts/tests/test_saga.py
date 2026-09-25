@@ -236,6 +236,41 @@ class TestQa(unittest.TestCase):
         report, _ = run_qa(self.tmp, "ch001", "b1", draft)
         self.assertTrue(report["checks"]["non_jis_han"]["pass"])
 
+    def test_qa_merged_paragraphs_fail(self):
+        # 段落をまたぐ閉じ漏れ: layout が段落の区切りを消す(3段落以上は不合格)
+        from qa_translation import run_qa
+        draft = self.tmp / "draft.md"
+        draft.write_text(
+            "[P001] 「台詞が開いたまま\n\n[P002] 段落が続き、\n\n[P003] さらに続く。\n\n[P004] 訳四。",
+            encoding="utf-8")
+        report, _ = run_qa(self.tmp, "ch001", "b1", draft)
+        self.assertFalse(report["pass"])
+        found = report["checks"]["merged_paragraphs"]["found"]
+        self.assertEqual(found[0]["first"], 1)
+        self.assertGreaterEqual(found[0]["count"], 3)
+
+    def test_qa_merged_two_paragraphs_warn(self):
+        # 2段落の融合は警告(不合格にはしない)
+        from qa_translation import run_qa
+        draft = self.tmp / "draft.md"
+        draft.write_text(
+            "[P001] 「台詞が開いたまま\n\n[P002] 閉じる」\n\n[P003] 訳三。\n\n[P004] 訳四。",
+            encoding="utf-8")
+        report, _ = run_qa(self.tmp, "ch001", "b1", draft)
+        self.assertTrue(report["checks"]["merged_paragraphs"]["found"])
+        self.assertTrue(report["pass"])
+
+    def test_qa_song_within_paragraph_not_merged(self):
+        # 1段落内の複数行(歌・詩)は段落融合ではない
+        from qa_translation import run_qa
+        draft = self.tmp / "draft.md"
+        draft.write_text(
+            "[P001] 「うた いち\nうた に\nうた さん」\n\n[P002] 訳二。\n\n[P003] 訳三。\n\n[P004] 訳四。",
+            encoding="utf-8")
+        report, _ = run_qa(self.tmp, "ch001", "b1", draft)
+        self.assertTrue(report["checks"]["merged_paragraphs"]["pass"])
+        self.assertTrue(report["pass"])
+
     def test_find_non_jis_han(self):
         from _lib import find_non_jis_han
         self.assertEqual(find_non_jis_han("日本語の文章。"), [])

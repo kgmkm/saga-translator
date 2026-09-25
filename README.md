@@ -34,6 +34,7 @@ saga-translator は、**あなたが所持する小説ファイルを、個人�
 5. 翻訳(エージェントが本文を訳す) → `qa_translation.py --emit` — 機械QA合格で正式出力
 6. `record_meta.py` — 版記録(model / prompt_version)
 7. `assemble.py` — 全文訳文・目次を統合。完了後に原文を削除
+8. `fix_layout.py` — レイアウト検査・修復（段落をまたぐ引用の閉じ漏れで潰れた段落区切りを直す）
 
 詳細は `SKILL.md` と `references/prompt-design.md` を参照。
 

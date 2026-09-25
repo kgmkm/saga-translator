@@ -98,6 +98,12 @@ def run_qa(work: Path, cid: str, bid: str, draft: Path, strict: bool = True) -> 
     if non_jis:
         ok = False
 
+    merged = find_merged_paragraphs(items)
+    fatal = [m for m in merged if m["count"] >= 3]
+    report["checks"]["merged_paragraphs"] = {"pass": not fatal, "found": merged}
+    if fatal:
+        ok = False
+
     report["pass"] = ok
     return report, items
 
@@ -128,6 +134,46 @@ def layout_lines(text: str) -> str:
     if cur:
         blocks.append("\n".join(cur))
     return "\n\n".join(blocks)
+
+
+def find_merged_paragraphs(items: list[tuple[int, str]]) -> list[dict]:
+    """段落をまたいだ閉じ漏れで、段落の区切りが消えた範囲を返す。
+
+    layout_lines は引用が閉じるまで空行を捨てて連結する。日本語は段落ごとに
+    台詞を閉じる規約なので、段落の区切りが消えていれば閉じ漏れ事故(中国語
+    原作の段落跨ぎ台詞をそのまま写したもの)とみなす。1 段落の内部改行
+    (歌・詩)は融合にならない。
+
+    段落の区切りに一意のマーカー行を挟んで layout_lines を走らせ、本文と
+    同居したまま残ったマーカーから、融合した範囲を出す。
+    戻り値: [{"first": 先頭段落番号, "last": 末尾段落番号, "count": 段落数}]
+    """
+    if len(items) < 2:
+        return []
+    sent = "\x00"
+    parts: list[str] = []
+    for i, (_, t) in enumerate(items):
+        parts.append(t)
+        if i < len(items) - 1:
+            parts.append(f"{sent}i{i}{sent}")
+    merged: list[dict] = []
+    for block in layout_lines("\n\n".join(parts)).split("\n\n"):
+        lines = block.split("\n")
+        inside: list[int] = []
+        for ln in lines:
+            if len(ln) > 2 and ln.startswith(sent) and ln.endswith(sent):
+                try:
+                    inside.append(int(ln[2:-1]))
+                except ValueError:
+                    continue
+        if not inside:
+            continue
+        if all(l.startswith(sent) and l.endswith(sent) for l in lines):
+            continue  # マーカーだけのブロック = 融合していない
+        first_i, last_i = inside[0], inside[-1]
+        merged.append({"first": items[first_i][0], "last": items[last_i + 1][0],
+                       "count": last_i - first_i + 2})
+    return merged
 
 
 def emit(work: Path, cid: str, bid: str, items: list[tuple[int, str]]) -> None:
