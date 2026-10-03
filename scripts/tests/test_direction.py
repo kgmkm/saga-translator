@@ -86,7 +86,7 @@ class TestDirection(unittest.TestCase):
         self.assertTrue(pat.match("[chapter:第一章 再会]"))
 
     def test_detect_ja2zh(self):
-        from detect.ja2zh import JA2ZH, find_jp_quotes, find_kana, find_non_gbk_han
+        from detect.ja2zh import JA2ZH, find_jp_quotes, find_kana, find_non_gbk_han  # noqa: F401
         self.assertEqual(JA2ZH.get("剣"), "剑")
         self.assertTrue(find_kana("あ"))
         self.assertFalse(find_kana("啊"))

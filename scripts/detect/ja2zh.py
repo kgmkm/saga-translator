@@ -129,3 +129,177 @@ def find_non_gbk_han(text: str) -> list[tuple[str, int]]:
         except UnicodeEncodeError:
             counts[ch] = counts.get(ch, 0) + 1
     return sorted(counts.items(), key=lambda kv: -kv[1])
+
+
+# ── P0-3 拡張 ──────────────────────────────────────────────────────────
+
+# zh2ja から Finding / ResidueConfig を再エクスポート（呼び出し側が一貫して使えるように）
+from detect.zh2ja import Finding, ResidueConfig  # noqa: E402
+
+__all__ = [  # type: ignore[attr-defined]
+    "Finding",
+    "ResidueConfig",
+    "find_kana",
+    "find_jp_quotes",
+    "find_trad_markers",
+    "find_vfm",
+    "find_rb_kana",
+    "find_non_gbk_han",
+    "find_ja_residue",
+]
+
+
+# 誤検知許容（ja→zh 方向の追加 per-file allow があればここに）
+_JA_ALLOW_JOURNAL = {"・", "×", "※", "→", "◆", "◇"}
+
+
+def find_ja_residue(text: str, config: ResidueConfig | None = None) -> list[Finding]:
+    """訳文(zh)に残った日本語残渣（仮名・鉤括弧・VFMルビ・[[rb:]]・
+    日本語字形・繁体字）を統合検出する。"""
+    findings: list[Finding] = []
+
+    lines = text.split("\n")
+    # 仮名
+    for lineno, line in enumerate(lines, 1):
+        for ch, cnt in find_kana(line):
+            findings.append(Finding(
+                rule="kana",
+                value=ch,
+                context=line.strip()[:80],
+                line=lineno,
+            ))
+
+    # 鉤括弧
+    for lineno, line in enumerate(lines, 1):
+        for ch, cnt in find_jp_quotes(line):
+            findings.append(Finding(
+                rule="jp_quote",
+                value=ch,
+                context=line.strip()[:80],
+                line=lineno,
+            ))
+
+    # VFM ルビ
+    for lineno, line in enumerate(lines, 1):
+        for m in VFM.finditer(line):
+            findings.append(Finding(
+                rule="vfm_ruby",
+                value=m.group(0),
+                context=line.strip()[:80],
+                line=lineno,
+            ))
+
+    # [[rb:…]]
+    for lineno, line in enumerate(lines, 1):
+        for m in RB_ANY.finditer(line):
+            findings.append(Finding(
+                rule="rb_kana",
+                value=m.group(0),
+                context=line.strip()[:80],
+                line=lineno,
+            ))
+
+    # 非GBK漢字 + 日本語字形
+    for lineno, line in enumerate(lines, 1):
+        for ch, cnt in find_non_gbk_han(line):
+            findings.append(Finding(
+                rule="ja_shape",
+                value=ch,
+                context=line.strip()[:80],
+                line=lineno,
+                safe_fix=JA2ZH.get(ch),
+            ))
+
+    # 繁体字マーカー
+    for lineno, line in enumerate(lines, 1):
+        for ch, cnt in find_trad_markers(line):
+            findings.append(Finding(
+                rule="trad_marker",
+                value=ch,
+                context=line.strip()[:80],
+                line=lineno,
+            ))
+
+    return findings
+
+
+# ── CLI ─────────────────────────────────────────────────────────────────
+
+def _main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="ja→zh 残渣検出: 中国語訳に残った日本語残渣を検出")
+    parser.add_argument("path", nargs="+", help="ファイルまたはディレクトリ")
+    parser.add_argument("--json", action="store_true",
+                        help="JSON 形式で機械可読出力")
+    args = parser.parse_args()
+
+    all_findings: list[dict] = []
+
+    for p in args.path:
+        p_obj = pathlib.Path(p)
+        if p_obj.is_dir():
+            for f in sorted(p_obj.rglob("*")):
+                if f.suffix in (".md", ".txt"):
+                    try:
+                        text = f.read_text(encoding="utf-8")
+                    except OSError:
+                        continue
+                    findings = find_ja_residue(text)
+                    if args.json:
+                        all_findings.extend([{
+                            "file": str(f),
+                            "rule": fd.rule,
+                            "value": fd.value,
+                            "context": fd.context,
+                            "line": fd.line,
+                            "safe_fix": fd.safe_fix,
+                        } for fd in findings])
+                    else:
+                        name = f.relative_to(pathlib.Path.cwd()) if f.is_relative_to(
+                            pathlib.Path.cwd()) else f
+                        for fd in findings:
+                            sf = f" → {fd.safe_fix}" if fd.safe_fix else ""
+                            print(f"  {name}:L{fd.line} [{fd.rule}] {fd.value}{sf}")
+        elif p_obj.is_file():
+            try:
+                text = p_obj.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            findings = find_ja_residue(text)
+            if args.json:
+                all_findings.extend([{
+                    "file": str(p_obj),
+                    "rule": fd.rule,
+                    "value": fd.value,
+                    "context": fd.context,
+                    "line": fd.line,
+                    "safe_fix": fd.safe_fix,
+                } for fd in findings])
+            else:
+                name = p_obj.relative_to(pathlib.Path.cwd()) if p_obj.is_relative_to(
+                    pathlib.Path.cwd()) else p_obj
+                for fd in findings:
+                    sf = f" → {fd.safe_fix}" if fd.safe_fix else ""
+                    print(f"  {name}:L{fd.line} [{fd.rule}] {fd.value}{sf}")
+
+    seen = len(all_findings)
+
+    if args.json:
+        import json
+        print(json.dumps(all_findings, ensure_ascii=False, indent=2))
+    else:
+        if seen == 0:
+            print("✅ 検出なし")
+        else:
+            print(f"🔍 {seen} 件検出")
+            if seen > 10:
+                print(f"  … 他 {seen - 10} 件（--json で全件表示）")
+
+    return 1 if seen else 0
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    _sys.exit(_main())
