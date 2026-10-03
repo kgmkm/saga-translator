@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import re
+import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -448,8 +451,376 @@ def cmd_analyze_commit(work: Path, delta_path: Path) -> int:
 
 
 # ---------------------------------------------------------------------------
-# main
+# prepare サブコマンド
 # ---------------------------------------------------------------------------
+
+def _find_first_undone(work: Path, chapters: list[dict], dst: str) -> tuple[str, str, dict] | None:
+    """最初の未確定ブロック（output/<ch>/<bid><suffix>.md が存在しない）を返す。
+    戻り値: (cid, bid, block_dict)"""
+    suffix = target_suffix(dst)
+    for ch in chapters:
+        cid = ch["id"]
+        out_dir = work / "output" / cid
+        for b in ch.get("blocks", []):
+            bid = b["id"]
+            if not (out_dir / f"{bid}{suffix}.md").exists():
+                return cid, bid, b
+    return None
+
+
+def cmd_prepare(work: Path, chapter: str | None, block: str | None) -> int:
+    if not work.is_dir():
+        print(f"[prepare] エラー: ディレクトリが見つかりません: {work}", file=sys.stderr)
+        return 1
+
+    meta = load_chapters_meta(work)
+    chapters = meta.get("chapters", [])
+    if not chapters:
+        print(f"[prepare] エラー: chapters が空です", file=sys.stderr)
+        return 1
+
+    src, dst = direction(work)
+    suffix = target_suffix(dst)
+
+    if chapter and block:
+        cid, bid = chapter, block
+    elif chapter:
+        cid = chapter
+        ch = next((c for c in chapters if c["id"] == cid), None)
+        if ch is None:
+            print(f"[prepare] エラー: 章 {cid} が見つかりません", file=sys.stderr)
+            return 1
+        result = _find_first_undone(work, [ch], dst)
+        if result is None:
+            print(f"[prepare] 章 {cid} は全ブロック確定済みです", file=sys.stderr)
+            return 1
+        cid, bid, _ = result
+    else:
+        result = _find_first_undone(work, chapters, dst)
+        if result is None:
+            print(f"[prepare] 全ブロック確定済みです", file=sys.stderr)
+            return 1
+        cid, bid, _ = result
+
+    # コンテキスト生成
+    work_dir_obj = work
+    (work_dir_obj / "translation_input").mkdir(parents=True, exist_ok=True)
+    from build_context import _stage_impl as bc_stage
+    bc_stage(work, cid, bid, "translation")
+
+    ctx_path = work / "translation_input" / f"{cid}_{bid}_translation.md"
+
+    # 既知の訳語候補を表示
+    chars = load_characters(work)
+    term_count = len(chars.get("characters", []))
+    terms = _load_terms_list(work)
+    vocab_count = len(terms)
+
+    # ブロック情報
+    ch_obj = next(c for c in chapters if c["id"] == cid)
+    blk = next(b for b in ch_obj["blocks"] if b["id"] == bid)
+    s, e = blk["paras"]
+
+    print(f"[prepare] 対象: {cid}/{bid}（paras {s}-{e}, {e - s + 1}段落）")
+    print(f"[prepare] コンテキスト: {ctx_path}")
+    print(f"[prepare] 既知の訳語候補: {vocab_count}件 / 登場人物: {term_count}人")
+    return 0
+
+
+def _load_terms_list(work: Path) -> list[dict]:
+    """terms.toml の terms 配列を返す。"""
+    try:
+        t = load_terms(work)
+        return t.get("terms", [])
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# commit サブコマンド
+# ---------------------------------------------------------------------------
+
+def _draft_path(work: Path, cid: str, bid: str) -> Path:
+    _, dst = direction(work)
+    suf = target_suffix(dst)
+    return work / "output" / "_work" / f"{cid}_{bid}{suf}_numbered.md"
+
+
+def _output_path(work: Path, cid: str, bid: str) -> Path:
+    _, dst = direction(work)
+    suf = target_suffix(dst)
+    return work / "output" / cid / f"{bid}{suf}.md"
+
+
+def cmd_commit(work: Path, chapter: str, block: str,
+               model: str, prompt_version: str) -> int:
+    if not work.is_dir():
+        print(f"[commit] エラー: ディレクトリが見つかりません: {work}", file=sys.stderr)
+        return 1
+
+    # 排他ロック
+    if not _acquire_lock(work):
+        print("[commit] エラー: 他の書き手がロック中です（終了コード 3）", file=sys.stderr)
+        return 3
+
+    started = time.time()
+    cid, bid = chapter, block
+    draft_p = _draft_path(work, cid, bid)
+    out_p = _output_path(work, cid, bid)
+
+    src, dst = direction(work)
+
+    # 冪等リカバリ: emit 済みなら記録だけ補完
+    meta = load_chapters_meta(work)
+    is_emitted = False
+    for c in meta.get("chapters", []):
+        if c["id"] == cid:
+            for b in c.get("blocks", []):
+                if b["id"] == bid and b.get("status") == "emitted":
+                    is_emitted = True
+                    break
+
+    if is_emitted and out_p.exists():
+        print(f"[commit] {cid}/{bid} は確定済みです。記録だけ補完します")
+        _record_translation_meta(work, cid, bid, model, prompt_version)
+        elapsed = time.time() - started
+        print(f"[commit] {cid}/{bid} 記録補完完了 ({elapsed:.1f}s)")
+        _release_lock(work)
+        return 0
+
+    if not draft_p.exists():
+        print(f"[commit] エラー: ドラフトがありません: {draft_p}", file=sys.stderr)
+        _release_lock(work)
+        return 1
+
+    # 1) スナップショット
+    text = draft_p.read_text(encoding="utf-8")
+    commit_id = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    snap_dir = work / "output" / "_work" / "commit" / f"{ts}_{cid}_{bid}"
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    snap_draft = snap_dir / "draft.md"
+    shutil.copy2(str(draft_p), str(snap_draft))
+    print(f"[commit] スナップショット: {snap_draft}  commit_id={commit_id}")
+
+    report: dict[str, object] = {"commit_id": commit_id, "snapshot": str(snap_draft),
+                                 "chapter": cid, "block": bid, "stages": {}}
+
+    try:
+        # 2) 字形整形（glyph のみ）
+        from normalize.zh2ja import shape_glyph
+        shaped, applied_list = shape_glyph(text)
+        if applied_list:
+            items = ", ".join(f"{a['item']}->{a['replacement']}(x{a['count']})" for a in applied_list)
+            print(f"[commit] 字形整形: {len(applied_list)}件適用 {items}")
+        else:
+            print(f"[commit] 字形整形: 適用なし")
+        report["stages"]["shape_glyph"] = {"applied": len(applied_list)}
+
+        # 書き戻し
+        draft_p.write_text(shaped, encoding="utf-8")
+
+        # 3) align 検査
+        from align import check_block, _load_acks
+        acks = _load_acks(work)
+        findings = check_block(work, cid, bid, acks=acks)
+        fatals = [f for f in findings if f.severity == "fatal"]
+        confirms = [f for f in findings if f.severity == "confirm"]
+        # confirm のうち ack の効いていないものを数える
+        dh = hashlib.sha256(draft_p.read_bytes()).hexdigest()[:12]
+        unacked_confirms = [
+            f for f in confirms
+            if not any(
+                str(a.get("block", bid)) == bid
+                and f.para in (int(p) for p in (a.get("paras") or []))
+                and str(a.get("draft_hash", "")) == dh
+                for a in acks
+            )
+        ]
+        report["stages"]["align"] = {"fatal": len(fatals), "confirm_unacked": len(unacked_confirms)}
+
+        if fatals:
+            for f in fatals:
+                print(f"[commit] fatal: P{f.para or '?'} {f.kind}: {f.detail}")
+            _write_commit_report(snap_dir, report)
+            print(f"[commit] 中止。ドラフトを直して再実行。", file=sys.stderr)
+            _release_lock(work)
+            return 1
+
+        if unacked_confirms:
+            for f in unacked_confirms:
+                print(f"[commit] confirm(未ack): P{f.para or '?'} {f.kind}: {f.detail}")
+            print(f"[commit] 失敗: confirm {len(unacked_confirms)} 件が未ackです。align.py ack を使って確認してください。", file=sys.stderr)
+            _write_commit_report(snap_dir, report)
+            _release_lock(work)
+            return 1
+
+        print(f"[commit] align: PASS (fatal={len(fatals)}, confirm(未ack)={len(unacked_confirms)})")
+
+        # 4) QA
+        from qa_translation import run_qa
+        qa_report, items = run_qa(work, cid, bid, draft_p)
+        report["stages"]["qa"] = {"pass": qa_report["pass"],
+                                  "checks": {k: v["pass"] for k, v in qa_report["checks"].items()}}
+
+        if not qa_report["pass"]:
+            for k, v in qa_report["checks"].items():
+                if not v["pass"]:
+                    print(f"[commit] QA FAIL: {k}: {v}")
+            _write_commit_report(snap_dir, report)
+            print(f"[commit] 中止。QA 不合格。", file=sys.stderr)
+            _release_lock(work)
+            return 1
+
+        print(f"[commit] QA: PASS")
+
+        # 5) 残渣検査（zh→ja 方向のみ）
+        if src == "zh" and dst == "ja":
+            from detect.zh2ja import ResidueConfig, find_zh_vocab
+
+            # house_style の known_terms を読み込む
+            known_terms: set[str] = set()
+            for house_candidate in [work / "_house" / "house_style.toml",
+                                    work.parent / "_house" / "house_style.toml"]:
+                try:
+                    h_data = _load_toml_safe(house_candidate)
+                    if h_data:
+                        kt = h_data.get("residue", {}).get("known_terms", [])
+                        if isinstance(kt, list):
+                            known_terms.update(str(x) for x in kt)
+                except Exception:
+                    pass
+
+            body_text = "\n".join(t for _, t in items)
+            rconfig = ResidueConfig(known_terms=known_terms)
+            residue_findings = find_zh_vocab(body_text, config=rconfig)
+
+            # safe_fix があるものを「候補」として表示
+            residue_candidates = [f for f in residue_findings if f.safe_fix]
+            residue_errors = [f for f in residue_findings if not f.safe_fix]
+            report["stages"]["residue"] = {"candidates": len(residue_candidates),
+                                           "errors": len(residue_errors)}
+
+            if residue_errors:
+                for f in residue_errors:
+                    sf = f" → {f.safe_fix}" if f.safe_fix else ""
+                    ctx = f.context[:40]
+                    print(f"[commit] 残渣: 「{f.value}」{sf} (L{f.line}: {ctx})")
+                _write_commit_report(snap_dir, report)
+                print(f"[commit] 中止。残渣 {len(residue_errors)} 件を修正してください。", file=sys.stderr)
+                _release_lock(work)
+                return 1
+
+            if residue_candidates:
+                for f in residue_candidates:
+                    print(f"[commit] 残渣(候補): 「{f.value}」→ {f.safe_fix} (L{f.line})")
+
+            print(f"[commit] 残渣検査: PASS（候補 {len(residue_candidates)} 件）")
+            report["stages"]["residue"]["pass"] = True
+
+        elif src == "ja" and dst == "zh":
+            from detect.ja2zh import find_ja_residue
+            body_text = "\n".join(t for _, t in items)
+            ja_residue = find_ja_residue(body_text)
+            report["stages"]["residue"] = {"errors": len(ja_residue)}
+            if ja_residue:
+                for f in ja_residue[:20]:
+                    print(f"[commit] 残渣: {f}")
+                _write_commit_report(snap_dir, report)
+                print(f"[commit] 中止。残渣 {len(ja_residue)} 件を修正してください。", file=sys.stderr)
+                _release_lock(work)
+                return 1
+            print(f"[commit] 残渣検査: PASS")
+
+        # 6) 確定（emit --archive）
+        from qa_translation import emit
+        emit(work, cid, bid, items, archive=True)
+
+        out_p = _output_path(work, cid, bid)
+        print(f"[commit] 確定: {out_p}")
+
+        # 7) 版記録
+        _record_translation_meta(work, cid, bid, model, prompt_version)
+
+        # 8) 次の prepare
+        elapsed = time.time() - started
+        n_residue = 0
+        r_stage = report["stages"].get("residue", {})
+        if isinstance(r_stage, dict):
+            rc = r_stage.get("candidates", 0)
+            n_residue = len(rc) if isinstance(rc, list) else int(rc)
+        if src == "ja" and dst == "zh":
+            re = r_stage.get("errors", 0)
+            n_residue = len(re) if isinstance(re, list) else int(re)
+
+        print(f"[commit] {cid}/{bid} を確定 (commit_id={commit_id}, {elapsed:.1f}s)")
+        print(f"[commit] 残渣候補: {n_residue}件")
+
+        meta2 = load_chapters_meta(work)
+        next_result = _find_first_undone(work, meta2.get("chapters", []), dst)
+        if next_result:
+            ncid, nbid, _ = next_result
+            (work / "translation_input").mkdir(parents=True, exist_ok=True)
+            from build_context import _stage_impl as bc_stage
+            bc_stage(work, ncid, nbid, "translation")
+            nctx = work / "translation_input" / f"{ncid}_{nbid}_translation.md"
+            print(f"[next] {ncid}/{nbid} コンテキスト: {nctx}")
+        else:
+            print(f"[next] 全ブロック確定済み")
+
+        _write_commit_report(snap_dir, report)
+        _release_lock(work)
+        return 0
+
+    except Exception as e:
+        print(f"[commit] エラー: {e}", file=sys.stderr)
+        _write_commit_report(snap_dir, report)
+        _release_lock(work)
+        return 1
+    except BaseException:
+        _release_lock(work)
+        raise
+
+
+def _record_translation_meta(work: Path, cid: str, bid: str,
+                              model: str, prompt_version: str) -> None:
+    """版記録。model/prompt_version はオプション"""
+    import argparse
+    meta = load_chapters_meta(work)
+    rec = {
+        "model": model if model else "unknown",
+        "prompt_version": prompt_version if prompt_version else "unknown",
+        "translated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "tokens_in": "unmeasured",
+        "tokens_out": "unmeasured",
+    }
+    for c in meta["chapters"]:
+        if c["id"] == cid:
+            for b in c["blocks"]:
+                if b["id"] == bid:
+                    b["translation"] = rec
+            save_chapters_meta(work, meta)
+            return
+    print(f"[meta] 警告: {cid}/{bid} が見つかりません", file=sys.stderr)
+
+
+def _write_commit_report(snap_dir: Path, report: dict) -> None:
+    """commit スナップショットディレクトリに report.json を書く。"""
+    import json
+    report_p = snap_dir / "report.json"
+    report_p.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _load_toml_safe(path: Path) -> dict | None:
+    """TOML を安全に読む（無ければ None）。"""
+    if not path.exists():
+        return None
+    try:
+        with open(path, "rb") as f:
+            import tomllib
+            return tomllib.load(f)
+    except Exception:
+        return None
 
 def main() -> None:
     utf8()
@@ -465,6 +836,20 @@ def main() -> None:
     p_ac.add_argument("work", help="作品ディレクトリ")
     p_ac.add_argument("--delta", required=True, help="差分TOMLファイル")
 
+    # prepare
+    p_prep = sub.add_parser("prepare", help="翻訳コンテキスト準備")
+    p_prep.add_argument("work", help="作品ディレクトリ")
+    p_prep.add_argument("--chapter", default=None, help="章（例: ch001）")
+    p_prep.add_argument("--block", default=None, help="ブロック（例: b2）")
+
+    # commit
+    p_com = sub.add_parser("commit", help="翻訳ブロックの確定")
+    p_com.add_argument("work", help="作品ディレクトリ")
+    p_com.add_argument("--chapter", required=True, help="章（例: ch001）")
+    p_com.add_argument("--block", required=True, help="ブロック（例: b1）")
+    p_com.add_argument("--model", default="unknown", help="翻訳に使ったモデル")
+    p_com.add_argument("--prompt-version", default="unknown", help="プロンプトバージョン")
+
     args = ap.parse_args()
 
     work = Path(args.work).resolve()
@@ -473,6 +858,11 @@ def main() -> None:
         raise SystemExit(cmd_status(work))
     elif args.command == "analyze-commit":
         raise SystemExit(cmd_analyze_commit(work, Path(args.delta)))
+    elif args.command == "prepare":
+        raise SystemExit(cmd_prepare(work, args.chapter, args.block))
+    elif args.command == "commit":
+        raise SystemExit(cmd_commit(work, args.chapter, args.block,
+                                     args.model, args.prompt_version))
 
 
 if __name__ == "__main__":

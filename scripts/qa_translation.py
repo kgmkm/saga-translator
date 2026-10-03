@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -212,7 +213,7 @@ def find_merged_paragraphs(items: list[tuple[int, str]], qopen: str = QOPEN, qcl
     return merged
 
 
-def emit(work: Path, cid: str, bid: str, items: list[tuple[int, str]]) -> None:
+def emit(work: Path, cid: str, bid: str, items: list[tuple[int, str]], archive: bool = False) -> None:
     _, dst = direction(work)
     suf = target_suffix(dst)
     qopen, qclose = target_quotes(dst)
@@ -237,7 +238,13 @@ def emit(work: Path, cid: str, bid: str, items: list[tuple[int, str]]) -> None:
     save_chapters_meta(work, meta)
     draft = work / "output" / "_work" / f"{cid}_{bid}{suf}_numbered.md"
     if draft.exists():
-        draft.unlink()
+        if archive:
+            done_dir = work / "output" / "_work" / "done"
+            done_dir.mkdir(parents=True, exist_ok=True)
+            dest = done_dir / f"{cid}_{bid}{suf}_numbered.md"
+            shutil.move(str(draft), str(dest))
+        else:
+            draft.unlink()
     qa_rep = work / "output" / "_work" / f"{cid}_{bid}_qa.json"
     if qa_rep.exists():
         qa_rep.unlink()
@@ -253,6 +260,7 @@ def main() -> None:
     ap.add_argument("--draft", default=None, help="既定: output/_work/chXXX_bY_<dst>_numbered.md（訳文言語による）")
     ap.add_argument("--emit", action="store_true", help="合格時に正式出力へ書き込む")
     ap.add_argument("--no-strict", action="store_true", help="段落数不一致でも警告のみ")
+    ap.add_argument("--archive", action="store_true", help="ドラフト削除→_work/done/ への移動")
     args = ap.parse_args()
     with timed_stage(args.work, "qa_translation",
                      chapter=args.chapter, block=args.block):
@@ -276,7 +284,7 @@ def _stage_impl(args: argparse.Namespace) -> None:
     print(f"[qa] result: {'PASS' if report['pass'] else 'FAIL'}")
 
     if report["pass"] and args.emit:
-        emit(work, cid, bid, items)
+        emit(work, cid, bid, items, archive=args.archive)
         print(f"[emit] {work / 'output' / cid / (bid + suf + '.md')}")
         sys.exit(0)
     sys.exit(0 if report["pass"] else 1)
