@@ -110,6 +110,21 @@ def prev_tail_text(work: Path, chapters: list[dict], ci: int, bi: int, k: int) -
     return "(なし: 冒頭)"
 
 
+def prev_tail_text_raw(work: Path, chapters: list[dict], ci: int, bi: int) -> str:
+    """前ブロック(なければ前章)の訳文全文。絞り込み判定用。"""
+    suf = target_suffix(direction(work)[1])
+    for ci2 in range(ci, -1, -1):
+        ch = chapters[ci2]
+        blocks = ch["blocks"]
+        for bi2 in range(len(blocks) - 1, -1, -1):
+            if ci2 == ci and bi2 >= bi:
+                continue
+            path = work / "output" / ch["id"] / f"{blocks[bi2]['id']}{suf}.md"
+            if path.exists():
+                return path.read_text(encoding="utf-8")
+    return "(なし: 冒頭)"
+
+
 def next_head_text(chapters: list[dict], ci: int, bi: int, k: int, chdir: Path) -> str:
     if bi + 1 < len(chapters[ci]["blocks"]):
         s, e = chapters[ci]["blocks"][bi + 1]["paras"]
@@ -123,6 +138,227 @@ def next_head_text(chapters: list[dict], ci: int, bi: int, k: int, chdir: Path) 
     return "(なし: 最終ブロック)"
 
 
+# ── compact 用補助関数 ──────────────────────────────────────────
+
+def _block_address(cid: str, bid: str) -> tuple[int, int]:
+    """chNNN/bM → (章番号, ブロック番号)。ch001/b1 → (1, 1)"""
+    import re
+    m = re.match(r"ch(\d+)/b(\d+)", f"{cid}/{bid}")
+    if not m:
+        return (0, 0)
+    return (int(m.group(1)), int(m.group(2)))
+
+
+def _parse_at_block(at_block: str) -> tuple[int, int] | None:
+    """chNNN/bM → (章, ブロック) or None"""
+    import re
+    m = re.match(r"ch(\d+)/b(\d+)", at_block)
+    if m:
+        return (int(m.group(1)), int(m.group(2)))
+    return None
+
+
+def _compact_characters(
+    chars: dict,
+    body_texts: list[str],
+    prev_translation: str,
+) -> list[dict]:
+    """compact モード: 登場人物を絞り込む。"""
+    core_chars = []
+    candidates = []
+    for c in chars.get("characters", []):
+        name_src = c.get("name_src") or ""
+        name_ja = c.get("name_ja") or ""
+        ruby = c.get("ruby") or ""
+        address_items = c.get("address") or []
+
+        in_src = bool(name_src) and any(name_src in t for t in body_texts)
+        in_src_ruby = bool(ruby) and any(ruby in t for t in body_texts)
+        in_src_addr = any(
+            a.get("target_src") and a["target_src"] in t
+            for a in address_items
+            for t in body_texts
+        )
+
+        in_prev = bool(name_ja) and name_ja in prev_translation
+        in_prev_addr = any(
+            a.get("target_ja") and a["target_ja"] in prev_translation
+            for a in address_items
+        )
+
+        is_core = bool(c.get("core"))
+        matched = in_src or in_src_ruby or in_src_addr or in_prev or in_prev_addr
+
+        if is_core or matched:
+            if is_core:
+                core_chars.append(c)
+            else:
+                candidates.append(c)
+
+    seen = set()
+    result = []
+    for c in core_chars + candidates:
+        sid = id(c)
+        if sid not in seen:
+            seen.add(sid)
+            result.append(c)
+    return result
+
+
+def _compact_terms(
+    terms: dict,
+    body_texts: list[str],
+    prev_translation: str,
+) -> list[dict]:
+    """compact モード: 用語を絞り込む。"""
+    result = []
+    seen = set()
+    for t in terms.get("terms", []):
+        term_src = t.get("term_src") or ""
+        term_ja = t.get("term_ja") or ""
+        is_core = bool(t.get("core"))
+
+        in_src = bool(term_src) and any(term_src in bt for bt in body_texts)
+        in_prev = bool(term_ja) and term_ja in prev_translation
+
+        if is_core or in_src or in_prev:
+            tid = id(t)
+            if tid not in seen:
+                seen.add(tid)
+                result.append(t)
+    return result
+
+
+def _compact_arcs(
+    chars: dict,
+    cid: str, bid: str,
+) -> tuple[dict, list[str]]:
+    """compact モード: 対象ブロックより前に開始した最新 arc だけを人物ごとに出す。"""
+    target = _block_address(cid, bid)
+    warn_lines: list[str] = []
+    result: dict[str, list[dict]] = {}
+    for c in chars.get("characters", []):
+        arcs = c.get("arcs") or []
+        name = c.get("name_ja") or c.get("name_src") or ""
+        before = []
+        for a in arcs:
+            at_block = a.get("at_block", "")
+            if not at_block:
+                continue
+            parsed = _parse_at_block(at_block)
+            if parsed is None:
+                warn_lines.append(
+                    f"# WARNING: 不正な at_block '{at_block}' "
+                    f"(arc: {a.get('note', '')}) をスキップしました"
+                )
+                continue
+            if parsed < target:
+                before.append(a)
+        if before:
+            before.sort(key=lambda x: _parse_at_block(x.get("at_block", "") or (0, 0)), reverse=True)
+            result[name] = [before[0]]
+    return result, warn_lines
+
+
+def _compact_plot(
+    plot: dict,
+    cid: str, bid: str,
+    default_tail: int = 20,
+) -> tuple[list[str], bool]:
+    """compact モード: 対象ブロックより前の plot entries のみ。"""
+    target = _block_address(cid, bid)
+    entries = plot.get("entries", [])
+    if not entries:
+        return [], False
+
+    all_have_block = True
+    filtered = []
+    for e in entries:
+        block = e.get("block")
+        if block is None:
+            all_have_block = False
+            filtered.append(e)
+        else:
+            parsed = _parse_at_block(block)
+            if parsed is None:
+                all_have_block = False
+                filtered.append(e)
+            elif parsed < target:
+                filtered.append(e)
+
+    if not all_have_block:
+        return [e.get("text", "") for e in entries[-default_tail:]], False
+
+    texts = [e.get("text", "") for e in filtered[-default_tail:]]
+    return texts, True
+
+
+def _load_house_style_rules(work: Path) -> list[dict]:
+    """work の _house/house_style.toml または saga_root/_house/house_style.toml から全 rule を読む。"""
+    candidates = []
+    w_house = work / "_house" / "house_style.toml"
+    if w_house.exists():
+        candidates.append(w_house)
+    saga_house = work.parent.parent / "_house" / "house_style.toml"
+    if saga_house.exists():
+        candidates.append(saga_house)
+
+    rules = []
+    for p in candidates:
+        try:
+            data = load_toml(p)
+            if data and isinstance(data, dict):
+                for r in data.get("rules", []):
+                    rules.append(r)
+        except Exception:
+            pass
+    return rules
+
+
+_kind_map = {
+    "naming": "命名",
+    "ruby": "ルビ",
+    "keishou": "敬称",
+    "jishou": "自称",
+    "ninshou": "二人称",
+    "kigou": "記号",
+    "kugirisen": "区切り線",
+    "goi": "語彙",
+    "sonota": "その他",
+}
+
+
+def _fmt_house_style(rules: list[dict], work_id: str) -> str:
+    """approved/locked かつ該当 scope のルールを整形。"""
+    lines = []
+    for r in rules:
+        status = r.get("status", "")
+        if status not in ("approved", "locked"):
+            continue
+        scope = r.get("scope", "")
+        if scope == "global":
+            pass
+        elif scope == "work" and r.get("target") == work_id:
+            pass
+        else:
+            continue
+
+        kind = r.get("kind", "")
+        pattern = r.get("pattern", "")
+        replacement = r.get("replacement", "")
+        preference = r.get("preference", "")
+        rationale = r.get("rationale", "")
+        val = replacement or preference or ""
+        prefix = _kind_map.get(kind, kind)
+        rationale_part = f"（根拠: {rationale}）" if rationale else ""
+        lines.append(f"- {prefix}: {pattern} → {val}{rationale_part}")
+    return "\n".join(lines)
+
+
+def get_work_id(work: Path) -> str:
+    return work.name
+
+
 def main() -> None:
     from _lib import timed_stage
     utf8()
@@ -131,6 +367,7 @@ def main() -> None:
     ap.add_argument("--chapter", required=True, help="例: ch001")
     ap.add_argument("--block", default=None, help="例: b1(未指定=未完了の先頭)")
     ap.add_argument("--mode", choices=["analysis", "translation"], default="translation")
+    ap.add_argument("--full", action="store_true", help="compact モードでも全件出力")
     args = ap.parse_args()
 
     work = Path(args.work)
@@ -150,11 +387,20 @@ def main() -> None:
         bid = blocks[bi]["id"]
     cid = args.chapter
 
+    # context_style: analysis は full 固定、translation は --full で full、デフォルト compact
+    if args.mode == "analysis":
+        context_style = "full"
+    else:
+        context_style = "full" if args.full else "compact"
+
     with timed_stage(work, "build_context", chapter=cid, block=bid):
-        _stage_impl(work, cid, bid, args.mode)
+        _stage_impl(work, cid, bid, args.mode, context_style)
 
 
-def _stage_impl(work: Path, cid: str, bid: str, mode: str) -> None:
+def _stage_impl(
+    work: Path, cid: str, bid: str, mode: str,
+    context_style: str = "compact",
+) -> None:
     _, dst = direction(work)
     suf = target_suffix(dst)
     meta_all = load_chapters_meta(work)
@@ -174,6 +420,7 @@ def _stage_impl(work: Path, cid: str, bid: str, mode: str) -> None:
     paras = load_paras(work, cid)["paras"]
     s, e = block["paras"]
     body = paras[s - 1:e]
+    body_texts = [p["text"] for p in body]
 
     chars, terms, plot = load_analysis(work)
 
@@ -200,34 +447,117 @@ def _stage_impl(work: Path, cid: str, bid: str, mode: str) -> None:
     if lang:
         pair = f"{lang}2{dst}"
         lang_line += f" / 訳文言語: {dst} / 言語tips: references/lang_{pair}.md （ファイルがあれば読め。無ければ汎用プロンプトのみ）"
-    lines += [
-        lang_line,
-        "",
-        "## 登場人物表(訳語と声はこれに従う)",
-        fmt_characters(chars),
-        "",
-        "## 声の変化(arcs。対象ブロック以降に効く一人称・口調・語彙)",
-        fmt_arcs(chars),
-        "",
-        "## 用語集",
-        fmt_terms(terms),
-        "",
-        "## これまでのあらすじ(ネタバレ/翻訳用の内部情報)",
-        fmt_plot(plot),
-        "",
-        f"## 前ブロックの訳文末尾({k_prev}段落)",
-        prev_tail_text(work, chapters, ci, bi, k_prev),
-        "",
-        f"## 次ブロック冒頭(原文・参照用)",
-        next_head_text(chapters, ci, bi, k_next, chdir),
-        "",
-    ]
-    if mode == "analysis":
-        cur = characters_toml_path(work)
-        lines += ["## 現在の分析データ(この状態への追記・更新分を出す)",
-                  "```toml",
-                  cur.read_text(encoding="utf-8") if cur.exists() else "",
-                  "```", ""]
+    lines += [lang_line, ""]
+
+    compact = (context_style == "compact")
+    work_id = get_work_id(work)
+
+    if compact:
+        # ── compact モード ──
+        prev_raw = prev_tail_text_raw(work, chapters, ci, bi)
+
+        # 人物絞り込み (B)
+        compact_chars = _compact_characters(chars, body_texts, prev_raw)
+        total_chars = len(chars.get("characters", []))
+        if compact_chars:
+            lines += [
+                "## 登場人物表(訳語と声はこれに従う)",
+                fmt_characters({"characters": compact_chars}),
+                "",
+            ]
+        else:
+            lines += [
+                "## 登場人物表(訳語と声はこれに従う)",
+                "(このブロックに固定訳語が必要な人物は未登場)",
+                "",
+            ]
+
+        # arcs 時点解決 (D)
+        compact_arcs_data, arc_warns = _compact_arcs(chars, cid, bid)
+        arc_count = sum(len(v) for v in compact_arcs_data.values())
+        arcs_display = fmt_arcs({"characters": [
+            {"name_ja": name, "name_src": name, "arcs": arcs}
+            for name, arcs in compact_arcs_data.items()
+        ]})
+        if arc_warns:
+            lines += arc_warns + [""]
+        lines += [
+            "## 声の変化(arcs。対象ブロック以降に効く一人称・口調・語彙)",
+            arcs_display,
+            "",
+        ]
+
+        # 用語絞り込み (C)
+        compact_terms_list = _compact_terms(terms, body_texts, prev_raw)
+        total_terms = len(terms.get("terms", []))
+        lines += ["## 用語集", fmt_terms({"terms": compact_terms_list}), ""]
+
+        # plot 時点解決 (E)
+        plot_texts, plot_resolved = _compact_plot(plot, cid, bid)
+        if not plot_texts:
+            plot_display = "(未記録)"
+        elif not plot_resolved:
+            plot_display = "\n".join(f"- {l}" for l in plot_texts)
+        else:
+            plot_display = "\n".join(f"- {l}" for l in plot_texts)
+        lines += [
+            "## これまでのあらすじ(ネタバレ/翻訳用の内部情報)",
+            plot_display,
+            "",
+        ]
+
+        # house_style 差し込み (F)
+        house_rules = _load_house_style_rules(work)
+        house_text = _fmt_house_style(house_rules, work_id)
+        if house_text:
+            lines += ["## ハウススタイル(既決事項)", house_text, ""]
+
+        # 前ブロック + 次ブロック（compact でも常に出す）
+        lines += [
+            f"## 前ブロックの訳文末尾({k_prev}段落)",
+            prev_tail_text(work, chapters, ci, bi, k_prev),
+            "",
+            f"## 次ブロック冒頭(原文・参照用)",
+            next_head_text(chapters, ci, bi, k_next, chdir),
+            "",
+        ]
+
+        # 出力サイズ報告 (H)
+        n_chars_shown = len(compact_chars)
+        n_terms_shown = len(compact_terms_list)
+        plot_count = len(plot_texts)
+        house_count = len([r for r in house_rules if r.get("status") in ("approved", "locked")])
+        print(
+            f"[context] compact: 人物 {n_chars_shown}/{total_chars} / 用語 {n_terms_shown}/{total_terms} "
+            f"/ arcs {arc_count}件 / plot {plot_count}件 / house_style {house_count}件",
+            file=sys.stderr,
+        )
+
+    else:
+        # ── full モード（従来挙動） ──
+        lines += [
+            "## 登場人物表(訳語と声はこれに従う)",
+            fmt_characters(chars),
+            "",
+            "## 声の変化(arcs。対象ブロック以降に効く一人称・口調・語彙)",
+            fmt_arcs(chars),
+            "",
+            "## 用語集",
+            fmt_terms(terms),
+            "",
+            "## これまでのあらすじ(ネタバレ/翻訳用の内部情報)",
+            fmt_plot(plot),
+            "",
+            f"## 前ブロックの訳文末尾({k_prev}段落)",
+            prev_tail_text(work, chapters, ci, bi, k_prev),
+            "",
+            f"## 次ブロック冒頭(原文・参照用)",
+            next_head_text(chapters, ci, bi, k_next, chdir),
+            "",
+        ]
+
+    # 分析モードの生 TOML 廃止 (G): 整形済み人物表は full/compact 両方で既に出ている
+    # 旧来の生 TOML ブロックは出力しない
 
     lines.append(f"## 対象本文({cid} {bid}: 段落{s}〜{e}, {len(body)}段落)")
     for p in body:
