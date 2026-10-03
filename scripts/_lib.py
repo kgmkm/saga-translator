@@ -406,6 +406,21 @@ def purge_source(work: Path, keep_parallel: bool = False) -> list[str]:
         removed.append(rel.replace("\\", "/"))
 
     for rel in ("originals", "translation_input", "chapters", "output/_work", "output/_done", "output/_qa"):
+        # commit が確定ドラフトを _work/done/ にアーカイブする（レビュー P3-2。
+        # emit 後の検証・時間分析・復元に使う）。done は消さずに退避して戻す。
+        if rel == "output/_work":
+            done_p = work / "output" / "_work" / "done"
+            if done_p.is_dir():
+                keep = work / "output" / "_work_done_keep"
+                if keep.exists():
+                    shutil.rmtree(keep)
+                keep.mkdir(parents=True)
+                shutil.move(str(done_p), str(keep / "done"))
+                rm(rel)
+                (work / "output" / "_work").mkdir(parents=True, exist_ok=True)
+                shutil.move(str(keep / "done"), str(done_p))
+                shutil.rmtree(keep, ignore_errors=True)
+                continue
         rm(rel)
     out = work / "output"
     if out.exists():
