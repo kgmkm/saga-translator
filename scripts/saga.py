@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import random
 import re
 import shutil
 import sys
@@ -832,6 +833,313 @@ def _load_toml_safe(path: Path) -> dict | None:
     except Exception:
         return None
 
+# ---------------------------------------------------------------------------
+# review サブコマンド
+# ---------------------------------------------------------------------------
+
+
+def _list_committed_blocks(work: Path) -> list[tuple[str, str]]:
+    """output/<ch>/<bid><suffix>.md が存在する確定ブロックを列挙。"""
+    _, dst = direction(work)
+    suf = target_suffix(dst)
+    blocks: list[tuple[str, str]] = []
+    meta = load_chapters_meta(work)
+    for ch in meta.get("chapters", []):
+        cid = ch["id"]
+        out_dir = work / "output" / cid
+        for b in ch.get("blocks", []):
+            bid = b["id"]
+            if (out_dir / f"{bid}{suf}.md").is_file():
+                blocks.append((cid, bid))
+    return blocks
+
+
+def _scrape_commit_reports(work: Path, blocks: list[tuple[str, str]]) -> list[dict]:
+    """各確定ブロックの report.json を _work/commit/ から収集。"""
+    reports: list[dict] = []
+    commit_dir = work / "output" / "_work" / "commit"
+    if not commit_dir.is_dir():
+        return reports
+    for cid, bid in blocks:
+        # 命名パターン: <timestamp>_<cid>_<bid> を含むサブディレクトリを検索
+        for entry in sorted(commit_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            if not entry.name.endswith(f"_{cid}_{bid}"):
+                continue
+            rp = entry / "report.json"
+            if rp.is_file():
+                try:
+                    data = json.loads(rp.read_text(encoding="utf-8"))
+                    data["_block"] = f"{cid}/{bid}"
+                    reports.append(data)
+                except Exception:
+                    pass
+    return reports
+
+
+def _extract_machine_findings(reports: list[dict]) -> list[dict]:
+    """report.json の stages から確認履歴（confirm / residue）を抽出。"""
+    findings: list[dict] = []
+    for r in reports:
+        stages = r.get("stages", {})
+        align = stages.get("align", {})
+        if isinstance(align, dict):
+            confs = align.get("confirm_unacked", 0)
+            if isinstance(confs, int) and confs > 0:
+                findings.append({
+                    "block": r.get("_block", ""),
+                    "kind": "confirm未ack",
+                    "count": confs,
+                })
+        residue = stages.get("residue", {})
+        if isinstance(residue, dict):
+            cands = residue.get("candidates", 0)
+            if isinstance(cands, int) and cands > 0:
+                findings.append({
+                    "block": r.get("_block", ""),
+                    "kind": "残渣候補",
+                    "count": cands,
+                })
+            errs = residue.get("errors", 0)
+            if isinstance(errs, int) and errs > 0:
+                findings.append({
+                    "block": r.get("_block", ""),
+                    "kind": "残渣エラー",
+                    "count": errs,
+                })
+    return findings
+
+
+def _find_risk_blocks(work: Path, blocks: list[tuple[str, str]]) -> list[dict]:
+    """リスクの高い箇所を列挙:
+    - arcs の at_block 開始点
+    - address を持つ人物がいるブロック
+    - ruby を持つ人物の初出ブロック
+    """
+    from _lib import load_characters
+    from _lib import load_paras
+    from _lib import load_chapters_meta
+
+    chars_data = load_characters(work)
+    char_list = chars_data.get("characters", [])
+    risk_items: list[dict] = []
+    target_blocks = set(f"{cid}/{bid}" for cid, bid in blocks)
+
+    for c in char_list:
+        name = c.get("name_ja") or c.get("name_src") or "?"
+        arcs = c.get("arcs") or []
+        for a in arcs:
+            at = a.get("at_block", "")
+            if at in target_blocks:
+                changed = []
+                for key in ("speech_style", "first_person", "second_person", "tone", "note"):
+                    if a.get(key):
+                        changed.append(key)
+                risk_items.append({
+                    "block": at,
+                    "kind": f"{name} arc開始",
+                    "detail": ", ".join(changed) if changed else "変化",
+                })
+
+        # address を持つ人物がいるブロック（address の対象者がそのブロックに登場する可能性）
+        addr = c.get("address") or []
+        if addr:
+            # リスク: address を持つ人物の初出ブロック（arcs の最初 or 任意の blocks）
+            # 簡易的に全ブロックでマーク（address指定は呼称の誤りリスク）
+            pass  # 全ブロックにマークすると多すぎるので、arcs または初出で絞る
+
+        # ruby を持つ人物
+        ruby = c.get("ruby", "")
+        if ruby:
+            # 初出ブロック = arcs の最初の at_block があればそれ、なければ最初の対象ブロック
+            first_arc = arcs[0] if arcs else None
+            at = first_arc.get("at_block", "") if first_arc else ""
+            if at and at in target_blocks:
+                risk_items.append({
+                    "block": at,
+                    "kind": f"{name} 初出ルビ",
+                    "detail": f"ruby={ruby}",
+                })
+
+    # 重複除去
+    seen: set[tuple[str, str]] = set()
+    deduped: list[dict] = []
+    for item in risk_items:
+        key = (item["block"], item["kind"])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(item)
+    return deduped
+
+
+def _sample_paragraphs(work: Path, blocks: list[tuple[str, str]],
+                        ratio: float, seed: int) -> list[dict]:
+    """指定ブロックの段落から ratio の割合でランダム選択。"""
+    from _lib import load_paras
+    rng = random.Random(seed)
+    samples: list[dict] = []
+    for cid, bid in blocks:
+        try:
+            paras_data = load_paras(work, cid)
+        except Exception:
+            continue
+        paras = paras_data.get("paras", [])
+        meta = load_chapters_meta(work)
+        ch = next((c for c in meta.get("chapters", []) if c["id"] == cid), None)
+        if not ch:
+            continue
+        blk = next((b for b in ch.get("blocks", []) if b["id"] == bid), None)
+        if not blk:
+            continue
+        ps, pe = blk.get("paras", (1, len(paras)))
+        block_paras = [p for p in paras if ps <= p.get("n", 0) <= pe]
+        n = max(1, int(len(block_paras) * ratio))
+        chosen = rng.sample(block_paras, min(n, len(block_paras)))
+        for p in chosen:
+            samples.append({
+                "block": f"{cid}/{bid}",
+                "para": p.get("n", 0),
+                "text": p.get("text", ""),
+            })
+    return samples
+
+
+def _read_dst_output(work: Path, cid: str, bid: str) -> str | None:
+    """確定済み訳文を読む。"""
+    _, dst = direction(work)
+    suf = target_suffix(dst)
+    out_p = work / "output" / cid / f"{bid}{suf}.md"
+    if out_p.is_file():
+        return out_p.read_text(encoding="utf-8")
+    return None
+
+
+def cmd_review(work: Path, wave: int = 1, sample_ratio: float = 0.1,
+               json_output: bool = False) -> int:
+    """検収用の検収リストを生成。"""
+    if not work.is_dir():
+        print(f"[review] エラー: ディレクトリが見つかりません: {work}", file=sys.stderr)
+        return 1
+
+    # 確定ブロック
+    blocks = _list_committed_blocks(work)
+    if not blocks:
+        print(f"[review] エラー: 確定済みブロックがありません", file=sys.stderr)
+        return 1
+
+    # 1) 機械の指摘
+    reports = _scrape_commit_reports(work, blocks)
+    findings = _extract_machine_findings(reports)
+    machine_items = findings
+
+    # 2) リスク箇所
+    risk_items = _find_risk_blocks(work, blocks)
+
+    # 3) 抜き取り（work.name + wave でシード）
+    seed_str = f"{work.name}_wave{wave}"
+    seed = abs(hash(seed_str))
+    sample_items = _sample_paragraphs(work, blocks, sample_ratio, seed)
+
+    # 出力
+    src, dst = direction(work)
+    rev_dir = work / "_work"
+    rev_dir.mkdir(parents=True, exist_ok=True)
+    rev_path = rev_dir / f"review_wave{wave}.md"
+
+    # 検収リストを書く
+    rev_lines = [
+        f"# 検収リスト wave {wave}",
+        f"",
+        f"work: {work.name}",
+        f"対象ブロック数: {len(blocks)}",
+        f"生成: {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
+        f"",
+    ]
+
+    # 機械指摘
+    rev_lines.append(f"## 1. 機械の指摘（{len(machine_items)}件）")
+    if machine_items:
+        for m in machine_items:
+            rev_lines.append(f"- {m['block']} {m['kind']}: {m['count']}件")
+    else:
+        rev_lines.append("（なし）")
+    rev_lines.append("")
+
+    # リスク箇所
+    rev_lines.append(f"## 2. リスクの高い箇所（{len(risk_items)}件）")
+    if risk_items:
+        for r in risk_items:
+            rev_lines.append(f"- {r['block']} {r['kind']}: {r['detail']}")
+    else:
+        rev_lines.append("（なし）")
+    rev_lines.append("")
+
+    # 抜き取り — 原文と訳文を並べる
+    rev_lines.append(f"## 3. 抜き取り（{len(sample_items)}段落）")
+    if sample_items:
+        for s in sample_items:
+            blk = s["block"]
+            pn = s["para"]
+            rev_lines.append(f"### {blk} P{pn}")
+            rev_lines.append("")
+            rev_lines.append(f"原文: {s['text']}")
+            cid, bid = blk.split("/")
+            dst_text = _read_dst_output(work, cid, bid)
+            if dst_text:
+                # 該当段落を探す
+                para_lines = dst_text.splitlines()
+                found = None
+                for line in para_lines:
+                    if line.startswith(f"[P{pn:03d}]") or line.startswith(f"[P{pn}]"):
+                        found = line
+                        break
+                if found:
+                    rev_lines.append(f"訳文: {found}")
+                else:
+                    rev_lines.append(f"訳文: （該当段落なし）")
+            else:
+                rev_lines.append(f"訳文: （未出力）")
+            rev_lines.append("")
+    else:
+        rev_lines.append("（なし）")
+    rev_lines.append("")
+
+    rev_lines.append("---")
+    rev_lines.append("機械指摘は commit 時の report.json から抽出。リスク箇所は characters.toml の arcs/address/ruby から。抜き取りは乱数シード（work名+wave）で決定的。")
+    rev_lines.append("")
+
+    rev_path.write_text("\n".join(rev_lines), encoding="utf-8")
+
+    if json_output:
+        import json as _json
+        out = {
+            "wave": wave,
+            "total_blocks": len(blocks),
+            "machine_items": machine_items,
+            "risk_items": risk_items,
+            "sample_items": sample_items,
+            "output_path": str(rev_path),
+        }
+        print(_json.dumps(out, ensure_ascii=False, indent=2))
+        return 0
+
+    # コンソール出力（--json が無い場合のみ）
+    def _fmt(items: list[dict], max_show: int = 5) -> str:
+        parts = [f"{i['block']} {i.get('kind', i.get('detail', '?'))}" for i in items[:max_show]]
+        if len(items) > max_show:
+            parts.append("...")
+        return ", ".join(parts)
+
+    print(f"[review] wave {wave}: 対象 {len(blocks)} ブロック")
+    print(f"[review] 機械指摘: {len(machine_items)}件 ({_fmt(machine_items)})")
+    print(f"[review] リスク箇所: {len(risk_items)}件 ({_fmt(risk_items)})")
+    print(f"[review] 抜き取り: {len(sample_items)}段落 ({_fmt(sample_items)})")
+    print(f"[review] 検収対象ファイル: {rev_path}")
+
+    return 0
+
+
 def main() -> None:
     utf8()
     ap = argparse.ArgumentParser(description="saga-translator CLI")
@@ -852,6 +1160,13 @@ def main() -> None:
     p_prep.add_argument("--chapter", default=None, help="章（例: ch001）")
     p_prep.add_argument("--block", default=None, help="ブロック（例: b2）")
 
+    # review
+    p_rev = sub.add_parser("review", help="検収リスト生成")
+    p_rev.add_argument("work", help="作品ディレクトリ")
+    p_rev.add_argument("--wave", type=int, default=1, help="第N波（既定: 1）")
+    p_rev.add_argument("--sample-ratio", type=float, default=0.1, help="抜き取り割合（既定: 0.1）")
+    p_rev.add_argument("--json", action="store_true", help="JSON 出力")
+
     # commit
     p_com = sub.add_parser("commit", help="翻訳ブロックの確定")
     p_com.add_argument("work", help="作品ディレクトリ")
@@ -870,6 +1185,10 @@ def main() -> None:
         raise SystemExit(cmd_analyze_commit(work, Path(args.delta)))
     elif args.command == "prepare":
         raise SystemExit(cmd_prepare(work, args.chapter, args.block))
+    elif args.command == "review":
+        raise SystemExit(cmd_review(work, wave=args.wave,
+                                     sample_ratio=args.sample_ratio,
+                                     json_output=args.json))
     elif args.command == "commit":
         raise SystemExit(cmd_commit(work, args.chapter, args.block,
                                      args.model, args.prompt_version))
