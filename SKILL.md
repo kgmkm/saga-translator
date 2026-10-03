@@ -27,6 +27,8 @@ saga-translator は、ユーザが所持する小説ファイルを、個人的�
 
 ## パイプライン
 
+Hermes（Windows の git-bash を含む）で動かす場合は、まず `references/env-hermes-windows.md` を読む。
+
 ### 0. セットアップ確認
 
 なし。利用条件（README.md の「利用条件」）を読んで同意した上で使い始める。同意フラグの記録・確認はしない。
