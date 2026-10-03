@@ -609,8 +609,17 @@ def cmd_commit(work: Path, chapter: str, block: str,
                                  "chapter": cid, "block": bid, "stages": {}}
 
     try:
-        # 2) 字形整形（glyph のみ）
-        from normalize.zh2ja import shape_glyph
+        # 2) 字形整形（glyph のみ）。翻訳方向に応じた pack を使う。
+        #    ja→zh で zh2ja の字形表を当てると逆変換（开→開）が走り、直後の
+        #    non_gbk_han 検査で自己矛盾して落ちる。
+        src_lang, dst_lang = direction(work)
+        if (src_lang, dst_lang) == ("zh", "ja"):
+            from normalize.zh2ja import shape_glyph
+        elif (src_lang, dst_lang) == ("ja", "zh"):
+            from normalize.ja2zh import shape_glyph
+        else:
+            def shape_glyph(text, **_kw):
+                return text, []
         shaped, applied_list = shape_glyph(text)
         if applied_list:
             items = ", ".join(f"{a['item']}->{a['replacement']}(x{a['count']})" for a in applied_list)

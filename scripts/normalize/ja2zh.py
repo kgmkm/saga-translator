@@ -36,6 +36,18 @@ def fix_text(text: str) -> tuple[str, dict[str, int]]:
     return text, applied
 
 
+def shape_glyph(text: str) -> tuple[str, list[dict]]:
+    """commit から呼ばれる字形整形（glyph のみ）。zh2ja 側と同じ形状の API。
+
+    ja→zh 方向に意味置換（meaning）は存在しないため、fix_text の全適用が
+    そのまま glyph 整形に相当する。applied は {item, replacement, count} の列。
+    """
+    new_text, applied = fix_text(text)
+    applied_list = [{"item": ja, "replacement": zh, "count": n}
+                    for ja, n in applied.items() for zh in [JA2ZH[ja]]]
+    return new_text, applied_list
+
+
 def fix_file(path: pathlib.Path, check: bool) -> tuple[int, int, int]:
     """(未解決の字形数, 仮名数, 修正数) を返す。"""
     text = path.read_text(encoding="utf-8")
