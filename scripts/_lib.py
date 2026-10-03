@@ -313,6 +313,10 @@ def _load_analysis_file(work: Path, names: list[str], empty: dict) -> dict:
         if not p.exists():
             continue
         data = load_json(p) if p.suffix.lower() == ".json" else load_toml(p)
+        if not data:
+            # コメント行のみの空ファイルは「未分析」と同じ扱い。entries 等の必須キーを
+            # 要求すると、最初の追記(analyze-commit)が循環して失敗する。
+            return empty
         if name.startswith("characters"):
             validate_expected(p, data, {"characters": "list_of_dicts"})
         elif name.startswith("terms"):
