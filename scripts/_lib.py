@@ -684,7 +684,7 @@ def record_timeline(work, stage: str, chapter=None, block=None,
             started = ended
         dur = int((ended - started).total_seconds() * 1000)
         entry = {
-            "ts": ended.strftime("%%Y-%%m-%%dT%%H:%%M:%%SZ"),
+            "ts": ended.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "duration_ms": dur,
             "stage": stage,
         }
