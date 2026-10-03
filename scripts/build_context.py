@@ -565,6 +565,7 @@ def _stage_impl(
         lines.append("")
 
     out = work / "translation_input" / f"{cid}_{bid}_{mode}.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
     save_json(work / "logs" / "last_context.json", {"chapter": cid, "block": bid, "mode": mode, "path": str(out)})
     out.write_text("\n".join(lines), encoding="utf-8")
 
