@@ -469,7 +469,8 @@ def _find_first_undone(work: Path, chapters: list[dict], dst: str) -> tuple[str,
     return None
 
 
-def cmd_prepare(work: Path, chapter: str | None, block: str | None) -> int:
+def cmd_prepare(work: Path, chapter: str | None, block: str | None,
+                mode: str = "translation") -> int:
     if not work.is_dir():
         print(f"[prepare] エラー: ディレクトリが見つかりません: {work}", file=sys.stderr)
         return 1
@@ -507,7 +508,7 @@ def cmd_prepare(work: Path, chapter: str | None, block: str | None) -> int:
     work_dir_obj = work
     (work_dir_obj / "translation_input").mkdir(parents=True, exist_ok=True)
     from build_context import _stage_impl as bc_stage
-    bc_stage(work, cid, bid, "translation")
+    bc_stage(work, cid, bid, mode)
 
     ctx_path = work / "translation_input" / f"{cid}_{bid}_translation.md"
 
@@ -1159,6 +1160,8 @@ def main() -> None:
     p_prep.add_argument("work", help="作品ディレクトリ")
     p_prep.add_argument("--chapter", default=None, help="章（例: ch001）")
     p_prep.add_argument("--block", default=None, help="ブロック（例: b2）")
+    p_prep.add_argument("--mode", choices=["translation", "analysis"], default="translation",
+                        help="コンテキストのモード（既定: translation）")
 
     # review
     p_rev = sub.add_parser("review", help="検収リスト生成")
@@ -1184,7 +1187,7 @@ def main() -> None:
     elif args.command == "analyze-commit":
         raise SystemExit(cmd_analyze_commit(work, Path(args.delta)))
     elif args.command == "prepare":
-        raise SystemExit(cmd_prepare(work, args.chapter, args.block))
+        raise SystemExit(cmd_prepare(work, args.chapter, args.block, mode=args.mode))
     elif args.command == "review":
         raise SystemExit(cmd_review(work, wave=args.wave,
                                      sample_ratio=args.sample_ratio,

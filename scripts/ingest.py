@@ -237,10 +237,11 @@ def main() -> None:
     work = parent / work_name
 
     with timed_stage(work, "ingest"):
-        _stage_impl(work, src, parent, args)
+        _stage_impl(work, src, parent, args, work_id, part)
 
 
-def _stage_impl(work: Path, src: Path, parent: Path, args: argparse.Namespace) -> None:
+def _stage_impl(work: Path, src: Path, parent: Path, args: argparse.Namespace,
+                work_id: str, part: str) -> None:
 
     meta: dict = {"source_path": str(src), "work_id": work_id, "part": part}
     images_dir = images_dir_of(work)
