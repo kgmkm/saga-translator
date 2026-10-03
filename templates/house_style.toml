@@ -1,0 +1,38 @@
+# house_style.toml テンプレート
+# ハウススタイル（命名規則・ルビの形式・敬称・自称・二人称・
+# 記号・区切り線・頻出語・仕様外で決めたこと）を1ファイルにまとめる。
+#
+# 鉄則：
+# - [[rules]] エントリを追加していく。scope は必須。
+# - build コマンドで自動生成された候補は status: candidate。
+#   自動採用されない。ユーザーが承認して status を変える。
+# - 1作品の改名が全作品に波及しないよう、scope で適切に制限する。
+
+version = 1
+created_at = "2026-10-03T12:00:00Z"
+updated_at = "2026-10-03T12:00:00Z"
+
+# === ルール（[[rules]]） ===
+# 各属性の説明：
+#   id        — snake_case の一意識別子（重複禁止）
+#   kind      — naming / ruby / keishou / jishou / ninshou / kigou / kugirisen / goi / sonota
+#   scope     — work / series / character / global（必須）
+#   target    — scope に応じた識別子（work ID, series ID, name_src 等）。global は省略可
+#   pattern   — 対象文字列・パターン
+#   replacement または preference — 推奨される形（二者択一）
+#   rationale — 根拠
+#   status    — candidate / approved / locked
+#   version   — このエントリの版（整数）
+#   evidence  — 参考になる段落番号やファイル位置（配列、省略可）
+
+# [[rules]]
+# id = "example_rule"
+# kind = "naming"
+# scope = "global"
+# # target = ""  # global は省略可
+# pattern = "例"
+# replacement = "例示"
+# rationale = "全作品で表記統一"
+# status = "candidate"
+# version = 1
+# evidence = ["ch001/b2"]
