@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from _lib import (  # noqa: E402
     atomic_write_text,
+    direction,
     find_non_jis_han,
     load_chapters_meta,
     load_characters,
@@ -18,6 +19,8 @@ from _lib import (  # noqa: E402
     load_toml,
     save_chapters_meta,
     save_json,
+    target_quotes,
+    target_suffix,
     utf8,
 )
 
@@ -54,6 +57,9 @@ def run_qa(work: Path, cid: str, bid: str, draft: Path, strict: bool = True) -> 
 
     report = {"chapter": cid, "block": bid, "draft": str(draft), "checks": {}}
     ok = True
+    src, dst = direction(work)
+    qopen, qclose = target_quotes(dst)
+    report["direction"] = f"{src}2{dst}"
 
     seq_ok = nums == expected
     report["checks"]["paragraph_sequence"] = {"pass": seq_ok, "expected_first": expected[0], "expected_last": expected[-1], "got": nums[:5] if len(nums) < 8 else f"{nums[0]}..{nums[-1]} n={len(nums)}"}
@@ -72,13 +78,13 @@ def run_qa(work: Path, cid: str, bid: str, draft: Path, strict: bool = True) -> 
         ja = c.get("name_ja", "")
         if not src_name or ja == src_name:
             continue
-        # フルネーム+区切り(-/·/・/‐)で分割した部分名の両方を照合する。
-        # 訳文に残るのは部分名だけのことが多い(例: 菲娜莉-贝莉安娜 → 菲娜莉)
+        # フルネーム+区切り(-/·/・‐)で分割した部分名の両方を照合する。
+        # 訳文に残るのは部分名だけのことが多い(例: 张三-李四 → 张三)
         parts = [p for p in re.split(r"[-·・‐—_ ]+", src_name) if len(p) >= 2]
         candidates = [src_name] + parts if len(src_name) >= 2 else parts
         for name in candidates:
             if name in ja:
-                continue  # 訳語にそのまま含まれる漢字(例: 夜蜘→暗影監察長・夜蜘)は残留扱いしない
+                continue  # 訳語にそのまま含まれる漢字(例: 灰狼→暗影団の頭目・灰狼)は残留扱いしない
             cnt = sum(1 for _, t in items if name in t)
             if cnt:
                 leftover.append({"name_src": name, "name_ja": ja, "count": cnt})
@@ -87,18 +93,48 @@ def run_qa(work: Path, cid: str, bid: str, draft: Path, strict: bool = True) -> 
     if leftover:
         ok = False
 
-    # 日本語に無い漢字(CP932外 + 言語packのNON_JIS_HAN)の残存チェック。
-    # 登場人物表に無い原語(誤字・未登録の固有名詞・簡体字混入)を拾う。
-    # 実測(霊狐堕淵): 原文の誤字「汐剑海斗」を原文ママで訳出した結果、
-    # 「剑」が完成後まで残った。このチェックでブロック確定時に落とす。
-    non_jis = []
-    for ch, cnt in find_non_jis_han("\n".join(t for _, t in items)):
-        non_jis.append({"char": ch, "count": cnt})
-    report["checks"]["non_jis_han"] = {"pass": not non_jis, "found": non_jis}
-    if non_jis:
-        ok = False
+    if dst == "zh":
+        # 日本語の残渣チェック（ターゲット側の機械検証）。
+        # 仮名は文字種で一意に検出できる。簡体字訳に残ってはならない。
+        from detect.ja2zh import (  # noqa: E402
+            find_jp_quotes, find_kana, find_non_gbk_han, find_rb_kana,
+            find_trad_markers, find_vfm,
+        )
+        body_text = "\n".join(t for _, t in items)
+        kana = find_kana(body_text)
+        report["checks"]["kana_leftover"] = {"pass": not kana, "found": kana}
+        if kana:
+            ok = False
+        quotes = find_jp_quotes(body_text)
+        report["checks"]["jp_quotes_leftover"] = {"pass": not quotes, "found": quotes}
+        if quotes:
+            ok = False
+        vfm = find_vfm(body_text)
+        rb = find_rb_kana(body_text)
+        report["checks"]["ruby_leftover"] = {"pass": not (vfm or rb), "found": (vfm + rb)[:10]}
+        if vfm or rb:
+            ok = False
+        nongb = find_non_gbk_han(body_text)
+        report["checks"]["non_gbk_han"] = {"pass": not nongb, "found": nongb}
+        if nongb:
+            ok = False
+        trad = find_trad_markers(body_text)
+        report["checks"]["trad_leftover"] = {"pass": not trad, "found": trad}
+        if trad:
+            ok = False
+    else:
+        # 日本語に無い漢字(CP932外 + 言語packのNON_JIS_HAN)の残存チェック。
+        # 登場人物表に無い原語(誤字・未登録の固有名詞・簡体字混入)を拾う。
+        # 原文の誤字を原文ママで訳出すると、その簡体字が完成後まで残る。
+        # このチェックでブロック確定時に落とす。
+        non_jis = []
+        for ch, cnt in find_non_jis_han("\n".join(t for _, t in items)):
+            non_jis.append({"char": ch, "count": cnt})
+        report["checks"]["non_jis_han"] = {"pass": not non_jis, "found": non_jis}
+        if non_jis:
+            ok = False
 
-    merged = find_merged_paragraphs(items)
+    merged = find_merged_paragraphs(items, qopen, qclose)
     fatal = [m for m in merged if m["count"] >= 3]
     report["checks"]["merged_paragraphs"] = {"pass": not fatal, "found": merged}
     if fatal:
@@ -112,7 +148,7 @@ QOPEN = "「"
 QCLOSE = "」"
 
 
-def layout_lines(text: str) -> str:
+def layout_lines(text: str, qopen: str = QOPEN, qclose: str = QCLOSE) -> str:
     """全行空行レイアウト(行間は必ず空行1つ)。
 
     「…」が閉じていない間の行は単一改行で継続する(歌詞など複数行ブロックを保つ)。
@@ -129,14 +165,14 @@ def layout_lines(text: str) -> str:
             blocks.append("\n".join(cur))
             cur = []
         cur.append(ln)
-        opens += ln.count(QOPEN)
-        closes += ln.count(QCLOSE)
+        opens += ln.count(qopen)
+        closes += ln.count(qclose)
     if cur:
         blocks.append("\n".join(cur))
     return "\n\n".join(blocks)
 
 
-def find_merged_paragraphs(items: list[tuple[int, str]]) -> list[dict]:
+def find_merged_paragraphs(items: list[tuple[int, str]], qopen: str = QOPEN, qclose: str = QCLOSE) -> list[dict]:
     """段落をまたいだ閉じ漏れで、段落の区切りが消えた範囲を返す。
 
     layout_lines は引用が閉じるまで空行を捨てて連結する。日本語は段落ごとに
@@ -157,7 +193,7 @@ def find_merged_paragraphs(items: list[tuple[int, str]]) -> list[dict]:
         if i < len(items) - 1:
             parts.append(f"{sent}i{i}{sent}")
     merged: list[dict] = []
-    for block in layout_lines("\n\n".join(parts)).split("\n\n"):
+    for block in layout_lines("\n\n".join(parts), qopen, qclose).split("\n\n"):
         lines = block.split("\n")
         inside: list[int] = []
         for ln in lines:
@@ -177,9 +213,12 @@ def find_merged_paragraphs(items: list[tuple[int, str]]) -> list[dict]:
 
 
 def emit(work: Path, cid: str, bid: str, items: list[tuple[int, str]]) -> None:
+    _, dst = direction(work)
+    suf = target_suffix(dst)
+    qopen, qclose = target_quotes(dst)
     ja_dir = work / "output" / cid
-    clean = layout_lines("\n\n".join(t for _, t in items)) + "\n"
-    atomic_write_text(ja_dir / f"{bid}_ja.md", clean)
+    clean = layout_lines("\n\n".join(t for _, t in items), qopen, qclose) + "\n"
+    atomic_write_text(ja_dir / f"{bid}{suf}.md", clean)
     # 対訳(段落対照)を中間物として残す。正式出力(章対訳・全文対訳)は assemble が作る
     src_map = {p["n"]: p["text"] for p in load_paras(work, cid)["paras"]}
     pairs = [f"> [P{n:03d}] {src_map.get(n, '')}\n\n{t}\n" for n, t in items]
@@ -196,7 +235,7 @@ def emit(work: Path, cid: str, bid: str, items: list[tuple[int, str]]) -> None:
                 c["status"] = "done"
             break
     save_chapters_meta(work, meta)
-    draft = work / "output" / "_work" / f"{cid}_{bid}_ja_numbered.md"
+    draft = work / "output" / "_work" / f"{cid}_{bid}{suf}_numbered.md"
     if draft.exists():
         draft.unlink()
     qa_rep = work / "output" / "_work" / f"{cid}_{bid}_qa.json"
@@ -210,14 +249,15 @@ def main() -> None:
     ap.add_argument("work")
     ap.add_argument("--chapter", required=True)
     ap.add_argument("--block", required=True)
-    ap.add_argument("--draft", default=None, help="既定: output/_work/chXXX_bY_ja_numbered.md")
+    ap.add_argument("--draft", default=None, help="既定: output/_work/chXXX_bY_<dst>_numbered.md（訳文言語による）")
     ap.add_argument("--emit", action="store_true", help="合格時に正式出力へ書き込む")
     ap.add_argument("--no-strict", action="store_true", help="段落数不一致でも警告のみ")
     args = ap.parse_args()
 
     work = Path(args.work)
     cid, bid = args.chapter, args.block
-    draft = Path(args.draft) if args.draft else work / "output" / "_work" / f"{cid}_{bid}_ja_numbered.md"
+    suf = target_suffix(direction(work)[1])
+    draft = Path(args.draft) if args.draft else work / "output" / "_work" / f"{cid}_{bid}{suf}_numbered.md"
     if not draft.exists():
         raise SystemExit(f"ドラフトがありません: {draft}")
 
@@ -230,7 +270,7 @@ def main() -> None:
 
     if report["pass"] and args.emit:
         emit(work, cid, bid, items)
-        print(f"[emit] {work / 'output' / cid / (bid + '_ja.md')}")
+        print(f"[emit] {work / 'output' / cid / (bid + suf + '.md')}")
         sys.exit(0)
     sys.exit(0 if report["pass"] else 1)
 

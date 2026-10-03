@@ -6,11 +6,11 @@
 
 検査内容:
   1. 段落マーカーの欠落・重複・過不足
-  2. 発話段落（原文が鉤括弧で始まる）と訳文の対応
+  2. 発話段落（原文が会話頭で始まる）と訳文の対応
   3. 原文と訳文の文字数比が極端に外れた段落の警告
      （段落の結合・分割・丸ごと欠落を検出する）
 
-日本語化で原文より長くなる段落は文字数比が 2.6 を超えることがあり、
+訳文言語により原文より長くなる段落は文字数比が 2.6 を超えることがあり、
 内容的に正しいのに警告が出る。中身を目で確認して問題なしと判断した段落は
 `--ack P1336,P1401` のように列挙すると警告から外せる（検査記録が残るので
 黙って無視するより安全）。
@@ -22,6 +22,9 @@ import sys
 import tomllib
 
 SKILL_ROOT = pathlib.Path(__file__).resolve().parent
+
+sys.path.insert(0, str(SKILL_ROOT))
+from _lib import align_ratio_floor, dialogue_heads, direction, target_suffix  # noqa: E402
 
 
 def load_source(workdir: pathlib.Path, chapter: str):
@@ -74,7 +77,11 @@ def main():
     a, z = blk["paras"]
     expected = list(range(a, z + 1))
 
-    draft_path = workdir / "output/_work" / f"{ch['id']}_{args.block}_ja_numbered.md"
+    src_lang, dst_lang = direction(workdir)
+    suf = target_suffix(dst_lang)
+    src_heads, dst_heads = dialogue_heads(src_lang, dst_lang)
+    ratio_floor = align_ratio_floor(src_lang, dst_lang)
+    draft_path = workdir / "output/_work" / f"{ch['id']}_{args.block}{suf}_numbered.md"
     if not draft_path.exists():
         print(f"ドラフトなし: {draft_path}")
         return 1
@@ -93,13 +100,13 @@ def main():
             continue
         src = para_map[n].strip()
         ja = draft[n]
-        # 原文が会話（“ ”か[]括り）で訳が会話でない場合のみ警告する。
-        # 訳側だけ「」で始まるのは、原文が鉤括弧を文中に置く場合の正当な語順変更。
-        if src.startswith(("“", "[", "［")) and not ja.startswith(("「", "『", "（", "(")):
+        # 原文が会話なのに訳が会話でない場合のみ警告する。
+        # 訳側だけ会話頭で始まるのは、原文が引用符を文中に置く場合の正当な語順変更。
+        if src.startswith(src_heads) and not ja.startswith(dst_heads):
             problems.append(f"P{n:03d} 原文は会話だが訳が会話になっていない")
-        # 短い段落は日本語化で伸縮が大きいので、長さ比の検査は25字以上に限る
+        # 短い段落は訳文言語により伸縮が大きいので、長さ比の検査は25字以上に限る
         ratio = len(ja) / max(len(src), 1)
-        if len(src) >= 25 and (ratio < 0.45 or ratio > 2.6):
+        if len(src) >= 25 and (ratio < ratio_floor or ratio > 2.6):
             problems.append(f"P{n:03d} 文字数比 {ratio:.2f}（原文{len(src)}→訳{len(ja)}）")
 
     if problems:

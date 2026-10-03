@@ -31,20 +31,11 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _lib import atomic_write_text, utf8  # noqa: E402
+from _lib import atomic_write_text, direction, target_quotes, target_suffix, utf8  # noqa: E402
 from qa_translation import layout_lines  # noqa: E402
 
-QOPEN, QCLOSE = "「", "」"
+QOPEN, QCLOSE = "「", "」"  # 既定（zh→ja）。訳文言語ごとの値は _lib.target_quotes
 
-# (glob, 対訳か) の順に処理する
-TARGETS = (
-    ("ch*/b*_ja.md", False),
-    ("ch*_ja.md", False),
-    ("全文_訳文.md", False),
-    ("ch*/b*_parallel.md", True),
-    ("ch*_parallel.md", True),
-    ("全文_対訳.md", True),
-)
 
 
 def read_normalized(path: Path) -> tuple[str, str]:
@@ -77,23 +68,23 @@ def is_original_block(block: list[str]) -> bool:
     return all(l.startswith("#") or l.startswith("<!--") for l in block)
 
 
-def block_issues(block: list[str], *, parallel: bool = False) -> list[tuple[str, str]]:
+def block_issues(block: list[str], *, parallel: bool = False, qopen: str = QOPEN, qclose: str = QCLOSE) -> list[tuple[str, str]]:
     """ブロック内の問題 [(種別, 行)] を返す。種別: 不閉じ/閉じ過多/融合疑い。"""
-    if not any(QOPEN in l or QCLOSE in l for l in block):
+    if not any(qopen in l or qclose in l for l in block):
         return []
-    opens = sum(l.count(QOPEN) for l in block)
-    closes = sum(l.count(QCLOSE) for l in block)
+    opens = sum(l.count(qopen) for l in block)
+    closes = sum(l.count(qclose) for l in block)
     if opens > closes:
-        return [("不閉じ", l) for l in block if l.count(QOPEN) > l.count(QCLOSE)]
+        return [("不閉じ", l) for l in block if l.count(qopen) > l.count(qclose)]
     if closes > opens:
-        return [("閉じ過多", l) for l in block if l.count(QCLOSE) > l.count(QOPEN)]
+        return [("閉じ過多", l) for l in block if l.count(qclose) > l.count(qopen)]
     if parallel:
         # 対訳の訳文側は複数行の段落(段落内改行)を持ちうる。
-        # 段落融合の疑いは訳文単体(_ja.md / 全文_訳文.md)で検出する。
+        # 段落融合の疑いは訳文単体(<dst>.md / 全文_訳文.md)で検出する。
         return []
     run = 0
     for k, ln in enumerate(block):
-        run += ln.count(QOPEN) - ln.count(QCLOSE)
+        run += ln.count(qopen) - ln.count(qclose)
         if run == 0 and k < len(block) - 1:
             return [("融合疑い", block[k + 1])]
     return []
@@ -115,7 +106,7 @@ def tab_issues(lines: list[str]) -> list[str]:
     return bad
 
 
-def analyze(text: str, *, parallel: bool = False) -> list[tuple[str, str]]:
+def analyze(text: str, *, parallel: bool = False, qopen: str = QOPEN, qclose: str = QCLOSE) -> list[tuple[str, str]]:
     """[(種別, 行の抜粋)] を返す。"""
     issues: list[tuple[str, str]] = []
     lines = text.split("\n")
@@ -124,7 +115,7 @@ def analyze(text: str, *, parallel: bool = False) -> list[tuple[str, str]]:
             continue
         if all(l.startswith("#") or l.startswith("<!--") for l in block):
             continue
-        for kind, ln in block_issues(block, parallel=parallel):
+        for kind, ln in block_issues(block, parallel=parallel, qopen=qopen, qclose=qclose):
             issues.append((kind, ln.strip()[:70]))
     if parallel:
         for ln in tab_issues(lines):
@@ -152,7 +143,7 @@ def fix_tabs(lines: list[str]) -> tuple[list[str], int]:
     return out, n
 
 
-def fix_blocks(blocks: list[list[str]], *, parallel: bool = False) -> tuple[list[str], int]:
+def fix_blocks(blocks: list[list[str]], *, parallel: bool = False, qopen: str = QOPEN, qclose: str = QCLOSE) -> tuple[list[str], int]:
     """不閉じ行の補完と、段落区切りが潰れたブロックの分割を行った結果を返す。"""
     out: list[str] = []
     appended = 0
@@ -160,30 +151,30 @@ def fix_blocks(blocks: list[list[str]], *, parallel: bool = False) -> tuple[list
         if parallel and is_original_block(block):
             out.append("\n".join(block))
             continue
-        kinds = [k for k, _ in block_issues(block, parallel=parallel)]
+        kinds = [k for k, _ in block_issues(block, parallel=parallel, qopen=qopen, qclose=qclose)]
         if not kinds:
             out.append("\n".join(block))
             continue
         fixed: list[str] = []
         if "不閉じ" in kinds:
             for ln in block:
-                o, c = ln.count(QOPEN), ln.count(QCLOSE)
+                o, c = ln.count(qopen), ln.count(qclose)
                 if o > c:
-                    ln = ln + QCLOSE * (o - c)
+                    ln = ln + qclose * (o - c)
                     appended += o - c
                 fixed.append(ln)
         else:
             # 収支が途中で 0 に戻る(段落区切りが潰れた)ブロックは、
             # 空行区切りへ再整形すると区切りが復元される
             fixed = list(block)
-        out.extend(layout_lines("\n".join(fixed)).split("\n\n"))
+        out.extend(layout_lines("\n".join(fixed), qopen, qclose).split("\n\n"))
     return out, appended
 
 
-def process(path: Path, *, parallel: bool, fix: bool) -> int:
+def process(path: Path, *, parallel: bool, fix: bool, qopen: str = QOPEN, qclose: str = QCLOSE) -> int:
     """残った課題数を返す。"""
     text, eol = read_normalized(path)
-    issues = analyze(text, parallel=parallel)
+    issues = analyze(text, parallel=parallel, qopen=qopen, qclose=qclose)
     if not issues:
         print(f"[OK] {path.name}")
         return 0
@@ -196,11 +187,11 @@ def process(path: Path, *, parallel: bool, fix: bool) -> int:
     tabs = 0
     if parallel:
         lines, tabs = fix_tabs(lines)
-    fixed_blocks, appended = fix_blocks(split_blocks(lines), parallel=parallel)
+    fixed_blocks, appended = fix_blocks(split_blocks(lines), parallel=parallel, qopen=qopen, qclose=qclose)
     fixed = "\n\n".join(fixed_blocks) + "\n"
     if fixed != text:
         atomic_write_text(path, fixed.replace("\n", eol))
-    remaining = analyze(fixed, parallel=parallel)
+    remaining = analyze(fixed, parallel=parallel, qopen=qopen, qclose=qclose)
     print(f"[fix] {path.name}: 補完 {appended} 箇所 / タブ {tabs} 行 / 残り {len(remaining)} 件")
     for kind, sample in remaining[:8]:
         print(f"    [{kind}] {sample}")
@@ -222,12 +213,24 @@ def main() -> None:
         else:
             raise SystemExit(f"output がありません: {out}")
 
+    _, dst = direction(Path(args.work))
+    suf = target_suffix(dst)
+    qopen, qclose = target_quotes(dst)
+    # (glob, 対訳か)。訳文ファイルの接尾辞は方向による（_ja / _zh）
+    targets = (
+        (f"ch*/b*{suf}.md", False),
+        (f"ch*{suf}.md", False),
+        ("全文_訳文.md", False),
+        ("ch*/b*_parallel.md", True),
+        ("ch*_parallel.md", True),
+        ("全文_対訳.md", True),
+    )
     total = 0
     n_files = 0
-    for pat, par in TARGETS:
+    for pat, par in targets:
         for path in sorted(out.glob(pat)):
             n_files += 1
-            total += process(path, parallel=par, fix=args.fix)
+            total += process(path, parallel=par, fix=args.fix, qopen=qopen, qclose=qclose)
     if total == 0:
         print(f"layout: 全てOK（{n_files} ファイル）")
     else:

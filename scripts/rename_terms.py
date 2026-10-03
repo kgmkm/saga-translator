@@ -7,13 +7,14 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _lib import atomic_write_text, save_json, utf8  # noqa: E402
+from _lib import atomic_write_text, direction, save_json, target_suffix, utf8  # noqa: E402
 
 
 def scan(work: Path, old: str) -> list[dict]:
     hits = []
     out_dir = work / "output"
-    for f in sorted(out_dir.rglob("*_ja.md")):
+    suf = target_suffix(direction(work)[1])
+    for f in sorted(out_dir.rglob(f"*{suf}.md")):
         rel = f.relative_to(out_dir)
         text = f.read_text(encoding="utf-8")
         paras = [p for p in re.split(r"\n\s*\n", text) if p.strip()]

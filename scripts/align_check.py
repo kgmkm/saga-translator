@@ -2,8 +2,7 @@
 """訳文ドラフトの段落対応を「会話/非会話」と文字数比で点検する。
 
 check_align.py が見るのは段落数と大まかな整合だが、原文の複数段落を1つに
-まとめて別の段落を2つに割ると総数が合ってしまい、中身が1〜2段落ずれる
-（#4-b14, #5-b8/b22/b26/b28/b29 で発生）。このツールは各段落で
+まとめて別の段落を2つに割ると総数が合ってしまい、中身が1〜2段落ずれることがある。このツールは各段落で
 「原文が会話なら訳も会話か」を突き合わせ、ずれを機械的に炙り出す。
 
 **QA(--emit)より前に使う**。--emit は [Pn] マーカーを除去するため、確定後の
@@ -20,12 +19,19 @@ import sys
 import tomllib
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _lib import direction, target_suffix  # noqa: E402
 
 QUOTE_HEADS = ("「", "『", "（", "(", "“", "‘", '"', "'", "[", "［")  # 原文がASCII引用符・[]括り台詞の区間あり
+# 構造マーカーで始まる段落は対話ではない（ルビ・挿絵タグ・章見出し）。
+# 原文側の [[rb:…]] 始まりの地の文を対話と誤検出するのを防ぐ。
+_NON_DIALOGUE_HEADS = ("[[rb:", "[pixivimage:", "[chapter:", "[newpage]", "[uploadedimage:")
 
 
 def is_dialogue(t: str) -> bool:
-    return t.lstrip().startswith(QUOTE_HEADS)
+    s = t.lstrip()
+    if s.startswith(_NON_DIALOGUE_HEADS):
+        return False
+    return s.startswith(QUOTE_HEADS)
 
 
 def main() -> int:
@@ -52,7 +58,7 @@ def main() -> int:
     blk = [b for b in ch["blocks"] if b["id"] == args.block][0]
     a, z = blk["paras"]
 
-    f = wd/"output"/"_work"/f"{ch['id']}_{args.block}_ja_numbered.md"
+    f = wd/"output"/"_work"/f"{ch['id']}_{args.block}{target_suffix(direction(wd)[1])}_numbered.md"
     if not f.exists():
         print(f"[{args.block}] ドラフトが無い（--emit 済み？）: {f}")
         return 1

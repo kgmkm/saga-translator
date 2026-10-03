@@ -11,10 +11,10 @@ qa_translation.py の non_jis_han 検査と同じ基準(_lib.find_non_jis_han)�
 手作業で直す往復が発生するのを防ぐ。
 
 使い方:
-    python3 jp_fix.py <draft.md> [...]        # その場で修正
-    python3 jp_fix.py --check <draft.md>      # 検出のみ
+    python3 scripts/normalize/zh2ja.py <draft.md> [...]        # その場で修正
+    python3 scripts/normalize/zh2ja.py --check <draft.md>      # 検出のみ
 使い方(work_id指定・_work と確定済みの両方を見る):
-    python3 jp_fix.py --all <work_id>         # <work_id>/output/_work と output/ch001
+    python3 scripts/normalize/zh2ja.py --all <work_id>         # <work_id>/output/_work と output/ch001
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ import pathlib
 import re
 import sys
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from _lib import find_non_jis_han  # noqa: E402
 
 

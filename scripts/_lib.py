@@ -31,17 +31,76 @@ strict_paragraph = true    # 段落数不一致を不合格にする
 
 
 def _load_lang_packs() -> dict:
-    """scripts/lang_*.py を登録する。循環importを避けるため遅延しない(pack側は _lib をimportしない)。"""
+    """scripts/lang/<lang>.py を登録する。循環importを避けるため遅延しない(pack側は _lib をimportしない)。"""
     packs: dict = {}
     try:
-        import lang_zh
-        packs["zh"] = lang_zh
+        from lang import zh as pack_zh
+        packs["zh"] = pack_zh
+    except ImportError:
+        pass
+    try:
+        from lang import ja as pack_ja
+        packs["ja"] = pack_ja
     except ImportError:
         pass
     return packs
 
 
 LANG_PACKS = _load_lang_packs()
+
+
+# 対応する翻訳方向 (src, dst)。manifest.dst が無ければ src から推定する。
+DST_BY_SRC = {"zh": "ja", "ja": "zh"}
+
+
+def direction(work) -> tuple[str, str]:
+    """(原語, 訳文言語) を返す。manifest が無ければ zh→ja（後方互換）。"""
+    try:
+        man = load_structured(Path(work) / "manifest")
+    except (FileNotFoundError, OSError):
+        man = {}
+    src = man.get("lang") or "zh"
+    dst = man.get("dst") or DST_BY_SRC.get(src, "ja")
+    return src, dst
+
+
+def target_suffix(dst: str) -> str:
+    """訳文ファイルの接尾辞（_ja / _zh）。未知の言語は _<dst>。"""
+    return {"ja": "_ja", "zh": "_zh"}.get(dst, f"_{dst}")
+
+
+def target_quotes(dst: str) -> tuple[str, str]:
+    """訳文の台詞引用符。(開き, 閉じ)。"""
+    return {"zh": ("“", "”")}.get(dst, ("「", "」"))
+
+
+def target_title(titles: dict, dst: str) -> str:
+    """titles.toml から訳文タイトル。dst 欄を優先し、もう一方で補う。"""
+    other = "ja" if dst == "zh" else "zh"
+    return ((titles.get(f"title_{dst}") or titles.get(f"title_{other}")) or "").strip()
+
+
+def chapter_title(entry: dict, dst: str, fallback: str = "") -> str:
+    """章見出しの訳文。dst 欄を優先し、もう一方・原文で補う。"""
+    other = "ja" if dst == "zh" else "zh"
+    return entry.get(dst) or entry.get(other) or fallback
+
+
+# 会話判定の段落頭（方向別）。中国語原文は “…/[…] 括り、日本語原文は「…」。
+_DIALOGUE_HEADS = {
+    ("zh", "ja"): (("“", "[", "［"), ("「", "『", "（", "(")),
+    ("ja", "zh"): (("「", "『", "（", "("), ("“", "（", "(")),
+}
+
+
+def dialogue_heads(src: str, dst: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(原文側の会話頭, 訳文側の会話頭)。未知の方向は zh→ja 扱い。"""
+    return _DIALOGUE_HEADS.get((src, dst), _DIALOGUE_HEADS[("zh", "ja")])
+
+
+def align_ratio_floor(src: str, dst: str) -> float:
+    """check_align の文字数比下限。中国語は日本語より短くなる。"""
+    return 0.30 if (src, dst) == ("ja", "zh") else 0.45
 
 
 def utf8() -> None:
@@ -260,8 +319,9 @@ def _load_analysis_file(work: Path, names: list[str], empty: dict) -> dict:
             validate_expected(p, data, {"entries": "list_of_dicts"})
         elif name == "titles.toml":
             expect = {"chapters": "list_of_dicts"} if "chapters" in data else {}
-            if "title_ja" in data:
-                expect["title_ja"] = "str"
+            for _tk in ("title_ja", "title_zh"):
+                if _tk in data:
+                    expect[_tk] = "str"
             if expect:
                 validate_expected(p, data, expect)
         return data
@@ -312,9 +372,10 @@ def all_blocks_emitted(work: Path, meta: dict) -> bool:
     if not chapters:
         return False
     work = Path(work)
+    suf = target_suffix(direction(work)[1])
     for c in chapters:
         for b in c.get("blocks") or []:
-            if not (work / "output" / c["id"] / f"{b['id']}_ja.md").exists():
+            if not (work / "output" / c["id"] / f"{b['id']}{suf}.md").exists():
                 return False
     return True
 
@@ -534,11 +595,11 @@ def parse_filename(path: Path) -> dict:
     return d
 
 
-# 共通の章見出し。言語固有は lang_*.py の CHAPTER_ALTS
+# 共通の章見出し。言語固有は scripts/lang/<lang>.py の CHAPTER_ALTS
 COMMON_CHAPTER_ALTS = r"[Cc]hapter\s*\d+|[Cc]HAPTER\s*\d+"
 NUM_LINE = re.compile(r"^\s*[0-9０-９]{1,4}\s*$")
 # 場面転換記号(ブロック分割の優先境界)
-SCENE_BREAK = re.compile(r"^\s*(?:[-*＊※ー=─]{3,}|…{2,}|·{3,}|・{3,}|[○●◇◆▼▲☆★※✦])\s*$")
+SCENE_BREAK = re.compile(r"^\s*(?:[-*＊※ー=─]{3,}|…{2,}|·{3,}|・{3,}|[○●◇◆▼▲☆★※✦]|\[chapter:[^\]]*\]|\[newpage\])\s*$")
 
 
 def compile_chapter_re(lang: str | None = None) -> re.Pattern:

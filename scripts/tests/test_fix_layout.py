@@ -48,7 +48,7 @@ class TestAnalyze(unittest.TestCase):
 
     def test_parallel_multiline_ja_block_is_not_glued(self):
         # 対訳の訳文側は複数行(段落内改行)を持ちうる。融合疑いは出さない
-        text = "> [P001] 原文\n\n「司令？」\n神田優の声が沈黙を破った。\n「あなたは……」\n"
+        text = "> [P001] 原文\n\n「司令？」\n少女の声が沈黙を破った。\n「あなたは……」\n"
         self.assertEqual(fix_layout.analyze(text, parallel=True), [])
 
     def test_parallel_missing_tab_is_detected(self):

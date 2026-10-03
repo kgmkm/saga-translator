@@ -2,6 +2,13 @@
 
 作業中と完了後で残るファイルが違う。構造化データは TOML（旧JSONも読む）。対訳（原文＋訳文の対照）は `--parallel`、または年齢正規化の記録（`analysis/age_policy_report-[ネタバレあり].md`）がある作品で出力する。
 
+## 翻訳方向
+
+- 原語は ingest が判定して `manifest.lang` に書く。訳文言語は `manifest.dst`（`ingest --dst`。無ければ原語から推定: zh→ja / ja→zh）
+- 訳文ファイルの接尾辞・章ファイル名は訳文言語による（`_ja` / `_zh`）。機械的な判定は `_lib.direction` が持つ
+- `titles.toml` は `title_ja` / `title_zh`・章見出し `ja` / `zh` を持ち、訳文言語の欄を優先する（もう一方で補う）
+- 人物表・用語集の `*_ja` 欄には訳文言語の訳語を書く（`*_src` は原語キーのまま）。`name_ja` 等の欄名は方向によらず共通
+
 ## ディレクトリ
 
 作業中:
@@ -21,9 +28,9 @@
 ├── translation_input/       # 完了後に削除
 ├── output/
 │   ├── images/              # 画像置き場。訳文からは常に images/… で参照
-│   ├── chNNN/bY_ja.md       # 完了後に章ファイルへ吸収して削除
+│   ├── chNNN/bY_<dst>.md     # 完了後に章ファイルへ吸収して削除（訳文言語により _ja / _zh）
 │   ├── chNNN/bY_parallel.md # 対訳の中間物。assemble が章・全文対訳を作る
-│   ├── chNNN_ja.md
+│   ├── chNNN_<dst>.md        # 同上
 │   ├── chNNN_parallel.md    # --parallel、または年齢正規化の記録がある作品で出力
 │   ├── 全文_訳文.md
 │   ├── 全文_対訳.md         # 同上。> [Pnnn] 付きで原文と訳文を対にする
@@ -42,9 +49,9 @@
 
 ```toml
 [[characters]]
-name_src = "菲娜莉-贝莉安娜"
-name_ja = "フィナリ・ベリアナ"
-ruby = "ふぃなり・べりあな"
+name_src = "张三-李四"
+name_ja = "チョウサン・リシ"
+ruby = "ちょうさん・りし"
 role = "最強剣士・伯爵令嬢"
 first_person = "私(わたくし)"
 second_person = "あなた"
@@ -52,9 +59,9 @@ speech_style = "丁寧な令嬢口調。語尾は「〜ですわ」「〜ます�
 vocab = "漢語は使うが俗語は使わない。擬音は少ない"
 catchphrase = "〜ですわね"
 appearance = "銀髪ロングの美少女"
-relationships = "佑斗のチームメイト"
+relationships = "王五のチームメイト"
 address = [
-  { target_src = "佑斗", target_ja = "佑斗", form = "佑斗さん" },
+  { target_src = "王五", target_ja = "王五", form = "王五さん" },
 ]
 arcs = [
   { at_block = "ch001/b1", first_person = "私(わたくし)", speech_style = "丁寧な令嬢口調。語尾は「〜ですわ」「〜ますわね」", note = "登場時点" },
@@ -89,7 +96,7 @@ memo = "技術名。初出は第1章"
 ```toml
 [[entries]]
 block = "ch001/b1"
-text = "佑斗の悪夢と金冠。戴冠。艾卓の異変に気づく"
+text = "王五の悪夢と戴冠。黒ずくめの男の異変に気づく"
 ```
 
 ファイル名に `[ネタバレあり]` を必ず含める。

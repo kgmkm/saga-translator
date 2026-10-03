@@ -200,7 +200,7 @@ def resolve_order(built, explicit, prog):
 
 def resolve_title(work: Path, wid: str, prog):
     """訳題の解決: titles.toml → 全文の見出し → 進捗.md 訳題 → 原題（要確認）。"""
-    t = toml_string(work / "analysis" / "titles.toml", "title_ja")
+    t = toml_string(work / "analysis" / "titles.toml", "title_ja") or toml_string(work / "analysis" / "titles.toml", "title_zh")
     if t:
         return t, "titles.toml"
     full = work / "output" / "全文_訳文.md"
@@ -331,10 +331,15 @@ def repair_sources(infos, prog) -> None:
             if rec["title_src"] in ("全文の見出し", "進捗.md 訳題"):
                 src = (toml_string(work / "chapters_meta.toml", "title", section="work")
                        or toml_string(work / "manifest.toml", "title") or "")
+                try:
+                    from _lib import direction as _direction
+                    _dst = _direction(work)[1]
+                except Exception:
+                    _dst = "ja"
                 body = (
                     "# 作品タイトル。\n\n"
                     f'title_src = "{toml_escape(src)}"\n'
-                    f'title_ja = "{toml_escape(title)}"\n'
+                    f'title_{_dst} = "{toml_escape(title)}"\n'
                     f'note = "連作版ビルド時に補完（{rec["title_src"]}から解決）"\n'
                 )
                 tp.parent.mkdir(parents=True, exist_ok=True)

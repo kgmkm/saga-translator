@@ -20,6 +20,16 @@ IMG_REF = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
 XHTML_TAG = re.compile(r"<[^>]+>")
 UPLOADED_IMAGE = re.compile(r"\[uploadedimage:(\d+)\]", re.I)
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+# pixiv の [newpage] を行区切り、[chapter:] を独立段落に正規化する
+NEWPAGE = re.compile(r"\n?[ \t]*\[newpage\][ \t]*\n?")
+
+
+def normalize_pixiv_markers(text: str) -> str:
+    """pixiv の [newpage]・[chapter:] を段落境界として書き直す。"""
+    text = NEWPAGE.sub("\n\n[newpage]\n\n", text)
+    text = re.sub(r"\n(?=\[chapter:)", "\n\n", text)
+    text = re.sub(r"(?m)^(\[chapter:[^\]]*\])\n(?=\S)", lambda m: m.group(1) + "\n\n", text)
+    return text
 # 旧配置(../images)も含めて images/<file> 参照を images/<file> に正規化する
 MD_IMAGE_SRC = re.compile(r"!\[([^\]]*)\]\((?:\.\./)*images/([^)]+)\)")
 
@@ -211,6 +221,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="入力の取り込み")
     ap.add_argument("input", help="TXT/MD/EPUBファイル")
     ap.add_argument("-o", "--out", default=None, help="ワークスペース親ディレクトリ(既定: 入力の隣の _saga/)")
+    ap.add_argument("--dst", default=None, help="訳文言語(既定: 原語から推定 zh→ja / ja→zh)")
     args = ap.parse_args()
 
     src = Path(args.input).resolve()
@@ -250,6 +261,7 @@ def main() -> None:
             hdr, body_text = parse_novel_header(text)
             if hdr:
                 meta.update(hdr)
+        body_text = normalize_pixiv_markers(body_text)
         body_text, up_copied, missing_ids = rewrite_uploaded_images(
             body_text, images_dir, image_search_dirs(src.parent, work)
         )
@@ -268,6 +280,11 @@ def main() -> None:
         lines = [ln.strip().lstrip("\u3000\t ") for ln in body_text.replace("\r\n", "\n").split("\n")]
         paras = [ln for ln in lines if ln]
     meta.update(guess_lang("\n".join(paras)))
+    src_lang = meta.get("lang") or "zh"
+    dst_lang = args.dst or {"zh": "ja", "ja": "zh"}.get(src_lang, "ja")
+    if (src_lang, dst_lang) not in (("zh", "ja"), ("ja", "zh")):
+        print(f"[ingest] 注意: 未対応の方向 {src_lang}→{dst_lang}(汎用 rule で処理)")
+    meta["dst"] = dst_lang
     meta["n_paras"] = len(paras)
     meta["n_chars"] = sum(len(p) for p in paras)
     meta["images_copied"] = copied
@@ -282,7 +299,7 @@ def main() -> None:
 
     print(f"[ingest] work: {work}")
     print(f"[ingest] title: {meta['title']} / author: {meta.get('author')}")
-    print(f"[ingest] lang: {meta['lang']} / script: {meta.get('han_script')} / paras: {meta['n_paras']} / chars: {meta['n_chars']}")
+    print(f"[ingest] lang: {meta['lang']}→{meta['dst']} / script: {meta.get('han_script')} / paras: {meta['n_paras']} / chars: {meta['n_chars']}")
     if copied:
         print(f"[ingest] images: {len(copied)} copied")
     if remote:

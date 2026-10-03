@@ -113,18 +113,18 @@ class TestContextFmt(unittest.TestCase):
     def test_fmt_characters_splits_voice_fields(self):
         from build_context import fmt_characters
         text = fmt_characters({"characters": [{
-            "name_src": "菲娜莉",
-            "name_ja": "フィナリ",
+            "name_src": "张三",
+            "name_ja": "チョウサン",
             "first_person": "あたし",
             "second_person": "あなた",
             "speech_style": "タメ口。語尾は「〜だよ」「〜じゃん」",
             "vocab": "擬音が多い",
             "catchphrase": "まかせて！",
-            "address": [{"target_ja": "佑斗", "form": "佑斗さん"}],
+            "address": [{"target_ja": "王五", "form": "王五さん"}],
         }]})
         self.assertIn("一人称: あたし", text)
         self.assertIn("二人称: あなた", text)
-        self.assertIn("佑斗→佑斗さん", text)
+        self.assertIn("王五→王五さん", text)
         self.assertIn("口調: タメ口。語尾は「〜だよ」「〜じゃん」", text)
         self.assertIn("語彙: 擬音が多い", text)
         self.assertIn("口癖: まかせて！", text)
@@ -143,7 +143,7 @@ class TestContextFmt(unittest.TestCase):
     def test_fmt_arcs_new_fields(self):
         from build_context import fmt_arcs
         text = fmt_arcs({"characters": [{
-            "name_ja": "フィナリ",
+            "name_ja": "チョウサン",
             "arcs": [{
                 "at_block": "ch001/b3",
                 "first_person": "あたし",
@@ -172,7 +172,7 @@ class TestQa(unittest.TestCase):
         meta = {"chapters": [{"id": "ch001", "title": None, "blocks": [{"id": "b1", "paras": [1, 4]}]}]}
         (self.tmp / "chapters_meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
         (self.tmp / "analysis" / "characters.json").write_text(
-            json.dumps({"characters": [{"name_src": "菲娜莉", "name_ja": "フィナリ"}]}, ensure_ascii=False), encoding="utf-8")
+            json.dumps({"characters": [{"name_src": "张三", "name_ja": "チョウサン"}]}, ensure_ascii=False), encoding="utf-8")
         self.json = json
         self.shutil = shutil
 
@@ -204,19 +204,19 @@ class TestQa(unittest.TestCase):
     def test_qa_leftover_name_fail(self):
         from qa_translation import run_qa
         draft = self.tmp / "draft.md"
-        draft.write_text("[P001] 菲娜莉は走った。\n\n[P002] 訳二。\n\n[P003] 訳三。\n\n[P004] 訳四。", encoding="utf-8")
+        draft.write_text("[P001] 张三は走った。\n\n[P002] 訳二。\n\n[P003] 訳三。\n\n[P004] 訳四。", encoding="utf-8")
         report, _ = run_qa(self.tmp, "ch001", "b1", draft)
         self.assertFalse(report["pass"])
-        self.assertEqual(report["checks"]["leftover_source_names"]["found"][0]["name_src"], "菲娜莉")
+        self.assertEqual(report["checks"]["leftover_source_names"]["found"][0]["name_src"], "张三")
 
     def test_qa_leftover_name_in_ja_ok(self):
-        # 訳語に漢字がそのまま含まれる名前(夜蜘→暗影監察長・夜蜘)は残留扱いしない
+        # 訳語に漢字がそのまま含まれる名前(灰狼→暗影団の頭目・灰狼)は残留扱いしない
         from qa_translation import run_qa
         (self.tmp / "analysis" / "characters.json").write_text(
-            self.json.dumps({"characters": [{"name_src": "夜蜘", "name_ja": "暗影監察長・夜蜘"}]},
+            self.json.dumps({"characters": [{"name_src": "灰狼", "name_ja": "暗影団の頭目・灰狼"}]},
                             ensure_ascii=False), encoding="utf-8")
         draft = self.tmp / "draft.md"
-        draft.write_text("[P001] 暗影監察長・夜蜘が現れた。\n\n[P002] 訳二。\n\n[P003] 訳三。\n\n[P004] 訳四。", encoding="utf-8")
+        draft.write_text("[P001] 暗影団の頭目・灰狼が現れた。\n\n[P002] 訳二。\n\n[P003] 訳三。\n\n[P004] 訳四。", encoding="utf-8")
         report, _ = run_qa(self.tmp, "ch001", "b1", draft)
         self.assertTrue(report["checks"]["leftover_source_names"]["pass"])
 
@@ -224,7 +224,7 @@ class TestQa(unittest.TestCase):
         # 日本語に無い漢字(簡体字・原文の誤字)が残ったら不合格
         from qa_translation import run_qa
         draft = self.tmp / "draft.md"
-        draft.write_text("[P001] 汐剑海斗が入ってきた。\n\n[P002] 訳二。\n\n[P003] 訳三。\n\n[P004] 訳四。", encoding="utf-8")
+        draft.write_text("[P001] 沈剑平が入ってきた。\n\n[P002] 訳二。\n\n[P003] 訳三。\n\n[P004] 訳四。", encoding="utf-8")
         report, _ = run_qa(self.tmp, "ch001", "b1", draft)
         self.assertFalse(report["pass"])
         self.assertEqual(report["checks"]["non_jis_han"]["found"][0]["char"], "剑")
@@ -232,7 +232,7 @@ class TestQa(unittest.TestCase):
     def test_qa_non_jis_han_ok(self):
         from qa_translation import run_qa
         draft = self.tmp / "draft.md"
-        draft.write_text("[P001] 汐見海斗が入ってきた。\n\n[P002] 訳二。\n\n[P003] 訳三。\n\n[P004] 訳四。", encoding="utf-8")
+        draft.write_text("[P001] 沈見平が入ってきた。\n\n[P002] 訳二。\n\n[P003] 訳三。\n\n[P004] 訳四。", encoding="utf-8")
         report, _ = run_qa(self.tmp, "ch001", "b1", draft)
         self.assertTrue(report["checks"]["non_jis_han"]["pass"])
 
@@ -274,10 +274,10 @@ class TestQa(unittest.TestCase):
     def test_find_non_jis_han(self):
         from _lib import find_non_jis_han
         self.assertEqual(find_non_jis_han("日本語の文章。"), [])
-        hits = find_non_jis_han("汐剑海斗")
+        hits = find_non_jis_han("沈剑平")
         self.assertEqual(hits, [("剑", 1)])
         # JIS収録だが読めない字は言語packのNON_JIS_HANで拾う
-        hits = find_non_jis_han("松下筱")
+        hits = find_non_jis_han("高橋筱")
         self.assertEqual(hits, [("筱", 1)])
 
 
@@ -287,7 +287,7 @@ class TestRename(unittest.TestCase):
         import tempfile
         self.tmp = Path(tempfile.mkdtemp())
         (self.tmp / "output" / "ch001").mkdir(parents=True)
-        (self.tmp / "output" / "ch001" / "b1_ja.md").write_text("フィナリは剣を振る。フィナリの眼は澄む。", encoding="utf-8")
+        (self.tmp / "output" / "ch001" / "b1_ja.md").write_text("山田太郎は剣を振る。山田太郎の眼は澄む。", encoding="utf-8")
         self.shutil = shutil
 
     def tearDown(self):
@@ -295,13 +295,13 @@ class TestRename(unittest.TestCase):
 
     def test_scan_and_apply(self):
         from rename_terms import scan
-        hits = scan(self.tmp, "フィナリ")
+        hits = scan(self.tmp, "山田太郎")
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0]["total"], 2)
         self.assertTrue(hits[0]["multi_in_para"])
         f = self.tmp / "output" / "ch001" / "b1_ja.md"
-        f.write_text(f.read_text(encoding="utf-8").replace("フィナリ", "フィナリー"), encoding="utf-8")
-        self.assertNotIn("フィナリは", f.read_text(encoding="utf-8"))
+        f.write_text(f.read_text(encoding="utf-8").replace("山田太郎", "山田花子"), encoding="utf-8")
+        self.assertNotIn("山田太郎は", f.read_text(encoding="utf-8"))
 
 
 class TestTomlAndPurge(unittest.TestCase):

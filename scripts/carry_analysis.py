@@ -48,7 +48,8 @@ def _prev_title(prev: Path) -> str:
     t = prev / "analysis" / "titles.toml"
     if t.exists():
         try:
-            v = (load_toml(t).get("title_ja") or "").strip()
+            _tt = load_toml(t)
+            v = ((_tt.get("title_ja") or _tt.get("title_zh")) or "").strip()
         except Exception:
             v = ""
         if v:

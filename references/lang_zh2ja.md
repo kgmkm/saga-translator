@@ -1,6 +1,6 @@
 # 中国語 → 日本語 翻訳tips
 
-`manifest.lang == "zh"` のとき読む。機械側は `scripts/lang_zh.py`。
+`src=zh` の方向（zh→ja）のとき読む。機械側は `scripts/lang/zh.py`。
 v1 で品質を保証するのはこの言語だけ。簡体・繁体は `han_script` を見る。
 
 ## 役割
@@ -51,7 +51,7 @@ v1 で品質を保証するのはこの言語だけ。簡体・繁体は `han_sc
 
 ### 読めない漢字・非JIS
 
-- 機械: `qa_translation` の `non_jis_han` が CP932 外 + `scripts/lang_zh.py` の `NON_JIS_HAN` を検出する
+- 機械: `qa_translation` の `non_jis_han` が CP932 外 + `scripts/lang/zh.py` の `NON_JIS_HAN` を検出する
 - 新しい読めない字に当たったら `NON_JIS_HAN` に追記する
 
 ### 簡体字の書き残し
@@ -59,7 +59,7 @@ v1 で品質を保証するのはこの言語だけ。簡体・繁体は `han_sc
 訳文ドラフトには簡体の書き残しが出る。`qa_translation.py --emit` の前に:
 
 ```bash
-python3 scripts/jp_fix.py <draft>
+python3 scripts/normalize/zh2ja.py <draft>
 ```
 
 opencc と手当て表で大半が直る。未解決だけ手で見る。一括は `--all <work_id>`、検出のみは `--check`。

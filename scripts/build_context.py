@@ -7,9 +7,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _lib import (  # noqa: E402
-    characters_toml_path, load_chapters_meta, load_characters, load_config, load_json,
+    characters_toml_path, direction, load_chapters_meta, load_characters, load_config, load_json,
     load_paras, load_plot, load_structured, load_terms, load_titles, load_toml,
-    save_chapters_meta, save_json, utf8,
+    save_chapters_meta, save_json, target_suffix, target_title, utf8,
 )
 
 
@@ -96,13 +96,14 @@ def fmt_plot(plot: dict, tail: int = 20) -> str:
 
 def prev_tail_text(work: Path, chapters: list[dict], ci: int, bi: int, k: int) -> str:
     """前ブロック(なければ前章)の訳文末尾k段落。"""
+    suf = target_suffix(direction(work)[1])
     for ci2 in range(ci, -1, -1):
         ch = chapters[ci2]
         blocks = ch["blocks"]
         for bi2 in range(len(blocks) - 1, -1, -1):
             if ci2 == ci and bi2 >= bi:
                 continue
-            path = work / "output" / ch["id"] / f"{blocks[bi2]['id']}_ja.md"
+            path = work / "output" / ch["id"] / f"{blocks[bi2]['id']}{suf}.md"
             if path.exists():
                 paras = [p.strip() for p in path.read_text(encoding="utf-8").split("\n\n") if p.strip()]
                 return "\n\n".join(paras[-k:])
@@ -132,6 +133,8 @@ def main() -> None:
     args = ap.parse_args()
 
     work = Path(args.work)
+    _, dst = direction(work)
+    suf = target_suffix(dst)
     meta_all = load_chapters_meta(work)
     chapters = meta_all["chapters"]
     cfg = load_config()
@@ -146,7 +149,7 @@ def main() -> None:
         bi = next(i for i, b in enumerate(blocks) if b["id"] == args.block)
     else:
         bi = next((i for i, b in enumerate(blocks)
-                   if not (work / "output" / args.chapter / f"{b['id']}_ja.md").exists()), 0)
+                   if not (work / "output" / args.chapter / f"{b['id']}{suf}.md").exists()), 0)
     block = blocks[bi]
     cid = chapters[ci]["id"]
     bid = block["id"]
@@ -160,9 +163,9 @@ def main() -> None:
 
     titles = load_titles(work)
     src_title = (meta_all.get("work") or {}).get("title") or ""
-    ja_title = titles.get("title_ja") or ""
-    work_line = f"作品: {ja_title or src_title or '(無題)'} / 作者: {(meta_all.get('work') or {}).get('author') or '(不明)'}"
-    if ja_title and src_title and ja_title != src_title:
+    tr_title = target_title(titles, dst)
+    work_line = f"作品: {tr_title or src_title or '(無題)'} / 作者: {(meta_all.get('work') or {}).get('author') or '(不明)'}"
+    if tr_title and src_title and tr_title != src_title:
         work_line += f" / 原題: {src_title}"
     lines = [
         f"# 翻訳コンテキスト: {cid} / {bid}(モード: {args.mode})",
@@ -179,7 +182,8 @@ def main() -> None:
     if han_script:
         lang_line += f" ({han_script})"
     if lang:
-        lang_line += f" / 言語tips: references/lang_{lang}.md （ファイルがあれば読め。無ければ汎用プロンプトのみ）"
+        pair = f"{lang}2{dst}"
+        lang_line += f" / 訳文言語: {dst} / 言語tips: references/lang_{pair}.md （ファイルがあれば読め。無ければ汎用プロンプトのみ）"
     lines += [
         lang_line,
         "",
