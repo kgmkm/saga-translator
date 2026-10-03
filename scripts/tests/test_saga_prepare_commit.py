@@ -252,15 +252,28 @@ class TestCommit(unittest.TestCase):
         self.assertFalse(done.exists())
 
     def test_commit_residue(self):
-        """残渣候補（safe_fix あり）を含むドラフト → emit は成功（候補として表示のみ）。"""
+        """残渣候補（safe_fix あり）を含むドラフト → exit 1（emit をブロック）。
+
+        レビュー完了条件「既知パターンの機械検査の未解決エラー 0 件（emit 時）」に従い、
+        safe_fix ありの候補であっても確定は止める。修正するか house_style.toml の
+        residue.known_terms に登録してから再コミットする。
+        """
         _make_draft(self.work, "ch001", "b1", [
             (1, "夜の星辰が輝く。"),
             (2, "二段目の訳。"),
             (3, "三段目の訳。"),
         ])
         rc = self._commit()
-        self.assertEqual(rc, 0)  # safe_fix ありの候補はブロックしない
+        self.assertEqual(rc, 1)  # 候補が残る間はブロック
         out = self.work / "output" / "ch001" / "b1_ja.md"
+        self.assertFalse(out.exists())
+
+        # house_style.toml の known_terms に登録すると通る
+        house = self.work / "_house" / "house_style.toml"
+        house.parent.mkdir(parents=True, exist_ok=True)
+        house.write_text("[residue]\nknown_terms = [\"星辰\"]\n", encoding="utf-8")
+        rc2 = self._commit()
+        self.assertEqual(rc2, 0)
         self.assertTrue(out.exists())
 
     def test_commit_confirm_unacked(self):

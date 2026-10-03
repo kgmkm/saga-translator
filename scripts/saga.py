@@ -714,8 +714,18 @@ def cmd_commit(work: Path, chapter: str, block: str,
             if residue_candidates:
                 for f in residue_candidates:
                     print(f"[commit] 残渣(候補): 「{f.value}」→ {f.safe_fix} (L{f.line})")
+                # 候補にも safe_fix があるものは修正提案に過ぎないが、放置したまま
+                # 確定するのはレビュー完了条件「既知パターンの機械検査の未解決エラー
+                # 0件（emit 時）」に反する。候補が残る場合は確定を止め、修正か
+                # house_style.toml の known_terms 登録を促す。
+                _write_commit_report(snap_dir, report)
+                print(f"[commit] 中止。残渣候補 {len(residue_candidates)} 件が残っています。"
+                      f"修正するか house_style.toml の residue.known_terms に登録してください。",
+                      file=sys.stderr)
+                _release_lock(work)
+                return 1
 
-            print(f"[commit] 残渣検査: PASS（候補 {len(residue_candidates)} 件）")
+            print(f"[commit] 残渣検査: PASS（候補 0 件）")
             report["stages"]["residue"]["pass"] = True
 
         elif src == "ja" and dst == "zh":
