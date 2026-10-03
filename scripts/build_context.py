@@ -124,6 +124,7 @@ def next_head_text(chapters: list[dict], ci: int, bi: int, k: int, chdir: Path) 
 
 
 def main() -> None:
+    from _lib import timed_stage
     utf8()
     ap = argparse.ArgumentParser(description="コンテキスト生成")
     ap.add_argument("work")
@@ -134,6 +135,27 @@ def main() -> None:
 
     work = Path(args.work)
     _, dst = direction(work)
+    meta_all = load_chapters_meta(work)
+    chapters = meta_all["chapters"]
+    ci = next((i for i, c in enumerate(chapters) if c["id"] == args.chapter), None)
+    if ci is None:
+        raise SystemExit(f"章が見つかりません: {args.chapter}")
+    blocks = chapters[ci]["blocks"]
+    if args.block:
+        bid = args.block
+    else:
+        suf = target_suffix(dst)
+        bi = next((i for i, b in enumerate(blocks)
+                   if not (work / "output" / args.chapter / f"{b['id']}{suf}.md").exists()), 0)
+        bid = blocks[bi]["id"]
+    cid = args.chapter
+
+    with timed_stage(work, "build_context", chapter=cid, block=bid):
+        _stage_impl(work, cid, bid, args.mode)
+
+
+def _stage_impl(work: Path, cid: str, bid: str, mode: str) -> None:
+    _, dst = direction(work)
     suf = target_suffix(dst)
     meta_all = load_chapters_meta(work)
     chapters = meta_all["chapters"]
@@ -141,18 +163,12 @@ def main() -> None:
     k_prev = int(cfg.get("context", {}).get("prev_tail_paras", 3))
     k_next = int(cfg.get("context", {}).get("next_head_paras", 2))
 
-    ci = next((i for i, c in enumerate(chapters) if c["id"] == args.chapter), None)
+    ci = next((i for i, c in enumerate(chapters) if c["id"] == cid), None)
     if ci is None:
-        raise SystemExit(f"章が見つかりません: {args.chapter}")
+        raise SystemExit(f"章が見つかりません: {cid}")
     blocks = chapters[ci]["blocks"]
-    if args.block:
-        bi = next(i for i, b in enumerate(blocks) if b["id"] == args.block)
-    else:
-        bi = next((i for i, b in enumerate(blocks)
-                   if not (work / "output" / args.chapter / f"{b['id']}{suf}.md").exists()), 0)
+    bi = next(i for i, b in enumerate(blocks) if b["id"] == bid)
     block = blocks[bi]
-    cid = chapters[ci]["id"]
-    bid = block["id"]
 
     chdir = work / "chapters"
     paras = load_paras(work, cid)["paras"]
@@ -168,7 +184,7 @@ def main() -> None:
     if tr_title and src_title and tr_title != src_title:
         work_line += f" / 原題: {src_title}"
     lines = [
-        f"# 翻訳コンテキスト: {cid} / {bid}(モード: {args.mode})",
+        f"# 翻訳コンテキスト: {cid} / {bid}(モード: {mode})",
         "",
         work_line,
     ]
@@ -206,7 +222,7 @@ def main() -> None:
         next_head_text(chapters, ci, bi, k_next, chdir),
         "",
     ]
-    if args.mode == "analysis":
+    if mode == "analysis":
         cur = characters_toml_path(work)
         lines += ["## 現在の分析データ(この状態への追記・更新分を出す)",
                   "```toml",
@@ -218,13 +234,11 @@ def main() -> None:
         lines.append(f"[P{p['n']:03d}] {p['text']}")
         lines.append("")
 
-    out = work / "translation_input" / f"{cid}_{bid}_{args.mode}.md"
-    save_json(work / "logs" / "last_context.json", {"chapter": cid, "block": bid, "mode": args.mode, "path": str(out)})
+    out = work / "translation_input" / f"{cid}_{bid}_{mode}.md"
+    save_json(work / "logs" / "last_context.json", {"chapter": cid, "block": bid, "mode": mode, "path": str(out)})
     out.write_text("\n".join(lines), encoding="utf-8")
 
-    if args.mode == "analysis":
-        # 分析モードで context を生成した時点で、そのブロックの分析進捗を記録する。
-        # エージェントはこの記録を見て「次の未分析ブロック」を判断できる。
+    if mode == "analysis":
         from datetime import datetime, timezone
         block["analysis_done_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         save_chapters_meta(work, meta_all)

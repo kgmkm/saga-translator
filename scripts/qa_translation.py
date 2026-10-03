@@ -244,6 +244,7 @@ def emit(work: Path, cid: str, bid: str, items: list[tuple[int, str]]) -> None:
 
 
 def main() -> None:
+    from _lib import timed_stage
     utf8()
     ap = argparse.ArgumentParser(description="訳文QAと確定")
     ap.add_argument("work")
@@ -253,6 +254,12 @@ def main() -> None:
     ap.add_argument("--emit", action="store_true", help="合格時に正式出力へ書き込む")
     ap.add_argument("--no-strict", action="store_true", help="段落数不一致でも警告のみ")
     args = ap.parse_args()
+    with timed_stage(args.work, "qa_translation",
+                     chapter=args.chapter, block=args.block):
+        _stage_impl(args)
+
+
+def _stage_impl(args: argparse.Namespace) -> None:
 
     work = Path(args.work)
     cid, bid = args.chapter, args.block

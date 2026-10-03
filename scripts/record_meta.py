@@ -16,6 +16,7 @@ from _lib import load_chapters_meta, save_chapters_meta, utf8  # noqa: E402
 
 
 def main() -> None:
+    from _lib import timed_stage
     utf8()
     ap = argparse.ArgumentParser(description="版記録")
     ap.add_argument("work")
@@ -26,6 +27,12 @@ def main() -> None:
     ap.add_argument("--tokens-in", type=int, default=None)
     ap.add_argument("--tokens-out", type=int, default=None)
     args = ap.parse_args()
+    with timed_stage(args.work, "record_meta",
+                     chapter=args.chapter, block=args.block):
+        _stage_impl(args)
+
+
+def _stage_impl(args: argparse.Namespace) -> None:
 
     work = Path(args.work)
     meta = load_chapters_meta(work)

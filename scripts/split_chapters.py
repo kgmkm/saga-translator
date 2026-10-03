@@ -13,11 +13,17 @@ from _lib import (  # noqa: E402
 
 
 def main() -> None:
+    from _lib import timed_stage
     utf8()
     ap = argparse.ArgumentParser(description="章・ブロック分割")
     ap.add_argument("work", help="ワークスペースディレクトリ(manifestのある場所)")
     ap.add_argument("--target-chars", type=int, default=None, help="ブロック目標文字数(既定: config)")
     args = ap.parse_args()
+    with timed_stage(args.work, "split"):
+        _stage_impl(args)
+
+
+def _stage_impl(args: argparse.Namespace) -> None:
 
     work = Path(args.work)
     manifest = load_structured(work / "manifest")

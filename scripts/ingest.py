@@ -217,6 +217,7 @@ def epub_extract(path: Path, images_dir: Path) -> tuple[str, dict]:
 
 
 def main() -> None:
+    from _lib import timed_stage
     utf8()
     ap = argparse.ArgumentParser(description="入力の取り込み")
     ap.add_argument("input", help="TXT/MD/EPUBファイル")
@@ -234,6 +235,12 @@ def main() -> None:
     part = fname.get("part")
     work_name = f"{work_id}-p{part}" if part else work_id
     work = parent / work_name
+
+    with timed_stage(work, "ingest"):
+        _stage_impl(work, src, parent, args)
+
+
+def _stage_impl(work: Path, src: Path, parent: Path, args: argparse.Namespace) -> None:
 
     meta: dict = {"source_path": str(src), "work_id": work_id, "part": part}
     images_dir = images_dir_of(work)

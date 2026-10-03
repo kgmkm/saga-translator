@@ -6,6 +6,8 @@ import re
 import shutil
 import sys
 import tomllib
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".config" / "saga-translator"
@@ -664,3 +666,57 @@ def make_blocks(paras: list[str], target_chars: int) -> list[tuple[int, int]]:
         blocks.append((start, cut))
         start = cut
     return blocks
+
+
+def record_timeline(work, stage: str, chapter=None, block=None,
+                    started=None, ended=None, exit_code: int = 0,
+                    retries: int = 0, commit_id=None) -> None:
+    """logs/timeline.jsonl に1行追記。失敗は握りつぶす。"""
+    try:
+        log_dir = Path(work) / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        if started is None and ended is None:
+            ended = datetime.now(timezone.utc)
+            started = ended
+        elif ended is None:
+            ended = datetime.now(timezone.utc)
+        elif started is None:
+            started = ended
+        dur = int((ended - started).total_seconds() * 1000)
+        entry = {
+            "ts": ended.strftime("%%Y-%%m-%%dT%%H:%%M:%%SZ"),
+            "duration_ms": dur,
+            "stage": stage,
+        }
+        if chapter is not None:
+            entry["chapter"] = chapter
+        if block is not None:
+            entry["block"] = block
+        entry["exit_code"] = exit_code
+        if retries:
+            entry["retries"] = retries
+        if commit_id is not None:
+            entry["commit_id"] = commit_id
+        with open(log_dir / "timeline.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+@contextmanager
+def timed_stage(work, stage, chapter=None, block=None):
+    """main() を囲むコンテキストマネージャ。開始・終了を記録し、exit_code を決定する。"""
+    started = datetime.now(timezone.utc)
+    code = 0
+    try:
+        yield
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else 1
+        raise
+    except BaseException:
+        code = 1
+        raise
+    finally:
+        record_timeline(work, stage, chapter=chapter, block=block,
+                        started=started, ended=datetime.now(timezone.utc),
+                        exit_code=code)

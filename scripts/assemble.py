@@ -19,6 +19,7 @@ AGE_REPORT = "age_policy_report-[ネタバレあり].md"
 
 
 def main() -> None:
+    from _lib import timed_stage
     utf8()
     ap = argparse.ArgumentParser(description="出力の結合")
     ap.add_argument("work")
@@ -26,6 +27,11 @@ def main() -> None:
     ap.add_argument("--parallel", action="store_true",
                     help="対訳(章対訳・全文_対訳.md)を生成する。年齢正規化の記録がある作品では指定不要(自動)")
     args = ap.parse_args()
+    with timed_stage(args.work, "assemble"):
+        _stage_impl(args)
+
+
+def _stage_impl(args: argparse.Namespace) -> None:
 
     work = Path(args.work)
     _, dst = direction(work)
