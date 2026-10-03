@@ -98,7 +98,7 @@ def main() -> int:
                 key = f"{cid}/{bid}"
                 ana = key in plot_blocks
                 tr = (ja_dir / f"{bid}{suffix}.md").is_file()
-                a_flag = bool(b.get("analysis_done_at"))
+                a_flag = bool(b.get("analysis_started_at") or b.get("analysis_committed_at") or b.get("analysis_done_at"))
                 t_flag = bool(b.get("translation_done_at"))
                 bits = []
                 if ana:

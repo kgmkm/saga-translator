@@ -240,7 +240,7 @@ def _stage_impl(work: Path, cid: str, bid: str, mode: str) -> None:
 
     if mode == "analysis":
         from datetime import datetime, timezone
-        block["analysis_done_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        block["analysis_started_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         save_chapters_meta(work, meta_all)
 
     n_chars = sum(len(p["text"]) for p in body)
