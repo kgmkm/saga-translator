@@ -181,7 +181,7 @@ paras = [13, 40]
 「分析済み」＝対象ブロックの原文ハッシュ `analysis_src_hash` に対し、(a) 検証を通った非空差分の反映済み（`analysis_committed_at`）、または (b) 「変更なし」の明示（`analysis_no_changes = true`）。
 
 - `chapters_meta.toml` の各 block に記録: `analysis_committed_at`（従来どおり）/ `analysis_src_hash`（ブロック原文の sha256 先頭12桁。原文が変われば変わる）/ `analysis_no_changes`（(b) の場合のみ true）
-- 分析 delta（analyze-commit の入力）: トップレベル `block = "chNNN/bN"` 必須・chapters_meta に実在、`no_changes = true` は空差分の明示に必須。`[[characters]]`・`[[terms]]` は `match_key`/`match_value` 必須、`[[plot]]` は `block`（delta と一致）/`text` 必須。違反はすべて拒否（exit 1・記録しない）
+- 分析 delta（analyze-commit の入力。`templates/brief_analyze.md` の形式が正）: トップレベル `block = "chNNN/bN"` 必須・chapters_meta に実在、`no_changes = true` は空差分の明示に必須。テーブルは **`[[characters_delta]]` / `[[terms_delta]]` / `[[plot_delta]]`**（`[[characters]]` 等の短縮形は無視されて空差分扱いになるので注意）。`[[characters_delta]]`・`[[terms_delta]]` は `match_key`/`match_value` 必須、`[[plot_delta]]` は `block`（delta と一致）/`text` 必須。違反はすべて拒否（exit 1・記録しない）
 - 旧ブロック（`analysis_committed_at` のみ）は hash 未記録を許容
 
 ## 裁定記録 `_work/rulings.json`（stage3 / P2-3 前半・`scripts/rulings.py`）
