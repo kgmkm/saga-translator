@@ -1,7 +1,9 @@
 """確定済みブロックの結合: 章訳文・対訳・目次・全文。
 対訳(章対訳・全文_対訳.md)は --parallel 指定で生成する。年齢正規化の記録
 (analysis/age_policy_report-[ネタバレあり].md)がある作品では自動で有効。
-全ブロック確定後は原文と中間物を消す(--keep-source で残す)。"""
+全ブロック確定後は原文と中間物を消す(--keep-source で残す)。
+titles.toml(analysis/)が無い・空のときは停止する。原題のまま出力するときだけ
+--allow-src-title を指定する（未確定の章題は目次に「題未確定」と明示する）。"""
 from __future__ import annotations
 
 import argparse
@@ -46,6 +48,39 @@ def _record_assembled(work: Path, outputs: list[str]) -> None:
           f"（出力成果物 {len(outputs)} 件）")
 
 
+def _chapter_has_output(c: dict, out: Path, suf: str) -> bool:
+    """この実行で章訳文として出力される章か（ブロック出力が1つ以上あるか）。"""
+    return any((out / c["id"] / f"{b['id']}{suf}.md").exists() for b in (c.get("blocks") or []))
+
+
+def _titles_gate_problems(work: Path, meta: dict, titles: dict, dst: str, out: Path, suf: str) -> list[str]:
+    """titles ゲートの停止理由を返す（空リストなら通過）。
+
+    原題が黙って出力に載る経路だけを挙げる:
+      - titles.toml が無い/空（load_titles が {} を返す状態）
+      - 出力対象の章に原文見出しがあり、titles.toml に訳題が無い
+    """
+    if not titles:
+        if (work / "analysis" / "titles.toml").exists():
+            return ["analysis/titles.toml が空です（分析一周後に章題を確定して書き込んでください）"]
+        return ["analysis/titles.toml がありません（分析一周後に章題を確定して作成してください）"]
+    other = "ja" if dst == "zh" else "zh"
+    ch_titles = {c.get("id"): c for c in (titles.get("chapters") or []) if c.get("id")}
+    undetermined: list[str] = []
+    for c in meta["chapters"]:
+        if not (c.get("title") or "").strip():
+            continue  # 原文見出しを持たない章は記号見出しで出るため対象外
+        if not _chapter_has_output(c, out, suf):
+            continue  # この実行で出力しない章は対象外（部分 assemble を妨げない）
+        entry = ch_titles.get(c["id"]) or {}
+        if not (entry.get(dst) or entry.get(other)):
+            undetermined.append(c["id"])
+    if undetermined:
+        return ["章題が未確定です: " + ", ".join(undetermined)
+                + "（titles.toml の [[chapters]] に訳題を追加してください）"]
+    return []
+
+
 def main() -> None:
     from _lib import timed_stage
     utf8()
@@ -54,6 +89,8 @@ def main() -> None:
     ap.add_argument("--keep-source", action="store_true", help="原文・中間物を残す(既定は全ブロック確定後に削除)")
     ap.add_argument("--parallel", action="store_true",
                     help="対訳(章対訳・全文_対訳.md)を生成する。年齢正規化の記録がある作品では指定不要(自動)")
+    ap.add_argument("--allow-src-title", action="store_true",
+                    help="titles.toml が無い/題未確定のとき原題のまま出力する（目次に「題未確定」を明示）")
     args = ap.parse_args()
     with timed_stage(args.work, "assemble"):
         _stage_impl(args)
@@ -69,6 +106,18 @@ def _stage_impl(args: argparse.Namespace) -> None:
     tr_title = target_title(titles, dst)
     ch_titles = {c.get("id"): c for c in (titles.get("chapters") or []) if c.get("id")}
     out = work / "output"
+    allow_src_title = args.allow_src_title
+    # titles ゲート: 訳題が未確定のまま原題を黙って出さない（レビュー #2 / P0-2）。
+    # 通常経路はここで停止し、--allow-src-title の経路だけ原題のまま続行する。
+    problems = _titles_gate_problems(work, meta, titles, dst, out, suf)
+    if problems and not allow_src_title:
+        for p in problems:
+            print(f"[assemble] {p}")
+        print("[assemble] 原題のまま出力する場合は --allow-src-title を指定してください。")
+        sys.exit(1)
+    if allow_src_title:
+        print("[assemble] --allow-src-title: 原題のまま出力する経路で実行します"
+              "（未確定の章題は目次に「題未確定」を明示）")
     make_parallel = args.parallel or (work / "analysis" / AGE_REPORT).exists()
     toc = [f"# {tr_title}", "", "# 目次", ""] if tr_title else ["# 目次", ""]
     full_tr: list[str] = []
@@ -82,7 +131,18 @@ def _stage_impl(args: argparse.Namespace) -> None:
         ch_par: list[str] = []
         blocks = c.get("blocks") or []
         n_done = 0
-        heading = chapter_title(ch_titles.get(cid) or {}, dst, c.get("title") or cid)
+        # 章題の解決: 訳題が無い章は未確定。原題のまま出すのは --allow-src-title の経路だけ
+        # （通常経路の未確定はゲートで停止済みで、残るのは原題を持たない章のみ）。
+        entry = ch_titles.get(cid) or {}
+        src_title = (c.get("title") or "").strip()
+        resolved = chapter_title(entry, dst)
+        undetermined = resolved is None
+        if resolved is not None:
+            title = resolved
+        elif allow_src_title:
+            title = src_title or cid
+        else:
+            title = cid  # 原題を持たない章の記号見出し
         # 本文先頭行（章題段落）に同じテキストがある場合は自動見出しを付けない（二重見出し防止）
         first_line = ""
         for b_probe in blocks:
@@ -90,8 +150,8 @@ def _stage_impl(args: argparse.Namespace) -> None:
             if f_probe.exists():
                 first_line = (f_probe.read_text(encoding="utf-8").strip().splitlines() or [""])[0].strip()
                 break
-        if heading and heading != tr_title and first_line.lstrip("# ").strip() != heading.strip():  # 全文冒頭と同文の見出しは省く
-            ch_tr.append(f"# {heading}")
+        if title and title != tr_title and first_line.lstrip("# ").strip() != title.strip():  # 全文冒頭と同文の見出しは省く
+            ch_tr.append(f"# {title}")
         for b in blocks:
             f_tr = out / cid / f"{b['id']}{suf}.md"
             if not f_tr.exists():
@@ -109,15 +169,16 @@ def _stage_impl(args: argparse.Namespace) -> None:
             body = "\n\n".join(ch_tr) + "\n"
             atomic_write_text(out / f"{cid}{suf}.md", retarget_md_images(body))
             outputs.append(f"output/{cid}{suf}.md")
-            title = chapter_title(ch_titles.get(cid) or {}, dst, c.get("title") or cid)
+            line = f"- [{title}]({cid}{suf}.md)"
             if make_parallel and ch_par:
                 atomic_write_text(out / f"{cid}_parallel.md",
                                   retarget_md_images("\n\n".join(ch_par) + "\n"))
                 outputs.append(f"output/{cid}_parallel.md")
-                toc.append(f"- [{title}]({cid}{suf}.md)（対訳: [{cid}_parallel.md]({cid}_parallel.md)）")
+                line += f"（対訳: [{cid}_parallel.md]({cid}_parallel.md)）"
                 full_par.append(f"<!-- {cid} -->\n" + "\n\n".join(ch_par))
-            else:
-                toc.append(f"- [{title}]({cid}{suf}.md)")
+            if undetermined and allow_src_title:
+                line += "（題未確定）"  # 原題のまま出した章題を目次で明示（回避の記録）
+            toc.append(line)
             full_tr.append(f"<!-- {cid} -->\n" + "\n\n".join(ch_tr))
         c["status"] = "done" if blocks and n_done == len(blocks) else c.get("status", "pending")
 

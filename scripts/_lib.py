@@ -85,10 +85,14 @@ def target_title(titles: dict, dst: str) -> str:
     return ((titles.get(f"title_{dst}") or titles.get(f"title_{other}")) or "").strip()
 
 
-def chapter_title(entry: dict, dst: str, fallback: str = "") -> str:
-    """章見出しの訳文。dst 欄を優先し、もう一方・原文で補う。"""
+def chapter_title(entry: dict, dst: str) -> str | None:
+    """章見出しの訳文。dst 欄を優先し、もう一方で補う。
+
+    訳題が無いときは None（未確定）を返し、章メタの原題へ黙って落ちない。
+    原題のまま出すかは呼び出し側が明示的に決める（assemble の --allow-src-title）。
+    """
     other = "ja" if dst == "zh" else "zh"
-    return entry.get(dst) or entry.get(other) or fallback
+    return entry.get(dst) or entry.get(other) or None
 
 
 # 会話判定の段落頭（方向別）。中国語原文は “…/[…] 括り、日本語原文は「…」。
