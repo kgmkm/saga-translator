@@ -16,6 +16,7 @@ from _lib import (  # noqa: E402
     parse_novel_header, read_skill_version, save_structured, skill_commit,
     split_paras, utf8,
 )
+from series_detect import find_candidates, work_name_for  # noqa: E402
 
 # スキルルート（このファイルの2つ上）。版記録の参照元。
 SKILL_ROOT = Path(__file__).resolve().parent.parent
@@ -227,7 +228,18 @@ def main() -> None:
     ap.add_argument("input", help="TXT/MD/EPUBファイル")
     ap.add_argument("-o", "--out", default=None, help="ワークスペース親ディレクトリ(既定: 入力の隣の _saga/)")
     ap.add_argument("--dst", default=None, help="訳文言語(既定: 原語から推定 zh→ja / ja→zh)")
+    ap.add_argument("--series-from", dest="series_from", default=None, metavar="WORKDIR",
+                    help="前作のworkdirを指定し、連作として引き継ぐ決定をmanifestに記録(series_decision=carry)")
+    ap.add_argument("--standalone", action="store_true",
+                    help="単独作品として進める決定をmanifestに記録(series_decision=standalone)")
     args = ap.parse_args()
+
+    if args.series_from and args.standalone:
+        raise SystemExit("[ingest] --series-from と --standalone は同時に指定できません")
+    if args.series_from:
+        prev = Path(args.series_from).resolve()
+        if not prev.is_dir():
+            raise SystemExit(f"[ingest] 前作の workdir が見つかりません: {prev}")
 
     src = Path(args.input).resolve()
     if not src.exists():
@@ -237,11 +249,33 @@ def main() -> None:
     fname = parse_filename(src)
     work_id = fname.get("novel_id") or re.sub(r"[^\w-]", "_", fname["title"])[:60] or "work"
     part = fname.get("part")
-    work_name = f"{work_id}-p{part}" if part else work_id
+    work_name = work_name_for(fname)
     work = parent / work_name
 
     with timed_stage(work, "ingest"):
         _stage_impl(work, src, parent, args, work_id, part, fname)
+
+
+def _series_fields(parent: Path, src: Path, args: argparse.Namespace) -> dict:
+    """連作候補の検出結果と決定を manifest 用フィールドにまとめる。
+
+    - 候補があれば series_candidates を記録（work_id / path / author / title / reason）
+    - --standalone / --series-from は明示の決定として常に記録
+    - 候補がありフラグ無しは undecided（決定待ち。以降のゲートは saga.py 側）
+    - 候補もフラグも無ければ何も記録しない（既存の works を壊さない）
+    """
+    candidates = find_candidates(src, parent)
+    fields: dict = {}
+    if candidates:
+        fields["series_candidates"] = candidates
+    if args.standalone:
+        fields["series_decision"] = "standalone"
+    elif args.series_from:
+        fields["series_decision"] = "carry"
+        fields["series_from"] = str(Path(args.series_from).resolve())
+    elif candidates:
+        fields["series_decision"] = "undecided"
+    return fields
 
 
 def _stage_impl(work: Path, src: Path, parent: Path, args: argparse.Namespace,
@@ -312,10 +346,14 @@ def _stage_impl(work: Path, src: Path, parent: Path, args: argparse.Namespace,
     atomic_write_text(work / "originals" / "source.md", "\n\n".join(paras) + "\n")
     meta["skill_version"] = read_skill_version(SKILL_ROOT)
     meta["skill_commit"] = skill_commit(SKILL_ROOT)
-    # dump_toml はテーブル([stats])以降のスカラーを再読込時にテーブル内へ取り込む。
-    # 版記録などのトップレベル値を保つため、唯一の入れ子dict(stats)を末尾へ回す。
+    meta.update(_series_fields(parent, src, args))
+    # dump_toml はテーブル/配列ofテーブル以降のスカラーを再読込時にテーブル内へ
+    # 取り込む。版記録・連作の決定などのトップレベル値を保つため、入れ子dict(stats)
+    # と配列ofテーブル(series_candidates)を末尾へ回す。
     if isinstance(meta.get("stats"), dict):
         meta["stats"] = meta.pop("stats")
+    if meta.get("series_candidates"):
+        meta["series_candidates"] = meta.pop("series_candidates")
     save_structured(work / "manifest", meta)
     for sub in ("chapters", "analysis", "translation_input", "output", "output/_work", "logs"):
         (work / sub).mkdir(parents=True, exist_ok=True)
@@ -323,6 +361,23 @@ def _stage_impl(work: Path, src: Path, parent: Path, args: argparse.Namespace,
     print(f"[ingest] work: {work}")
     print(f"[ingest] title: {meta['title']} / author: {meta.get('author')}")
     print(f"[ingest] lang: {meta['lang']}→{meta['dst']} / script: {meta.get('han_script')} / paras: {meta['n_paras']} / chars: {meta['n_chars']}")
+    cands = meta.get("series_candidates") or []
+    if cands:
+        print(f"[ingest] 連作の候補: {len(cands)}件")
+        for c in cands:
+            print(f"[ingest]   - {c['work_id']}: {c['title'] or '?'} / author: {c['author'] or '?'}")
+            print(f"[ingest]     {c['path']}")
+            print(f"[ingest]     根拠: {c['reason']}")
+    decision = meta.get("series_decision")
+    if decision == "undecided":
+        print("[ingest] series_decision: undecided — 連作の候補があります。連作として引き継ぐなら "
+              "carry_analysis を実行してから ingest を --series-from <前作workdir> で再実行、"
+              "単独で進めるなら --standalone を付けて再実行してください")
+    elif decision == "carry":
+        print(f"[ingest] 連作として記録: carry（前作: {meta.get('series_from')}）")
+        print("[ingest] 分析の引き継ぎは: python3 carry_analysis.py <workdir> --from <前作workdir>")
+    elif decision == "standalone":
+        print("[ingest] 単独作品として記録: standalone")
     if copied:
         print(f"[ingest] images: {len(copied)} copied")
     if remote:
