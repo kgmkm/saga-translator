@@ -4,7 +4,10 @@
 旧2本（align_check.py / check_align.py）との差分:
 - 文字数比の逸脱は exit 1 から confirm（要 ack）に格下げ
 - 重複マーカーは新規に fatal 化（旧ツールでは dict に上書きされて見逃せた）
-- ack（確認記録）をドラフトハッシュに紐づけ。ハッシュ変更で無効化
+- ack（確認記録）は rulings.py の裁定記録（rule_id="char_ratio"）として記録する。
+  作品・章・ブロック・段落・原文ハッシュ・ドラフトハッシュ・検査設定の版が
+  すべて一致する active な記録だけが confirm を抑制する（流用・陳腐化を遮断）。
+  旧 _work/acks.jsonl は読み取り互換（一回きりの取り込み）。
 - 削除は P1-6 で行う
 """
 from __future__ import annotations
@@ -21,13 +24,22 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _lib import (
     LANG_PACKS,
+    TomlSyntaxError,
     align_ratio_floor,
     dialogue_heads,
     direction,
     load_chapters_meta,
     load_paras,
+    sha12,
     target_suffix,
 )  # noqa: E402
+from rulings import (  # noqa: E402
+    MATCH_FIELDS,
+    add_ruling,
+    find_active_ruling,
+    list_rulings,
+    text_hash,
+)
 
 
 # ── データクラス ──────────────────────────────────────────────
@@ -104,24 +116,84 @@ def draft_hash(draft_path: Path) -> str:
     return hashlib.sha256(draft_path.read_bytes()).hexdigest()[:12]
 
 
-# ── ack ────────────────────────────────────────────────────────
+# ── ack（裁定記録）─────────────────────────────────────────────
+# align の ack は rulings.py の裁定記録（全キー一致）が正本。旧 acks.jsonl は
+# 読み取り互換として一回きり取り込み、新規の記録は旧版の読み取り用に併記する。
+
+#: ack の裁定記録の rule_id（rulings.py）
+ACK_RULE_ID = "char_ratio"
 
 
 def _acks_path(work: Path) -> Path:
+    """旧形式の ack 記録のパス（読み取り互換・併記用）。"""
     return Path(work) / "_work" / "acks.jsonl"
 
 
 def _load_acks(work: Path) -> list[dict]:
+    """旧 acks.jsonl を読む（壊れた行は警告して飛ばす）。"""
     p = _acks_path(work)
     if not p.exists():
         return []
-    return [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
+    entries: list[dict] = []
+    for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            print(f"[align] 警告: 旧 acks.jsonl の {i} 行目を読めません", file=sys.stderr)
+            continue
+        if isinstance(obj, dict):
+            entries.append(obj)
+        else:
+            print(f"[align] 警告: 旧 acks.jsonl の {i} 行目が記録の形ではありません", file=sys.stderr)
+    return entries
+
+
+def config_version(work) -> str:
+    """検査設定の版（裁定記録の dict_version）。
+
+    house_style.toml（work/_house・親 _house）の中身から作る決定的な値。
+    saga.py の _config_hash と同じ規則で、確定記録の config_hash と一致する。
+    設定が変わると dict_version が変わり、古い裁定を陳腐化させる。
+    """
+    work = Path(work)
+    parts: list[str] = []
+    for label, path in (("work", work / "_house" / "house_style.toml"),
+                        ("parent", work.parent / "_house" / "house_style.toml")):
+        try:
+            data = path.read_bytes() if path.is_file() else b""
+        except OSError:
+            data = b""
+        parts.append(f"{label}:{sha12(data)}")
+    return sha12("|".join(parts).encode("utf-8"))
+
+
+def _source_paras(work: Path, chapter: str) -> dict[int, str]:
+    """原文段落 {n: text}。読めなければ空を返す（裁定記録は作れない）。"""
+    try:
+        data = load_paras(Path(work), chapter)
+    except (FileNotFoundError, OSError, ValueError, TomlSyntaxError):
+        return {}
+    return {
+        p["n"]: str(p.get("text", ""))
+        for p in data.get("paras", [])
+        if isinstance(p, dict) and isinstance(p.get("n"), int)
+    }
 
 
 def record_ack(work, chapter, block, paras: list[int], reason: str) -> dict:
-    """現在のドラフトハッシュに紐づけて ack を _work/acks.jsonl に追記する。"""
+    """ack を裁定記録（rulings）として記録する（全キー一致で有効）。
+
+    キーは 作品・章・ブロック・段落・原文ハッシュ（原文段落）・ドラフトハッシュ
+    （現在のドラフト）・dict_version（検査設定の版）。原文やドラフトが読めず
+    裁定記録を作れない段落は、警告を出すだけで記録しない。
+    旧版の読み取り互換のため、旧形式の1行を _work/acks.jsonl へも併記する
+    （次回の読み取り時に重複なく取り込まれる）。
+    戻り値は旧形式の entry（互換）。entry["rulings"] は記録した裁定の件数。
+    """
     work = Path(work)
-    src_lang, dst_lang = direction(work)
+    _, dst_lang = direction(work)
     suf = target_suffix(dst_lang)
     draft_p = work / "output" / "_work" / f"{chapter}_{block}{suf}_numbered.md"
     dh = draft_hash(draft_p) if draft_p.exists() else "N/A"
@@ -129,22 +201,139 @@ def record_ack(work, chapter, block, paras: list[int], reason: str) -> dict:
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "chapter": chapter,
         "block": block,
-        "paras": paras,
+        "paras": list(paras),
         "draft_hash": dh,
         "reason": reason,
     }
-    p = _acks_path(work)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    # 裁定記録（正本）: 全キー一致の記録だけが有効
+    src_texts = _source_paras(work, chapter)
+    dv = config_version(work)
+    recorded = 0
+    for p in paras:
+        src_text = src_texts.get(p)
+        if src_text is None or dh == "N/A":
+            print(
+                f"[align] 警告: 裁定記録を作成できません（原文またはドラフトが"
+                f"読めません）: {chapter}/{block} P{p}",
+                file=sys.stderr,
+            )
+            continue
+        add_ruling(
+            work,
+            work_id=work.name,
+            chapter=chapter,
+            block=block,
+            paragraph=p,
+            rule_id=ACK_RULE_ID,
+            src_hash=text_hash(src_text),
+            draft_hash=dh,
+            dict_version=dv,
+            rationale=reason,
+            adjudicator="align.py ack",
+            disposition="allow",
+            status="active",
+        )
+        recorded += 1
+    entry["rulings"] = recorded
+
+    # 旧形式の併記（読み取り互換）
+    p_path = _acks_path(work)
+    p_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy = {k: entry[k] for k in ("ts", "chapter", "block", "paras",
+                                    "draft_hash", "reason")}
+    with p_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(legacy, ensure_ascii=False) + "\n")
     return entry
+
+
+def _ruling_exists(records: list[dict], work_id: str, chapter: str, block: str,
+                   paragraph: int, src_hash: str, draft_hash: str,
+                   dict_version: str) -> bool:
+    """全キー一致の裁定が既にあるか（active/revoked を問わない）。"""
+    query = {
+        "work_id": work_id, "chapter": chapter, "block": block,
+        "paragraph": paragraph, "rule_id": ACK_RULE_ID, "src_hash": src_hash,
+        "draft_hash": draft_hash, "dict_version": dict_version,
+    }
+    return any(all(r.get(k) == query[k] for k in MATCH_FIELDS) for r in records)
+
+
+def migrate_legacy_acks(work) -> int:
+    """旧 _work/acks.jsonl の ack を裁定記録へ一回きり取り込む。
+
+    取り込みは冪等: 同じ全キーの裁定が既にあれば（active/revoked を問わず）
+    作り直さない。原文が読めない等で取り込めない記録は、警告を出すだけで
+    エラーにはしない（無効扱いにしない）。
+    戻り値は取り込んだ裁定記録の件数。
+    """
+    work = Path(work)
+    if not _acks_path(work).exists():
+        return 0
+    entries = _load_acks(work)
+    if not entries:
+        return 0
+
+    imported = 0
+    src_cache: dict[str, dict[int, str]] = {}
+    dv = config_version(work)
+    existing = list_rulings(work)
+    for e in entries:
+        chapter = str(e.get("chapter") or "")
+        block = str(e.get("block") or "")
+        dh = str(e.get("draft_hash") or "")
+        paras = e.get("paras")
+        if not chapter or not block or dh in ("", "N/A") or not isinstance(paras, list) or not paras:
+            print(
+                f"[align] 警告: 旧 ack を裁定記録へ取り込めません"
+                f"（chapter/block/paras/draft_hash のいずれかが欠落）: {e}",
+                file=sys.stderr,
+            )
+            continue
+        src_texts = src_cache.setdefault(chapter, _source_paras(work, chapter))
+        reason = str(e.get("reason") or "旧 acks.jsonl からの取り込み")
+        ts = str(e.get("ts") or "")
+        for raw_p in paras:
+            try:
+                p = int(raw_p)
+            except (TypeError, ValueError):
+                print(f"[align] 警告: 旧 ack の段落番号が不正: {raw_p!r}", file=sys.stderr)
+                continue
+            src_text = src_texts.get(p)
+            if src_text is None:
+                print(
+                    f"[align] 警告: 旧 ack を裁定記録へ取り込めません"
+                    f"（原文段落なし）: {chapter}/{block} P{p}",
+                    file=sys.stderr,
+                )
+                continue
+            src_h = text_hash(src_text)
+            if _ruling_exists(existing, work.name, chapter, block, p, src_h, dh, dv):
+                continue
+            fields = {
+                "work_id": work.name, "chapter": chapter, "block": block,
+                "paragraph": p, "rule_id": ACK_RULE_ID, "src_hash": src_h,
+                "draft_hash": dh, "dict_version": dv, "rationale": reason,
+                "adjudicator": "legacy-migration", "disposition": "allow",
+                "status": "active",
+            }
+            if ts:
+                fields["decided_at"] = ts
+            rec = add_ruling(work, **fields)
+            existing.append(rec)
+            imported += 1
+    if imported:
+        # 通知は stderr（stdout は check --json の JSON 出力に使う）
+        print(f"[align] 旧 acks.jsonl から ack {imported} 件を裁定記録（rulings）へ取り込みました",
+              file=sys.stderr)
+    return imported
 
 
 # ── 検査コア ──────────────────────────────────────────────────
 
 
 def check_block(work, chapter, block, acks: list[dict] | None = None,
-                config=None) -> list[AlignFinding]:
+                config=None, use_rulings: bool = True) -> list[AlignFinding]:
     """chapters_meta + paras.toml + ドラフトを突き合わせ、fatal/confirm を返す。
 
     判定の詳細:
@@ -152,7 +341,10 @@ def check_block(work, chapter, block, acks: list[dict] | None = None,
     - 会話頭判定は _lib.dialogue_heads(src, dst) を使用
     - 文字数比は _lib.align_ratio_floor(src, dst) を下限。原文25字以上に限定。
       上限は 3.0
-    - acks は (block, para, draft_hash) が一致する confirm を抑制
+    - confirm は rulings の裁定記録（rule_id="char_ratio"）が全キー一致
+      （作品・章・ブロック・段落・原文ハッシュ・ドラフトハッシュ・設定版）の
+      ときだけ抑制する（use_rulings=False は候補をそのまま返す）
+    - acks（旧形式）は読み取り互換: (block, para, draft_hash) 一致でも抑制（併用）
     """
     work = Path(work)
     src_lang, dst_lang = direction(work)
@@ -264,6 +456,7 @@ def check_block(work, chapter, block, acks: list[dict] | None = None,
             ))
 
     # 文字数比逸脱 (confirm)
+    dv = config_version(work) if use_rulings else ""
     for n in expected:
         if n not in draft_map:
             continue
@@ -274,6 +467,12 @@ def check_block(work, chapter, block, acks: list[dict] | None = None,
         ratio = len(dst_text) / max(len(src_text), 1)
         if ratio < ratio_floor or ratio > 3.0:
             if is_acked(n):
+                continue
+            if use_rulings and find_active_ruling(
+                work, rule_id=ACK_RULE_ID, chapter=chapter, block=block,
+                paragraph=n, src_hash=text_hash(src_text), draft_hash=dh,
+                dict_version=dv,
+            ) is not None:
                 continue
             findings.append(AlignFinding(
                 "confirm", "char_ratio", n,
@@ -289,8 +488,9 @@ def check_block(work, chapter, block, acks: list[dict] | None = None,
 
 def cmd_check(args: argparse.Namespace) -> int:
     work = Path(args.work)
-    acks = _load_acks(work)
-    findings = check_block(work, args.chapter, args.block, acks=acks)
+    # 旧 acks.jsonl は裁定記録へ取り込んでから照合する（読み取り互換）
+    migrate_legacy_acks(work)
+    findings = check_block(work, args.chapter, args.block)
 
     fatals = [f for f in findings if f.severity == "fatal"]
     confirms = [f for f in findings if f.severity == "confirm"]
@@ -307,8 +507,14 @@ def cmd_check(args: argparse.Namespace) -> int:
         } for f in findings], ensure_ascii=False, indent=2))
         return 1 if (fatals or unacked) else 0
 
+    # 裁定記録（rulings）で通過した confirm の件数（表示用。抑制前の候補との差）
+    raw_confirms = [
+        f for f in check_block(work, args.chapter, args.block, use_rulings=False)
+        if f.severity == "confirm"
+    ]
     # 人間向け出力
-    print(f"[{args.block}] fatal {len(fatals)} 件 / confirm {unacked} 件（ack 済み {len(confirms) - unacked} 件）")
+    print(f"[{args.block}] fatal {len(fatals)} 件 / confirm {unacked} 件"
+          f"（裁定記録で通過 {len(raw_confirms) - unacked} 件）")
     for f in findings:
         tag = f.severity.upper()
         para_str = f"P{f.para}" if f.para is not None else "—"
@@ -328,6 +534,7 @@ def cmd_ack(args: argparse.Namespace) -> int:
     paras = [int(x.strip().lstrip("Pp")) for x in args.para.split(",") if x.strip()]
     entry = record_ack(work, args.chapter, args.block, paras, args.reason)
     print(f"ack 記録: {entry['chapter']}/{entry['block']} paras={paras} hash={entry['draft_hash']}")
+    print(f"  裁定記録(rulings): {entry['rulings']} 件 rule_id={ACK_RULE_ID}（全キー一致で有効）")
     return 0
 
 

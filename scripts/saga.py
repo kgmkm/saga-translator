@@ -1791,23 +1791,14 @@ def _finalize_block(work: Path, chapter: str, block: str,
         report = {"commit_id": draft_hash, "snapshot": str(snap_draft),
                   "chapter": cid, "block": bid, "revise": bool(revise), "stages": {}}
 
-        # 2) align 検査（会話頭・欠落・重複マーカー）
-        from align import check_block, _load_acks
-        acks = _load_acks(work)
-        findings = check_block(work, cid, bid, acks=acks)
+        # 2) align 検査（会話頭・欠落・重複マーカー）と未裁定ゲート（S3）
+        # 旧 acks.jsonl は一回きり取り込み、裁定記録（rulings・全キー一致）で照合する。
+        from align import check_block, migrate_legacy_acks
+        migrate_legacy_acks(work)
+        findings = check_block(work, cid, bid)
         fatals = [f for f in findings if f.severity == "fatal"]
-        confirms = [f for f in findings if f.severity == "confirm"]
-        # confirm のうち ack の効いていないものを数える（ack は正規化後ドラフトの
-        # バイト列ハッシュに紐づく）
-        unacked_confirms = [
-            f for f in confirms
-            if not any(
-                str(a.get("block", bid)) == bid
-                and f.para in (int(p) for p in (a.get("paras") or []))
-                and str(a.get("draft_hash", "")) == draft_hash
-                for a in acks
-            )
-        ]
+        # 裁定記録で抑制されなかった confirm（文字数比等）は未裁定として確定を止める
+        unacked_confirms = [f for f in findings if f.severity == "confirm"]
         report["stages"]["align"] = {"fatal": len(fatals), "confirm_unacked": len(unacked_confirms)}
 
         if fatals:
@@ -1820,13 +1811,15 @@ def _finalize_block(work: Path, chapter: str, block: str,
 
         if unacked_confirms:
             for f in unacked_confirms:
-                print(f"[commit] confirm(未ack): P{f.para or '?'} {f.kind}: {f.detail}")
-            print(f"[commit] 失敗: confirm {len(unacked_confirms)} 件が未ackです。align.py ack を使って確認してください。", file=sys.stderr)
+                print(f"[commit] confirm(未裁定): P{f.para or '?'} {f.kind}: {f.detail}")
+            print(f"[commit] 失敗: confirm {len(unacked_confirms)} 件が未裁定です。"
+                  f"本文を修正するか、align.py ack で裁定記録（ハッシュ紐づけ）を残してください。",
+                  file=sys.stderr)
             _write_commit_report(snap_dir, report)
             out["reason"] = "confirm_unacked"
             return 1
 
-        print(f"[commit] align: PASS (fatal={len(fatals)}, confirm(未ack)={len(unacked_confirms)})")
+        print(f"[commit] align: PASS (fatal={len(fatals)}, confirm(未裁定)={len(unacked_confirms)})")
 
         # 3) QA（非JIS・段落整合など）。検査対象はスナップショットと同じバイト列。
         from qa_translation import run_qa

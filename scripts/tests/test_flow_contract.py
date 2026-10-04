@@ -323,36 +323,29 @@ class TestFlowScenarioGates(_ScenarioBase):
         p = _saga("analyze-commit", str(self.fx.work), "--delta", str(d2))
         self.assertNotEqual(p.returncode, 0, f"未知 block を通した:\n{p.stdout}")
 
-    @unittest.expectedFailure
     def test_s3_unresolved_blocks_commit_and_resolution_releases(self):
-        """S3: 未裁定（残渣候補・要確認）では確定せず、裁定の記録で通る。
+        """S3: 未裁定（要確認）では確定せず、裁定の記録で通る。
 
-        # scenario: S3 / stage3-4 実装で通常テストへ
+        # scenario: S3 / stage11 で裁定記録（rulings）実装済み（通常テスト）
         """
         self.fx.ingest()
         self.fx.split()
         self.fx.lock_prep()
         self.fx.analyze_commit("ch001", "b1", "要点。")
-        # 残渣候補（合成語）を含むドラフト → 未裁定では確定しない
-        draft = self.fx.place_draft("ch001", [
+        # 文字数比の要確認（confirm）を含むドラフト → 未裁定では確定しない
+        self.fx.place_draft("ch001", [
             "第一章　始まり",
-            "夜の星辰が輝く。どんよりと曇った空。",
+            "夜の空。",
             "低い鐘の音が響く。雪が降る。",
         ])
         p = _saga("commit", str(self.fx.work), "--chapter", "ch001", "--block", "b1")
-        self.assertNotEqual(p.returncode, 0, "残渣候補が残るのに確定した")
-        # 裁定の記録（段落ハッシュに紐づく）で通せること
-        rpath = self.fx.work / "_work" / "residue_acks.jsonl"
-        rpath.parent.mkdir(parents=True, exist_ok=True)
-        import json
-        rec = {
-            "block": "ch001/b1",
-            "draft_hash": hashlib.sha256(draft.read_bytes()).hexdigest()[:12],
-            "paras": [2],
-            "reason": "合成テストの裁定",
-        }
-        with open(rpath, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        self.assertNotEqual(p.returncode, 0, "confirm が未裁定なのに確定した")
+        self.assertIn("未裁定", p.stdout + p.stderr)
+        # 裁定の記録（align.py ack。段落ハッシュに紐づく）で通せること
+        p = _run(str(SCRIPTS / "align.py"), "ack", str(self.fx.work),
+                 "--chapter", "ch001", "--block", "b1", "--para", "P2",
+                 "--reason", "合成テストの裁定")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         p = _saga("commit", str(self.fx.work), "--chapter", "ch001", "--block", "b1")
         self.assertEqual(p.returncode, 0, f"裁定記録で通らない:\n{p.stdout}{p.stderr}")
 
