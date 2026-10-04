@@ -227,5 +227,210 @@ class TestHermesSessionStats(unittest.TestCase):
             self.fail("s2 not found")
 
 
+# --- Timing fixture with display_kind / compacted columns -------------------
+# 合成フィクスチャ。実在の state.db や実運用ログは使わない。
+TIMING_SCHEMA_SQL = """
+CREATE TABLE sessions (
+    id TEXT PRIMARY KEY,
+    title TEXT,
+    started_at REAL NOT NULL,
+    ended_at REAL,
+    api_call_count INTEGER DEFAULT 0,
+    message_count INTEGER DEFAULT 0,
+    output_tokens INTEGER DEFAULT 0,
+    tool_call_count INTEGER DEFAULT 0
+);
+
+CREATE TABLE messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    role TEXT NOT NULL,
+    tool_name TEXT,
+    display_kind TEXT,
+    compacted INTEGER DEFAULT 0,
+    timestamp REAL NOT NULL,
+    token_count INTEGER
+);
+"""
+
+
+def _build_timing_db() -> str:
+    """Build a synthetic DB with a known timeline for classification tests.
+
+    Timeline (seconds, wall clock = 1000s, session 'timed'):
+
+      t=0   user
+      t=10  assistant           -> 応答 [0,20)  model_processing (last output at 20)
+      t=20  tool                -> 人間待ち [20,100) = 80s
+      t=100 user
+      t=110 assistant           -> 応答 [100,120) model_processing (last output at 120)
+      t=120 tool clarify        -> 人間待ち [120,200) = 80s (承認待ち 80s)
+      t=200 user
+      t=210 assistant (failed_turn) -> 応答 [200,210) stream_retry
+      t=300 user                -> 人間待ち [210,300) = 90s
+      t=310 assistant (compacted)-> 応答 [300,320) compaction (last output at 320)
+      t=320 tool
+      t=400 user                -> 人間待ち [320,400) = 80s
+      (tail)                    -> 未分類 [400,1000) = 600s
+
+    Expected bucket sums (seconds):
+      human_wait      = 80 + 80 + 90 + 80 = 330
+      response total  = 20 + 20 + 10 + 20 = 70
+        model         = 20 + 20 = 40
+        stream_retry  = 10
+        compaction    = 20
+        approval      = 0
+      breakdown total = 330 + 70 = 400
+      unclassified    = 1000 - 400 = 600
+    """
+    f = tempfile.NamedTemporaryFile(prefix="test_timed_", suffix=".db", delete=False)
+    f.close()
+    conn = sqlite3.connect(f.name)
+    conn.executescript(TIMING_SCHEMA_SQL)
+    conn.execute(
+        "INSERT INTO sessions (id, title, started_at, ended_at, api_call_count, "
+        "message_count, output_tokens, tool_call_count) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("timed", "Timed session", 0.0, 1000.0, 8, 12, 100, 3),
+    )
+    rows = [
+        # (role, tool_name, display_kind, compacted, ts, token_count)
+        ("user", None, None, 0, 0.0, None),
+        ("assistant", None, None, 0, 10.0, 10),
+        ("tool", "read_file", None, 0, 20.0, None),
+        ("user", None, None, 0, 100.0, None),
+        ("assistant", None, None, 0, 110.0, 10),
+        ("tool", "clarify", None, 0, 120.0, None),
+        ("user", None, None, 0, 200.0, None),
+        ("assistant", None, "failed_turn", 0, 210.0, 10),
+        ("user", None, None, 0, 300.0, None),
+        ("assistant", None, None, 1, 310.0, 10),
+        ("tool", "write_file", None, 0, 320.0, None),
+        ("user", None, None, 0, 400.0, None),
+    ]
+    conn.executemany(
+        "INSERT INTO messages (session_id, role, tool_name, display_kind, compacted, "
+        "timestamp, token_count) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [("timed", *r) for r in rows],
+    )
+    conn.commit()
+    conn.close()
+    return f.name
+
+
+class TestTimeClassification(unittest.TestCase):
+    """人間待ち/応答の向きと、内訳合計＋未分類＝壁時計の不変条件を検査する。"""
+
+    def setUp(self) -> None:
+        self.db_path = _build_timing_db()
+
+    def tearDown(self) -> None:
+        if os.path.exists(self.db_path):
+            os.unlink(self.db_path)
+
+    def _breakdown(self) -> dict:
+        r = _run_script(self.db_path, "--session", "timed", "--format", "json")
+        self.assertEqual(r.returncode, 0, f"stderr: {r.stderr}")
+        return json.loads(r.stdout)["session"]["time_breakdown"]
+
+    def test_human_wait_is_not_counted_as_response(self) -> None:
+        """人間の入力待ちは人間待ちに入り、応答には入らない（向きの検査）。"""
+        b = self._breakdown()
+        # 人間待ち = 80+80+90+80 = 330s（承認待ち 80s を含む）。
+        self.assertAlmostEqual(b["human_wait_secs"], 330.0, places=1)
+        # 応答 = 20+20+10+20 = 70s。人間待ちの 330s が混入していないこと。
+        self.assertAlmostEqual(b["response_secs"], 70.0, places=1)
+        self.assertNotAlmostEqual(b["response_secs"], b["human_wait_secs"], places=1)
+
+    def test_response_breakdown_buckets(self) -> None:
+        """応答の内訳がログの根拠どおりに振り分けられる。"""
+        b = self._breakdown()
+        self.assertAlmostEqual(b["model_processing"], 40.0, places=1)
+        self.assertAlmostEqual(b["stream_retry"], 10.0, places=1)
+        self.assertAlmostEqual(b["compaction"], 20.0, places=1)
+
+    def test_approval_wait_recorded(self) -> None:
+        """clarify（承認要求）待ちが人間待ちの内数として記録される。"""
+        b = self._breakdown()
+        self.assertAlmostEqual(b["approval_wait_secs"], 80.0, places=1)
+
+    def test_breakdown_plus_unclassified_equals_wall_clock(self) -> None:
+        """内訳合計＋未分類＝壁時計 になる。"""
+        b = self._breakdown()
+        self.assertAlmostEqual(b["wall_clock_secs"], 1000.0, places=1)
+        self.assertAlmostEqual(b["breakdown_total_secs"], 400.0, places=1)
+        self.assertAlmostEqual(b["unclassified"], 600.0, places=1)
+        self.assertAlmostEqual(
+            b["breakdown_total_secs"] + b["unclassified"],
+            b["wall_clock_secs"],
+            places=1,
+        )
+        self.assertTrue(b["reconciles_with_wall_clock"])
+
+    def test_response_secs_carries_deprecated_alias(self) -> None:
+        """turn 出力に response_secs があり、旧名 human_wait_secs が同値で残る。"""
+        r = _run_script(self.db_path, "--session", "timed", "--format", "json")
+        self.assertEqual(r.returncode, 0, f"stderr: {r.stderr}")
+        turns = json.loads(r.stdout)["session"]["turn_analysis"]
+        self.assertTrue(turns)
+        for t in turns:
+            self.assertIn("response_secs", t)
+            self.assertIn("human_wait_secs", t)
+            # 旧名は「応答」の意味で、応答値と同値（人間待ちではない）。
+            self.assertEqual(t["human_wait_secs"], t["response_secs"])
+
+    def test_text_output_labels_terms(self) -> None:
+        """text 出力に固定した用語（人間待ち・応答・壁時計・未分類）が並ぶ。"""
+        r = _run_script(self.db_path, "--session", "timed")
+        self.assertEqual(r.returncode, 0, f"stderr: {r.stderr}")
+        for label in ("Human wait (人間待ち)", "Response (応答)",
+                      "Wall clock (壁時計)", "Unclassified", "未分類"):
+            self.assertIn(label, r.stdout)
+
+    def test_missing_evidence_falls_to_unclassified(self) -> None:
+        """根拠が無い区間は推測で分類せず未分類に入る（応答 0＋不変条件で検査）。"""
+        f = tempfile.NamedTemporaryFile(prefix="test_noev_", suffix=".db", delete=False)
+        f.close()
+        try:
+            conn = sqlite3.connect(f.name)
+            conn.executescript(TIMING_SCHEMA_SQL)
+            conn.execute(
+                "INSERT INTO sessions (id, title, started_at, ended_at, api_call_count, "
+                "message_count, output_tokens, tool_call_count) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("noev", "No evidence", 0.0, 500.0, 2, 2, 10, 0),
+            )
+            # assistant/tool も display_kind も compacted も無い＝分類の根拠なし。
+            # 時間はすべて user↔user の隙間か、メッセージの外側の空白。
+            conn.executemany(
+                "INSERT INTO messages (session_id, role, tool_name, display_kind, "
+                "compacted, timestamp, token_count) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [
+                    ("noev", "user", None, None, 0, 100.0, None),
+                    ("noev", "user", None, None, 0, 200.0, None),
+                ],
+            )
+            conn.commit()
+            conn.close()
+            r = _run_script(f.name, "--session", "noev", "--format", "json")
+            self.assertEqual(r.returncode, 0, f"stderr: {r.stderr}")
+            b = json.loads(r.stdout)["session"]["time_breakdown"]
+            # assistant 出力が一切無いので応答は 0（推測で埋めない）。
+            self.assertAlmostEqual(b["response_secs"], 0.0, places=1)
+            self.assertEqual(b["model_processing"], 0.0)
+            self.assertEqual(b["stream_retry"], 0.0)
+            self.assertEqual(b["compaction"], 0.0)
+            # 内訳合計＋未分類＝壁時計 を満たすこと。
+            self.assertAlmostEqual(
+                b["breakdown_total_secs"] + b["unclassified"],
+                b["wall_clock_secs"],
+                places=1,
+            )
+            self.assertTrue(b["reconciles_with_wall_clock"])
+        finally:
+            if os.path.exists(f.name):
+                os.unlink(f.name)
+
+
 if __name__ == "__main__":
     unittest.main()
