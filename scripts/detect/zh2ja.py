@@ -286,7 +286,9 @@ def find_cn_residue_fields(data, config: ResidueConfig | None = None) -> list[Fi
     kana_re = re.compile(r"[ぁ-んァ-ヴー]")
 
     def _is_src_key(key: str) -> bool:
-        return key == "src" or key.endswith("_src")
+        # aliases は別名・愛称・原文の異表記を保持する欄であり、原語形を含む
+        # ことが仕様（P0-4）。原文側として残渣検査から除外する。
+        return key == "src" or key.endswith("_src") or key == "aliases"
 
     def _check(key: str, value: str, path: str) -> None:
         probe = value

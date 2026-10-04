@@ -531,5 +531,23 @@ class TestLegacyData(_Base):
         self.assertNotIn("voice_status", c)
 
 
+class TestAliasesExemptFromResidue(unittest.TestCase):
+    """aliases は原文の異表記を含むため、分析側の残渣検査の対象外（P0-4 の相互作用）。
+
+    対象言語欄（name_ja 等）の検出は従来どおり。
+    """
+
+    def test_aliases_source_forms_not_flagged(self):
+        from detect.zh2ja import find_cn_residue_fields
+        data = {"characters": [{"name_src": "张三", "name_ja": "チョウサン",
+                                "aliases": ["张叁", "張三"]}]}
+        self.assertEqual(find_cn_residue_fields(data), [], "原文の異表記を拒否してはいけない")
+
+    def test_target_field_still_flagged(self):
+        from detect.zh2ja import find_cn_residue_fields
+        data = {"characters": [{"name_src": "张三", "name_ja": "测试角色"}]}
+        self.assertTrue(find_cn_residue_fields(data), "対象言語欄の残渣検出は維持")
+
+
 if __name__ == "__main__":
     unittest.main()
