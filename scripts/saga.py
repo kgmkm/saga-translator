@@ -493,6 +493,14 @@ def cmd_prepare(work: Path, chapter: str | None, block: str | None,
             file=sys.stderr,
         )
 
+    meta_p = work / "chapters_meta.toml"
+    if not meta_p.is_file():
+        meta_p = work / "chapters_meta.json"
+    if not meta_p.is_file():
+        # ゼロ状態（ingest 済み・split 未実行）は未初期化であって構文エラーではない。
+        # Traceback を出さず、chapters が空の案内だけで終了する。
+        print(f"[prepare] エラー: chapters が空です（split_chapters.py 未実行の可能性）", file=sys.stderr)
+        return 1
     meta = load_chapters_meta(work)
     chapters = meta.get("chapters", [])
     if not chapters:

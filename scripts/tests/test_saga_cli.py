@@ -418,5 +418,30 @@ class TestSagaAnalyzeCommit(unittest.TestCase):
         self.assertTrue(b["analysis_committed_at"])
 
 
+class TestZeroStatePrepare(unittest.TestCase):
+    """ゼロ状態（ingest 済み・split 未実行）の prepare は丁寧に終了する（Traceback 禁止）。
+
+    CLI をサブプロセスで実行し、実行時エラー（NameError 等）も捕まえる。
+    """
+
+    def test_prepare_before_split_exits_cleanly(self):
+        import subprocess, tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="zs_prepare_"))
+        src = tmp / "novel.txt"
+        src.write_text("---\ntitle: T\n---\n\n段落一。\n\n段落二。\n", encoding="utf-8")
+        r1 = subprocess.run(
+            [sys.executable, str(SCRIPTS / "ingest.py"), str(src), "--dst", "ja"],
+            capture_output=True, text=True, cwd=str(tmp))
+        self.assertEqual(r1.returncode, 0, r1.stdout + r1.stderr)
+        work = next(tmp.rglob("manifest.toml")).parent
+        r2 = subprocess.run(
+            [sys.executable, str(SCRIPTS / "saga.py"), "prepare", str(work), "--mode", "analysis"],
+            capture_output=True, text=True, cwd=str(tmp))
+        out = r2.stdout + r2.stderr
+        self.assertEqual(r2.returncode, 1, out)
+        self.assertIn("chapters が空です", out)
+        self.assertNotIn("Traceback", out, "未初期化状態で Traceback を出してはいけない")
+
+
 if __name__ == "__main__":
     unittest.main()
