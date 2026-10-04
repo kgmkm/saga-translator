@@ -62,7 +62,7 @@ blocks = [{id="b1", paras=[1,3]}, {id="b2", paras=[4,6]}]
         paras.append(f'[[paras]]\nn = {n}\ntext = "{text}"\n')
     _write(work / "chapters" / "ch001.paras.toml", "\n".join(paras))
     _write(work / "analysis" / "characters-[ネタバレあり].toml",
-           '[[characters]]\nname_src = "林霖"\nname_ja = "リンリン"\n')
+           '[[characters]]\nname_src = "张三"\nname_ja = "チョウサン"\n')
     return work
 
 

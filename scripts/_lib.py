@@ -793,7 +793,7 @@ def parse_novel_header(text: str) -> tuple[dict | None, str]:
 
 
 def parse_filename(path: Path) -> dict:
-    """`19360197-タイトル【1】.txt` 形式からID・題・部数を推定。"""
+    """`8880004-タイトル【1】.txt` 形式からID・題・部数を推定。"""
     stem = Path(path).stem
     d: dict = {}
     m = re.match(r"^(\d{3,})[-_](.+)$", stem)

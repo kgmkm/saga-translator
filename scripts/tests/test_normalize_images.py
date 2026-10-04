@@ -21,7 +21,7 @@ WORK_ID = "w123"
 IMG_TITLED = "10000000-10000001-原語題名.png"   # 題名付き → 10000000-10000001.png
 IMG_BARE = "原語画像A.png"                      # 作品IDなし → w123-001.png
 IMG_COVER = "10000000-封面.png"                 # 表紙語つき → 10000000-cover.png
-IMG_SAFE = "20956216.png"                       # 純ASCII（ID照合用）→ 対象外
+IMG_SAFE = "8880007.png"                       # 純ASCII（ID照合用）→ 対象外
 
 REF_SITES = (
     "originals/source.md",
@@ -118,7 +118,7 @@ class TestNormalizeImagesApply(_WorkFixture):
         self.assertIn("改名 3 件", p.stdout)
         names = sorted(x.name for x in img.iterdir())
         self.assertEqual(names, ["10000000-10000001.png", "10000000-cover.png",
-                                 "20956216.png", "w123-001.png"])
+                                 "8880007.png", "w123-001.png"])
         # 全参照箇所（原文・全章の段落・translation_input・確定出力・対訳）が一括で更新される
         for rel in REF_SITES:
             body = (self.work / rel).read_text(encoding="utf-8")

@@ -64,9 +64,9 @@ text = "第二章。继续。"
 """)
     _write(work / "analysis" / "characters-[ネタバレあり].toml", """\
 [[characters]]
-name_src = "林霖"
-name_ja = "林霖"
-ruby = "りんりん"
+name_src = "张三"
+name_ja = "张三"
+ruby = "ちょうさん"
 first_person = "私"
 second_person = "あなた"
 """)
@@ -78,7 +78,7 @@ term_ja = "霊気"
     _write(work / "analysis" / "plot-[ネタバレあり].toml", """\
 [[entries]]
 block = "ch001/b1"
-text = "林霖が登場。"
+text = "张三が登場。"
 """)
     return work
 

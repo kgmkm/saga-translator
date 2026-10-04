@@ -78,7 +78,7 @@ n = 3
 text = "雪开始落下。"
 """)
     _write(work / "analysis" / "characters-[ネタバレあり].toml",
-           '[[characters]]\nname_src = "林霖"\nname_ja = "リンリン"\n')
+           '[[characters]]\nname_src = "张三"\nname_ja = "チョウサン"\n')
     return work
 
 

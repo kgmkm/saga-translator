@@ -105,8 +105,8 @@ class TestDirection(unittest.TestCase):
 
     def test_detect_zh2ja(self):
         from detect.zh2ja import find_non_jis_han
-        self.assertEqual(find_non_jis_han("沈剑平"), [("剑", 1)])
-        self.assertEqual(find_non_jis_han("沈見平"), [])
+        self.assertEqual(find_non_jis_han("李剑平"), [("剑", 1)])
+        self.assertEqual(find_non_jis_han("李見平"), [])
 
 
 class TestQaDispatch(unittest.TestCase):

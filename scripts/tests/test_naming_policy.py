@@ -47,24 +47,24 @@ def _make_naming_work(base: Path) -> Path:
            '[[chapters]]\nid = "ch001"\nblocks = ["b1"]\n')
     _write(work / "chapters" / "ch001.paras.toml", """[[paras]]
 n = 1
-text = "林霖笑了。白铃也笑了。林霖说：「走吧。」"
+text = "张三笑了。李四也笑了。张三说：「走吧。」"
 
 [[paras]]
 n = 2
-text = "白铃和林霖去了图书馆。图书馆很安静。"
+text = "李四和张三去了图书馆。图书馆很安静。"
 
 [[paras]]
 n = 3
-text = "白铃又想起林霖的话。林霖说过：「明天见。」"
+text = "李四又想起张三的话。张三说过：「明天见。」"
 """)
     _write(work / "analysis" / "characters-[ネタバレあり].toml", """[[characters]]
-name_src = "林霖"
-name_ja = "リンリン"
+name_src = "张三"
+name_ja = "チョウサン"
 first_person = "私"
 
 [[characters]]
-name_src = "白铃"
-name_ja = "白铃"
+name_src = "李四"
+name_ja = "李四"
 """)
     return work
 
@@ -107,8 +107,8 @@ class _Base(unittest.TestCase):
 class TestNamingList(_Base):
     def test_category_rule(self):
         """分類の単純規則（カタカナ=音訳 / 漢字=漢語 / それ以外）。"""
-        self.assertEqual(lock_prep._naming_category("リンリン"), "音訳（カタカナ）")
-        self.assertEqual(lock_prep._naming_category("白铃"), "漢語のまま")
+        self.assertEqual(lock_prep._naming_category("チョウサン"), "音訳（カタカナ）")
+        self.assertEqual(lock_prep._naming_category("李四"), "漢語のまま")
         self.assertEqual(lock_prep._naming_category("イ音"), "それ以外")
         self.assertEqual(lock_prep._naming_category("A1"), "それ以外")
         self.assertEqual(lock_prep._naming_category(""), "それ以外")
@@ -121,9 +121,9 @@ class TestNamingList(_Base):
         # md: 区分ごとに分けて並ぶ（既訳の表記で判定）
         self.assertIn("## 固有名の扱い（命名方針）", md)
         self.assertIn("### 音訳（カタカナ）（1件）", md)
-        self.assertIn("| 林霖 | リンリン |", md)
+        self.assertIn("| 张三 | チョウサン |", md)
         self.assertIn("### 漢語のまま（1件）", md)
-        self.assertIn("| 白铃 | 白铃 |", md)
+        self.assertIn("| 李四 | 李四 |", md)
         # 混在 → 要確認（方針は未決定として明示）
         self.assertIn("命名方針: 未決定", md)
         self.assertIn("混在: 要確認", md)
@@ -131,8 +131,8 @@ class TestNamingList(_Base):
         # toml: 扱い区分つきの一覧。方針はまだ無い
         data = _lib.load_toml(work / "_work" / "lock_prep.toml")
         by_word = {e["word"]: e for e in data.get("naming", [])}
-        self.assertEqual(by_word["林霖"]["category"], "音訳（カタカナ）")
-        self.assertEqual(by_word["白铃"]["category"], "漢語のまま")
+        self.assertEqual(by_word["张三"]["category"], "音訳（カタカナ）")
+        self.assertEqual(by_word["李四"]["category"], "漢語のまま")
         self.assertNotIn("naming_policy", data)
 
 

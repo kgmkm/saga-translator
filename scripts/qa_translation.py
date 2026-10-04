@@ -100,7 +100,7 @@ def run_qa(work: Path, cid: str, bid: str, draft: Path, strict: bool = True) -> 
         candidates += [a for a in character_aliases(c) if a not in candidates]
         for name in candidates:
             if name in ja:
-                continue  # 訳語にそのまま含まれる漢字(例: 灰狼→暗影団の頭目・灰狼)は残留扱いしない
+                continue  # 訳語にそのまま含まれる漢字(例: 白狼→暗影団の頭目・白狼)は残留扱いしない
             cnt = sum(1 for _, t in qa_items if name in t)
             if cnt:
                 leftover.append({"name_src": name, "name_ja": ja, "count": cnt})

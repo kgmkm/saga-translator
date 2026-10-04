@@ -1,6 +1,6 @@
 # saga-translator 残渣検出辞書: zh→ja 方向
 # check_zh_vocab.py / find_cn_residue.py から機械的に移設（作品固有語は除外）。
-# 作品固有語（林霖・米姆・苏苏・小茉 等）は house_style.toml の known_terms で扱う。
+# 作品固有語（张三・李四・王五 等）は house_style.toml の known_terms で扱う。
 # 単字ヒットは「語の一部として実害のある残渣」に限定し、周辺と結合した語が
 # 語辞書（simp_words / ja_ok_words）にあれば除外する（語単位の判定を主とする）。
 #

@@ -42,15 +42,15 @@ blocks = ["b1"]
         work / "chapters" / "ch001.paras.toml",
         """[[paras]]
 n = 1
-text = "林霖是一个聪明的人。奴家觉得他说得对。"
+text = "张三是一个聪明的人。奴家觉得他说得对。"
 
 [[paras]]
 n = 2
-text = "林霖和楚轩一起去了图书馆。"
+text = "张三和李四一起去了图书馆。"
 
 [[paras]]
 n = 3
-text = "楚轩说：「这个秘鑰很重要。」"
+text = "李四说：「这个秘鑰很重要。」"
 """,
     )
     # ch002: 追加の出現
@@ -58,11 +58,11 @@ text = "楚轩说：「这个秘鑰很重要。」"
         work / "chapters" / "ch002.paras.toml",
         """[[paras]]
 n = 1
-text = "楚轩又提到了林霖的名字。我们走吧。"
+text = "李四又提到了张三的名字。我们走吧。"
 
 [[paras]]
 n = 2
-text = "林霖笑了笑，说：『你真是个笨蛋。』"
+text = "张三笑了笑，说：『你真是个笨蛋。』"
 """,
     )
     return work
@@ -73,9 +73,9 @@ def _make_work_with_existing(work: Path, src_lang: str = "zh") -> Path:
     _write(
         work / "analysis" / "characters-[ネタバレあり].toml",
         """[[characters]]
-name_src = "林霖"
-name_ja = "林霖"
-ruby = "りんりん"
+name_src = "张三"
+name_ja = "张三"
+ruby = "ちょうさん"
 first_person = "私"
 second_person = "あなた"
 """,
@@ -118,10 +118,10 @@ class TestLockPrepCore(unittest.TestCase):
         items = lock_prep._load_all_paras(work, meta)
         result = lock_prep._gather_proper_nouns(items, "zh", 50)
         words = [r["word"] for r in result]
-        # "林霖" は4回出る → 候補に含まれる (freq >= 3)
-        self.assertIn("林霖", words)
-        # "楚轩" は3回
-        self.assertIn("楚轩", words)
+        # "张三" は4回出る → 候補に含まれる (freq >= 3)
+        self.assertIn("张三", words)
+        # "李四" は3回
+        self.assertIn("李四", words)
         for r in result:
             self.assertIn("first", r)
             self.assertIn("freq", r)
@@ -164,13 +164,13 @@ class TestLockPrepCore(unittest.TestCase):
         existing = lock_prep._build_existing_map(work)
         self.assertGreater(len(existing), 0)
         src_words = [e["src"] for e in existing]
-        self.assertIn("林霖", src_words)
+        self.assertIn("张三", src_words)
         self.assertIn("灵氣", src_words)
         proper = lock_prep._gather_proper_nouns(items, "zh", 50)
         proper = lock_prep._mark_existing(proper, existing)
-        linlin = [p for p in proper if p["word"] == "林霖"]
-        self.assertEqual(len(linlin), 1)
-        self.assertIn("existing", linlin[0])
+        found = [p for p in proper if p["word"] == "张三"]
+        self.assertEqual(len(found), 1)
+        self.assertIn("existing", found[0])
 
     def test_output_files_created(self):
         """出力ファイルが _work/ 下に生成される。"""
@@ -212,7 +212,7 @@ blocks = ["b1"]
             work / "chapters" / "ch001.paras.toml",
             """[[paras]]
 n = 1
-text = "私は林霖です。あなたは楚軒ですか。"
+text = "私は张三です。あなたは李四ですか。"
 
 [[paras]]
 n = 2

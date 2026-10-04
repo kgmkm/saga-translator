@@ -89,9 +89,9 @@ text = "第九段落。"
     # characters: arcs 付き2人、address 付き1人、ruby 付き1人
     _write(work / "analysis" / "characters-[ネタバレあり].toml", """\
 [[characters]]
-name_src = "蘇婉晴"
-name_ja = "蘇婉晴"
-ruby = "そえんせい"
+name_src = "李四"
+name_ja = "李四"
+ruby = "りし"
 role = "主人公"
 arcs = [
   {at_block = "ch001/b2", speech_style = "強気"},
@@ -99,17 +99,17 @@ arcs = [
 ]
 
 [[characters]]
-name_src = "青児"
-name_ja = "青児"
-ruby = "せいじ"
+name_src = "王五"
+name_ja = "王五"
+ruby = "おうご"
 role = "仲間"
-address = [{target_src = "蘇婉晴", form = "姉さん"}]
+address = [{target_src = "李四", form = "姉さん"}]
 
 [[characters]]
-name_src = "白狐"
-name_ja = "白狐"
+name_src = "赵六"
+name_ja = "赵六"
 role = "敵"
-address = [{target_src = "青児", form = "小僧"}]
+address = [{target_src = "王五", form = "小僧"}]
 arcs = [
   {at_block = "ch001/b2", note = "初登場"},
 ]
@@ -194,7 +194,7 @@ class TestReview(unittest.TestCase):
         # 機械指摘: b1 に confirm_unacked=2, residue_candidates=3, b2 に confirm_unacked=1
         # report.json から stages.align.confirm_unacked + stages.residue.candidates + stages.residue.errors
         self.assertIn("機械指摘", out)
-        # リスク箇所: arcs at_block (b2,b3), address characters (青児→白狐)
+        # リスク箇所: arcs at_block (b2,b3), address characters (王五→赵六)
         self.assertIn("リスク箇所", out)
         # 抜き取り
         self.assertIn("抜き取り", out)
@@ -216,7 +216,7 @@ class TestReview(unittest.TestCase):
     def test_review_risk_blocks(self):
         """リスク箇所: arcs の at_block が該当ブロックに含まれる。"""
         _, out = self._run_review(wave=1)
-        # 蘇婉晴 arc starts at b2, 白狐 arc starts at b2
+        # 李四 arc starts at b2, 赵六 arc starts at b2
         self.assertIn("ch001/b2", out)
 
     def test_review_deterministic_sampling(self):

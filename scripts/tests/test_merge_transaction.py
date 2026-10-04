@@ -271,11 +271,11 @@ def _make_translatable_work(base: Path) -> Path:
         encoding="utf-8")
     (work / "analysis").mkdir(exist_ok=True)
     (work / "analysis" / "characters-[ネタバレあり].toml").write_text(
-        '[[characters]]\nname_src = "林霖"\nname_ja = "林霖"\n', encoding="utf-8")
+        '[[characters]]\nname_src = "张三"\nname_ja = "张三"\n', encoding="utf-8")
     (work / "analysis" / "terms.toml").write_text(
         '[[terms]]\nterm_src = "灵氣"\nterm_ja = "霊気"\n', encoding="utf-8")
     (work / "analysis" / "plot-[ネタバレあり].toml").write_text(
-        '[[entries]]\nblock = "ch001/b1"\ntext = "林霖が登場。"\n', encoding="utf-8")
+        '[[entries]]\nblock = "ch001/b1"\ntext = "张三が登場。"\n', encoding="utf-8")
     return work
 
 

@@ -32,10 +32,10 @@ class TestLib(unittest.TestCase):
         self.assertIn("ただの本文。", body)
 
     def test_parse_filename(self):
-        d = _lib.parse_filename(Path("19360197-堕魔姬奴-テスト【1】.txt"))
-        self.assertEqual(d["novel_id"], "19360197")
+        d = _lib.parse_filename(Path("8880004-合成作品-テスト【1】.txt"))
+        self.assertEqual(d["novel_id"], "8880004")
         self.assertEqual(d["part"], "1")
-        self.assertIn("堕魔姬奴", d["title"])
+        self.assertIn("合成作品", d["title"])
 
     def test_guess_lang_simplified(self):
         r = _lib.guess_lang("这是中文小说。他们说的话。")
@@ -210,13 +210,13 @@ class TestQa(unittest.TestCase):
         self.assertEqual(report["checks"]["leftover_source_names"]["found"][0]["name_src"], "张三")
 
     def test_qa_leftover_name_in_ja_ok(self):
-        # 訳語に漢字がそのまま含まれる名前(灰狼→暗影団の頭目・灰狼)は残留扱いしない
+        # 訳語に漢字がそのまま含まれる名前(白狼→暗影団の頭目・白狼)は残留扱いしない
         from qa_translation import run_qa
         (self.tmp / "analysis" / "characters.json").write_text(
-            self.json.dumps({"characters": [{"name_src": "灰狼", "name_ja": "暗影団の頭目・灰狼"}]},
+            self.json.dumps({"characters": [{"name_src": "白狼", "name_ja": "暗影団の頭目・白狼"}]},
                             ensure_ascii=False), encoding="utf-8")
         draft = self.tmp / "draft.md"
-        draft.write_text("[P001] 暗影団の頭目・灰狼が現れた。\n\n[P002] 訳二。\n\n[P003] 訳三。\n\n[P004] 訳四。", encoding="utf-8")
+        draft.write_text("[P001] 暗影団の頭目・白狼が現れた。\n\n[P002] 訳二。\n\n[P003] 訳三。\n\n[P004] 訳四。", encoding="utf-8")
         report, _ = run_qa(self.tmp, "ch001", "b1", draft)
         self.assertTrue(report["checks"]["leftover_source_names"]["pass"])
 
@@ -224,7 +224,7 @@ class TestQa(unittest.TestCase):
         # 日本語に無い漢字(簡体字・原文の誤字)が残ったら不合格
         from qa_translation import run_qa
         draft = self.tmp / "draft.md"
-        draft.write_text("[P001] 沈剑平が入ってきた。\n\n[P002] 訳二。\n\n[P003] 訳三。\n\n[P004] 訳四。", encoding="utf-8")
+        draft.write_text("[P001] 李剑平が入ってきた。\n\n[P002] 訳二。\n\n[P003] 訳三。\n\n[P004] 訳四。", encoding="utf-8")
         report, _ = run_qa(self.tmp, "ch001", "b1", draft)
         self.assertFalse(report["pass"])
         self.assertEqual(report["checks"]["non_jis_han"]["found"][0]["char"], "剑")
@@ -232,7 +232,7 @@ class TestQa(unittest.TestCase):
     def test_qa_non_jis_han_ok(self):
         from qa_translation import run_qa
         draft = self.tmp / "draft.md"
-        draft.write_text("[P001] 沈見平が入ってきた。\n\n[P002] 訳二。\n\n[P003] 訳三。\n\n[P004] 訳四。", encoding="utf-8")
+        draft.write_text("[P001] 李見平が入ってきた。\n\n[P002] 訳二。\n\n[P003] 訳三。\n\n[P004] 訳四。", encoding="utf-8")
         report, _ = run_qa(self.tmp, "ch001", "b1", draft)
         self.assertTrue(report["checks"]["non_jis_han"]["pass"])
 
@@ -275,10 +275,10 @@ class TestQa(unittest.TestCase):
     def test_find_non_jis_han(self):
         from _lib import find_non_jis_han
         self.assertEqual(find_non_jis_han("日本語の文章。"), [])
-        hits = find_non_jis_han("沈剑平")
+        hits = find_non_jis_han("李剑平")
         self.assertEqual(hits, [("剑", 1)])
         # JIS収録だが読めない字は言語packのNON_JIS_HANで拾う
-        hits = find_non_jis_han("高橋筱")
+        hits = find_non_jis_han("山田筱")
         self.assertEqual(hits, [("筱", 1)])
 
 
@@ -406,9 +406,9 @@ class TestTomlAndPurge(unittest.TestCase):
     def test_load_titles(self):
         (self.tmp / "analysis").mkdir(exist_ok=True)
         (self.tmp / "analysis" / "titles.toml").write_text(
-            'title_src = "奇点计划"\ntitle_ja = "特異点計画"\n', encoding="utf-8")
+            'title_src = "合成作品"\ntitle_ja = "合成作品"\n', encoding="utf-8")
         got = _lib.load_titles(self.tmp)
-        self.assertEqual(got["title_ja"], "特異点計画")
+        self.assertEqual(got["title_ja"], "合成作品")
 
     def test_load_toml_broken_raises(self):
         (self.tmp / "analysis").mkdir(exist_ok=True)
@@ -561,44 +561,44 @@ class TestUploadedImage(unittest.TestCase):
         from ingest import rewrite_uploaded_images
         src_dir = self.tmp / "src"
         src_dir.mkdir()
-        img = src_dir / "24780972-20956211-題.png"
+        img = src_dir / "8880005-8880006-題.png"
         img.write_bytes(b"\x89PNG")
         work_images = self.tmp / "work" / "images"
-        text = "前\n\n[uploadedimage:20956211]\n\n後"
+        text = "前\n\n[uploadedimage:8880006]\n\n後"
         new, copied, missing = rewrite_uploaded_images(text, work_images, [src_dir])
         self.assertEqual(missing, [])
-        self.assertIn("![](images/24780972-20956211-題.png)", new)
-        self.assertNotIn("[uploadedimage:20956211]", new)
-        self.assertTrue((work_images / "24780972-20956211-題.png").exists())
+        self.assertIn("![](images/8880005-8880006-題.png)", new)
+        self.assertNotIn("[uploadedimage:8880006]", new)
+        self.assertTrue((work_images / "8880005-8880006-題.png").exists())
         self.assertTrue(copied)
 
     def test_rewrite_missing_kept(self):
         from ingest import rewrite_uploaded_images
         new, copied, missing = rewrite_uploaded_images(
-            "[uploadedimage:20956211]", self.tmp / "images", [self.tmp]
+            "[uploadedimage:8880006]", self.tmp / "images", [self.tmp]
         )
-        self.assertEqual(new, "[uploadedimage:20956211]")
-        self.assertEqual(missing, ["20956211"])
+        self.assertEqual(new, "[uploadedimage:8880006]")
+        self.assertEqual(missing, ["8880006"])
         self.assertEqual(copied, [])
 
     def test_rewrite_no_partial_id(self):
         from ingest import find_image_for_id
         d = self.tmp / "src"
         d.mkdir()
-        (d / "x-2095621-y.png").write_bytes(b"x")
-        self.assertIsNone(find_image_for_id("20956211", [d]))
+        (d / "x-888000-y.png").write_bytes(b"x")
+        self.assertIsNone(find_image_for_id("8880006", [d]))
 
     def test_relink_from_work_images(self):
         from ingest import relink_markdown_files
         work = self.tmp / "work"
         (work / "output").mkdir(parents=True)
         (work / "output" / "images").mkdir()
-        (work / "output" / "images" / "20956216.png").write_bytes(b"x")
+        (work / "output" / "images" / "8880007.png").write_bytes(b"x")
         md = work / "output" / "全文_訳文.md"
-        md.write_text("本文\n\n[uploadedimage:20956216]\n", encoding="utf-8")
+        md.write_text("本文\n\n[uploadedimage:8880007]\n", encoding="utf-8")
         still = relink_markdown_files(work)
         self.assertEqual(still, [])
-        self.assertIn("![](images/20956216.png)", md.read_text(encoding="utf-8"))
+        self.assertIn("![](images/8880007.png)", md.read_text(encoding="utf-8"))
 
     def test_retarget_fixes_legacy_prefix(self):
         from ingest import retarget_md_images
