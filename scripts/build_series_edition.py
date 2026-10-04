@@ -4,10 +4,14 @@
 
 使い方:
   python3 build_series_edition.py <root> --check
-  python3 build_series_edition.py <root> --dest <dst> [--title T] [--note TEXT] [--repair]
+  python3 build_series_edition.py <root> --dest <dst> [--title T] [--note TEXT] [--repair] [--use-titles]
 
 <root>: シリーズ親ディレクトリ(_saga/ を含む) または _saga/ 自体。
-出力: <dst>/ 目次.md 合本.md NN_<訳題>.md images/
+出力: <dst>/ 目次.md 合本.md NN_<訳題>.md images/（--use-titles 採用時は manifest.toml）
+
+題の正本は titles.toml（作品題）と [[chapters]].ja（章題）。全文の H1 は派生物で、
+題が食い違ったまま合本すると停止する。--use-titles で titles.toml を正本として続行し、
+採用した決定を出力側の manifest.toml に記録する。
 
 標準ライブラリのみ。ネットワーク不使用。source は --repair 指定時のみ書き換える。
 """
@@ -18,6 +22,7 @@ import os
 import re
 import shutil
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
@@ -293,15 +298,67 @@ def strip_seam_lines(s: str) -> str:
     return "\n".join(lines)
 
 
-def build_part_body(src_text: str, title: str):
-    """全文を整形して単話本文を作る。(body, heading_or_None, prepended) を返す。"""
+def build_part_body(src_text: str, title: str, replace_heading: bool = False):
+    """全文を整形して単話本文を作る。(body, heading_or_None, prepended) を返す。
+
+    replace_heading=True（--use-titles 採用時）は、全文の H1（派生物）を正本の題
+    title に差し替える。source の全文自体は書き換えない。
+    """
     body = normalize_body(src_text)
     heading = split_heading(body)
     if heading is not None:
+        if replace_heading and heading != title:
+            first, sep, rest = body.partition("\n")
+            body = "# " + title + sep + rest
         return body, heading, False
     if not body.strip():
         return "# " + title + "\n", None, True
     return "# " + title + "\n\n" + body, None, True
+
+
+# ------------------------------------------------------------ title canonical
+
+def full_text_heading(work: Path) -> str | None:
+    """全文_訳文.md の先頭の作品題見出し（H1・派生物）。無ければ None。"""
+    full = work / "output" / "全文_訳文.md"
+    if not full.exists():
+        return None
+    return split_heading(normalize_body(read_text(full)))
+
+
+def find_title_mismatches(infos) -> list:
+    """titles.toml を正本とする作品で、全文の H1（派生物）が食い違うものを列挙する。
+
+    戻り値: [{"wid": …, "titles_title": …, "heading": …}, …]
+    """
+    mismatches = []
+    for rec in infos:
+        if rec.get("title_src") != "titles.toml":
+            continue
+        heading = full_text_heading(rec["work"])
+        if heading is not None and heading != rec["title"]:
+            mismatches.append({"wid": rec["wid"], "titles_title": rec["title"], "heading": heading})
+    return mismatches
+
+
+def format_title_mismatches(mismatches) -> str:
+    return "\n  - ".join(
+        f"{m['wid']}: titles.toml「{m['titles_title']}」 / 全文の H1「{m['heading']}」"
+        for m in mismatches)
+
+
+def write_series_manifest(dst: Path, works, eol: str) -> Path:
+    """題の採用（titles.toml 正本）を合本出力の manifest に記録する。"""
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    body = (
+        "# 連作版の題の決定を記録する。\n"
+        'series_title_resolved = "titles"\n'
+        "series_title_resolved_works = [" + ", ".join(f'"{toml_escape(w)}"' for w in works) + "]\n"
+        f'series_title_resolved_at = "{ts}"\n'
+    )
+    p = dst / "manifest.toml"
+    write_eol(p, body, eol)
+    return p
 
 
 def setext_hazards(text: str):
@@ -380,6 +437,19 @@ def copy_images(work: Path, dst_images: Path, wid: str, collisions: list) -> int
 
 
 def cmd_build(args, saga: Path, built, unfinished, infos, order_src, prog) -> int:
+    use_titles = getattr(args, "use_titles", False)
+    mismatches = find_title_mismatches(infos)
+    if mismatches and not use_titles:
+        raise BuildError(
+            f"titles.toml の題と全文の H1 が不一致（{len(mismatches)}件）。全文の H1 は派生物です:\n  - "
+            + format_title_mismatches(mismatches)
+            + "\n対処: 全文を assemble（scripts/assemble.py）で再生成して揃えるか、"
+              "titles.toml を正本として進める場合のみ --use-titles を指定してください")
+    if mismatches:
+        print(f"[warn] 題の不一致 {len(mismatches)}件: titles.toml を正本として採用（全文の H1 は派生物）")
+        for m in mismatches:
+            print(f"[warn]   {m['wid']}: titles.toml「{m['titles_title']}」 ← 全文の H1「{m['heading']}」")
+        print("[warn] 全文の見出しは古いままです。assemble で再生成すると揃います（出力は titles.toml の題）")
     dst = Path(args.dest).expanduser().resolve()
     if dst.exists() and any(dst.iterdir()):
         if not args.force:
@@ -402,13 +472,13 @@ def cmd_build(args, saga: Path, built, unfinished, infos, order_src, prog) -> in
 
     parts, part_bodies = [], []
     width = max(2, len(str(len(infos))))
+    mismatch_ids = {m["wid"] for m in mismatches}
     for i, rec in enumerate(infos, 1):
         src_text = read_text(rec["work"] / "output" / "全文_訳文.md")
-        body, heading, prepended = build_part_body(src_text, rec["title"])
+        replace = rec["wid"] in mismatch_ids
+        body, heading, prepended = build_part_body(src_text, rec["title"], replace_heading=replace)
         rec["prepended"] = prepended
-        if heading is not None and heading != rec["title"]:
-            print(f"[warn] {rec['wid']}: 全文の見出し「{heading}」と訳題「{rec['title']}」が不一致（見出しを採用）")
-            rec["title"] = heading
+        rec["heading_replaced"] = replace
         rec["file"] = f"{i:0{width}d}_{sanitize_filename(rec['title'])}.md"
         write_eol(dst / rec["file"], body, eol)
         parts.append(rec)
@@ -447,6 +517,11 @@ def cmd_build(args, saga: Path, built, unfinished, infos, order_src, prog) -> in
         toc += ["---", "", args.footer]
     write_eol(dst / "目次.md", "\n".join(toc) + "\n", eol)
 
+    # 題の採用の記録（--use-titles で titles.toml を正本とした場合のみ）
+    if mismatches:
+        mp = write_series_manifest(dst, [m["wid"] for m in mismatches], eol)
+        print(f'[warn] 採用を記録: {mp.name}（series_title_resolved = "titles"）')
+
     # 検証
     problems, warnings = ([], [])
     if not args.no_verify:
@@ -469,7 +544,12 @@ def cmd_build(args, saga: Path, built, unfinished, infos, order_src, prog) -> in
     print(f"dest: {dst}")
     print(f"順序: {len(infos)}作品（{order_src}）")
     for i, rec in enumerate(parts, 1):
-        mark = "見出し補完" if rec.get("prepended") else "見出し既存"
+        if rec.get("prepended"):
+            mark = "見出し補完"
+        elif rec.get("heading_replaced"):
+            mark = "見出し差替（titles 正本）"
+        else:
+            mark = "見出し既存"
         print(f"  {i:02d} {rec['wid']}  {rec['file']}  訳題={rec['title_src']}  {mark}  画像{rec['n_images']}")
     if unfinished:
         print(f"skip（全文_訳文.md が無い）: {', '.join(unfinished)}")
@@ -507,7 +587,8 @@ def verify_build(dst: Path, parts, built, eol):
         if "\n\n\n" in text:
             problems.append(f"{rec['file']}: 空行が3連続")
         src_text = read_text(built[rec["wid"]] / "output" / "全文_訳文.md")
-        body, _, _ = build_part_body(src_text, rec["title"])
+        body, _, _ = build_part_body(src_text, rec["title"],
+                                     replace_heading=bool(rec.get("heading_replaced")))
         if text != body:
             problems.append(f"{rec['file']}: source と内容が不一致")
         for raw_ref in IMG_RE.findall(text):
@@ -596,6 +677,8 @@ def main(argv=None) -> int:
     ap.add_argument("--works", help="収録順を作品IDのカンマ区切りで明示")
     ap.add_argument("--check", action="store_true", help="点検のみ（書込みなし）")
     ap.add_argument("--repair", action="store_true", help="source の titles.toml・見出しを補修")
+    ap.add_argument("--use-titles", dest="use_titles", action="store_true",
+                    help="titles.toml を題の正本として進める（全文の H1 との不一致の採用を manifest に記録）")
     ap.add_argument("--force", action="store_true", help="既存 dest を消して再ビルド")
     ap.add_argument("--eol", choices=("crlf", "lf"), default="crlf", help="改行コード（既定 crlf）")
     ap.add_argument("--no-untranslated", action="store_true", help="未翻訳一覧を出さない")
