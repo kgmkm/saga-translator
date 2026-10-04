@@ -216,6 +216,197 @@ def _status_pending_analysis(work: Path) -> list[str]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# status の再開票（P2-4）
+# ---------------------------------------------------------------------------
+#
+# 圧縮の後でも、status の出力だけで再開できるようにする（圧縮で知識が残って
+# いる前提にしない）。工程・対象ブロック・分析と辞書の版・未裁定・draft-append の
+# 受領済み範囲を毎回読み直して出す。対象ブロックのコンテキストは毎回読む前提で、
+# ここで減らすのは同じ版の重複した読み込みだけ（レビュー §3 P2-4）。
+
+# age_policy の検出記録（未裁定の件数を数える。detect/zh2ja.py と同名）
+AGE_POLICY_REPORT_TOML = "age_policy_report-[ネタバレあり].toml"
+
+
+def _count_unsettled_age_policy(work: Path) -> int:
+    """age_policy_report の未裁定（ruling が空）件数。記録が無ければ 0。"""
+    data = _load_toml_safe(work / "analysis" / AGE_POLICY_REPORT_TOML)
+    if not isinstance(data, dict):
+        return 0
+    n = 0
+    for m in data.get("mentions") or []:
+        if isinstance(m, dict) and not str(m.get("ruling") or "").strip():
+            n += 1
+    return n
+
+
+def _count_unacked_confirms(work: Path, cid: str, bid: str) -> str:
+    """対象ブロックの align confirm（未裁定）件数。検査できない場合は「—」。"""
+    try:
+        from align import check_block
+        findings = check_block(work, cid, bid)
+    except Exception:
+        return "—"
+    return str(sum(1 for f in findings if f.severity == "confirm"))
+
+
+def _count_pending_vocab_candidates(work: Path, meta: dict, cid: str, bid: str,
+                                    draft_p: Path) -> str:
+    """対象ブロックの語彙 candidates（裁定未了で確定が止まる件数）。検査できない場合は「—」。
+
+    確定（commit）と同じ検査をドラフトに対して行い、裁定記録で通過しないものだけを
+    数える（辞書版は統合辞書の dict_version。裁定の全キー一致に使う値と同じ）。
+    """
+    try:
+        from align import parse_numbered
+        from vocab import check_draft as vocab_check_draft, house_style_paths, load_vocab
+        items = parse_numbered(draft_p.read_text(encoding="utf-8"))
+        vocab = load_vocab(work)
+        known_terms: set[str] = set()
+        for hp in house_style_paths(work):
+            data = _load_toml_safe(hp)
+            if isinstance(data, dict) and isinstance(data.get("residue"), dict):
+                kt = data["residue"].get("known_terms")
+                if isinstance(kt, list):
+                    known_terms.update(str(x) for x in kt)
+        key = f"{cid}/{bid}"
+        findings = vocab_check_draft(vocab, items, _block_src_text(work, key, meta),
+                                     known_terms=known_terms)
+        draft_hash = sha12(draft_p.read_bytes())
+        src_hash = _analysis_src_hash(work, key, meta)
+        dict_version = vocab.dict_version()
+        n = 0
+        for vf in findings:
+            if vf.kind != "candidates":
+                continue
+            if _vocab_ruling_exists(work, vf, cid, bid, src_hash, draft_hash, dict_version):
+                continue
+            n += 1
+        return str(n)
+    except Exception:
+        return "—"
+
+
+def _list_incomplete_draft_parts(work: Path) -> list[tuple[str, str, dict]]:
+    """未完了（complete でない）の draft-append 記録を列挙する。"""
+    out: list[tuple[str, str, dict]] = []
+    d = work / "output" / "_work" / "draft_parts"
+    if not d.is_dir():
+        return out
+    for p in sorted(d.glob("*.json")):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or data.get("complete") is True:
+            continue
+        cid = str(data.get("chapter") or "")
+        bid = str(data.get("block") or "")
+        if cid and bid:
+            out.append((cid, bid, data))
+    return out
+
+
+def _status_resume_ticket(work: Path, meta: dict, chapters: list[dict],
+                          next_key: str | None, a_done: int, a_total: int) -> list[str]:
+    """status の「再開票」節（P2-4）。圧縮後の再開を、記録の読み直しだけで行えるようにする。
+
+    - 工程（分析か翻訳か）と対象ブロック（未完了の先頭）
+    - 分析の版（analysis_src_hash の一致状態）と辞書の版（vocab の dict_version）
+    - 未裁定の件数（confirm・語彙 candidates は対象ブロックのドラフトから、
+      age_policy は作品全体の記録から）
+    - draft-append の受領済み範囲（未完了の記録がある場合）
+
+    対象ブロックのコンテキストは毎回読む前提。ここで減らすのは同じ版の
+    重複した読み込みだけ（レビュー §3 P2-4）。
+    """
+    target: tuple[str, str, dict] | None = None
+    phase = ""
+    if next_key:
+        cid, bid = next_key.split("/", 1)
+        target, phase = (cid, bid, block_meta(meta, next_key) or {}), "翻訳"
+    else:
+        found = _find_first_unanalyzed(chapters)
+        if found is None and a_done < a_total:
+            # フラグと実体（plot）が食い違う部分状態でも対象を出す（推測で黙らない）
+            ch0 = chapters[0]
+            if ch0.get("blocks"):
+                b0 = ch0["blocks"][0]
+                found = (ch0["id"], b0["id"], b0)
+        if found is not None:
+            target, phase = found, "分析"
+    if target is None:
+        return []  # 未完了ブロックが無い（完成後）は再開票を出さない
+
+    cid, bid, b = target
+    key = f"{cid}/{bid}"
+    out = ["[status] 再開票（圧縮後の再開用）:"]
+    rng = b.get("paras") or []
+    rng_s = ""
+    if isinstance(rng, (list, tuple)) and len(rng) == 2:
+        try:
+            rng_s = f"（paras {_para_range_str(int(rng[0]), int(rng[1]))}）"
+        except (TypeError, ValueError):
+            rng_s = ""
+    out.append(f"[status]   工程: {phase} / 対象ブロック: {key}{rng_s}")
+
+    # 分析の版: 記録の analysis_src_hash と現行原文の一致状態
+    recorded = str(b.get("analysis_src_hash") or "")
+    current = _analysis_src_hash(work, key, meta)
+    analyzed = bool(b.get("analysis_committed_at") or b.get("analysis_no_changes"))
+    if not analyzed:
+        version = ("未分析（--no-analysis で翻訳を許可済み）" if b.get("analysis_skipped")
+                   else "未分析")
+    elif recorded and current and recorded == current:
+        version = f"一致（analysis_src_hash={recorded}）"
+    elif recorded and current:
+        version = f"不一致（記録 {recorded} != 現行 {current}。分析のやり直しを検討）"
+    elif recorded:
+        version = f"記録のみ（{recorded}。現行の原文を読めません）"
+    else:
+        version = "記録なし（旧データ）"
+    out.append(f"[status]   分析の版: {version}")
+
+    # 辞書の版（統合辞書。裁定記録の dict_version と同じ値）
+    try:
+        from vocab import load_vocab
+        dict_version = str(load_vocab(work).dict_version())
+    except Exception as e:
+        dict_version = f"（辞書を読めません: {e}）"
+    out.append(f"[status]   辞書の版: {dict_version}")
+
+    # 未裁定: confirm・語彙 candidates は対象ブロックのドラフトから、age_policy は作品全体から
+    draft_p = _draft_path(work, cid, bid)
+    if draft_p.is_file():
+        conf = _count_unacked_confirms(work, cid, bid)
+        vocab_n = _count_pending_vocab_candidates(work, meta, cid, bid, draft_p)
+        pending_s = f"confirm {conf}件・語彙 candidates {vocab_n}件（対象ブロックのドラフトから検査）"
+    else:
+        pending_s = "confirm —・語彙 candidates —（ドラフト未配置）"
+    out.append(f"[status]   未裁定: {pending_s} / age_policy {_count_unsettled_age_policy(work)}件（作品全体）")
+
+    # draft-append の受領済み範囲（未完了の記録がある場合だけ出す）
+    pending_records = _list_incomplete_draft_parts(work)
+    if pending_records:
+        out.append("[status]   draft-append 受領済み（未完了）:")
+        for cid2, bid2, rec in pending_records[:8]:
+            covered, missing = _draft_parts_coverage(rec)
+            rng2 = rec.get("block_range") or []
+            total = ""
+            if isinstance(rng2, (list, tuple)) and len(rng2) == 2:
+                try:
+                    total = f" / 全体 {_para_range_str(int(rng2[0]), int(rng2[1]))}"
+                except (TypeError, ValueError):
+                    total = ""
+            got = _para_ranges_str(covered) or "—"
+            lost = _para_ranges_str(missing) or "—"
+            out.append(f"[status]     {cid2}/{bid2}: 受領 {got}{total}（残り {lost}）")
+        if len(pending_records) > 8:
+            out.append(f"[status]     …他{len(pending_records) - 8}件")
+    return out
+
+
 def cmd_status(work: Path) -> int:
     started = time.time()
     rc = _cmd_status_impl(work)
@@ -319,6 +510,10 @@ def _cmd_status_impl(work: Path) -> int:
 
     # 分析の確認待ち（未確定の声と未解決の候補。P0-4・#7）
     for line in _status_pending_analysis(work):
+        print(line)
+
+    # 再開票（圧縮後の再開用。P2-4）
+    for line in _status_resume_ticket(work, meta, chapters, next_key, a_done, a_total):
         print(line)
 
     return 0
@@ -1514,6 +1709,406 @@ def _output_path(work: Path, cid: str, bid: str) -> Path:
     return work / "output" / cid / f"{bid}{suf}.md"
 
 
+# ---------------------------------------------------------------------------
+# draft-append サブコマンド（ドラフトの冪等分割書き込み。P2-4）
+# ---------------------------------------------------------------------------
+#
+# 長いドラフトの write_file がタイムアウトしても、範囲ごとに分けて送り直せる
+# ようにする。単純な追記だと再送で同じ範囲が二重に入るため、受領は
+# 「依頼ID（--request-id）＋範囲＋内容ハッシュ」で冪等に行い、受領済みの範囲は
+# output/_work/draft_parts/<ch>_<b>.json に記録する（依頼ID・範囲・ハッシュ・
+# 本文。本文は完成時の連結に使う）。範囲の重複・欠落・範囲外は拒否し、
+# 全範囲が揃ったときだけ、従来と同じ場所・形式
+# （output/_work/<ch>_<b><suffix>_numbered.md）の完成ドラフトへ切り替える。
+# 既存のドラフト配置（prepare→手書き→commit）は変更しない。
+
+def _draft_parts_record_path(work: Path, cid: str, bid: str) -> Path:
+    """受領済み部分ドラフトの記録先（output/_work/draft_parts/<ch>_<b>.json）。"""
+    return work / "output" / "_work" / "draft_parts" / f"{cid}_{bid}.json"
+
+
+def _load_draft_parts_record(work: Path, cid: str, bid: str) -> dict | None:
+    """記録を読む（無い・読めない・壊れている場合は None）。"""
+    p = _draft_parts_record_path(work, cid, bid)
+    if not p.is_file():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _save_draft_parts_record(work: Path, cid: str, bid: str, record: dict) -> None:
+    """記録を原子的に保存する。"""
+    atomic_write_text(_draft_parts_record_path(work, cid, bid),
+                      json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+
+
+def _parse_part_markers(text: str) -> tuple[list[int], list[str]]:
+    """部分ドラフトの [Pn] マーカーを出現順に読む。
+
+    戻り値: (段落番号の列（重複も含む）, 形式不正のマーカー一覧)。
+    行頭の [Pn] だけを対象にする（align.parse_numbered と同じ規則）。
+    """
+    nums: list[int] = []
+    bad: list[str] = []
+    for m in re.finditer(r"(?m)^\[P(\d+)([^\]]*)\]", text):
+        if m.group(2):
+            bad.append(m.group(0))
+        else:
+            nums.append(int(m.group(1)))
+    return nums, bad
+
+
+def _para_range_str(a: int, b: int) -> str:
+    """段落範囲の表示（P4 / P4-P6）。"""
+    return f"P{a}" if a == b else f"P{a}-P{b}"
+
+
+def _para_ranges_str(ranges: list[tuple[int, int]]) -> str:
+    """段落範囲の列の表示（P1-P3・P5）。"""
+    return "・".join(_para_range_str(a, b) for a, b in ranges)
+
+
+def _draft_parts_coverage(record: dict) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    """記録から（受領済み範囲, 未受領範囲）を求める。範囲は (start, end) の列。"""
+    rng = record.get("block_range") or []
+    if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
+        return [], []
+    try:
+        bs, be = int(rng[0]), int(rng[1])
+    except (TypeError, ValueError):
+        return [], []
+    parts: list[tuple[int, int]] = []
+    for p in record.get("parts") or []:
+        if not isinstance(p, dict):
+            continue
+        try:
+            parts.append((int(p.get("start")), int(p.get("end"))))
+        except (TypeError, ValueError):
+            continue
+    parts.sort()
+    covered: list[tuple[int, int]] = []
+    for s, e in parts:
+        if covered and s <= covered[-1][1] + 1:
+            covered[-1] = (covered[-1][0], max(covered[-1][1], e))
+        else:
+            covered.append((s, e))
+    missing: list[tuple[int, int]] = []
+    expected = bs
+    for s, e in covered:
+        if s > expected:
+            missing.append((expected, s - 1))
+        expected = max(expected, e + 1)
+    if expected <= be:
+        missing.append((expected, be))
+    return covered, missing
+
+
+def _draft_parts_complete(record: dict) -> bool:
+    """受領済み範囲がブロック全体（block_range）を連続して覆っているか。"""
+    rng = record.get("block_range") or []
+    if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
+        return False
+    try:
+        bs, be = int(rng[0]), int(rng[1])
+    except (TypeError, ValueError):
+        return False
+    covered, missing = _draft_parts_coverage(record)
+    return (not missing and bool(covered)
+            and covered[0][0] == bs and covered[-1][1] == be)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _parse_para_arg(value: str) -> int | None:
+    """`P12` / `12` 形式の段落番号を読む（不正なら None）。"""
+    m = re.fullmatch(r"[Pp]?(\d+)", (value or "").strip())
+    return int(m.group(1)) if m else None
+
+
+def cmd_draft_append(work: Path, chapter: str, block: str, start: str, end: str,
+                     request_id: str, file: str | None = None) -> int:
+    """部分ドラフトを冪等に受け付ける。成功/失敗を timeline.jsonl に記録する。"""
+    started = time.time()
+    rc = _cmd_draft_append_impl(work, chapter, block, start, end, request_id, file)
+    if work.is_dir():
+        _record_stage(work, "draft-append", chapter or None, block or None, started, rc,
+                      reason="success" if rc == 0 else "other")
+    return rc
+
+
+def _cmd_draft_append_impl(work: Path, chapter: str, block: str, start_s: str,
+                           end_s: str, request_id: str, file: str | None) -> int:
+    if not work.is_dir():
+        print(f"[draft-append] エラー: ディレクトリが見つかりません: {work}", file=sys.stderr)
+        return 1
+    request_id = (request_id or "").strip()
+    if not request_id:
+        print("[draft-append] エラー: --request-id が空です（再送の冪等キーに使います）",
+              file=sys.stderr)
+        return 1
+
+    # 排他ロック（共有ロックに一元化。解放は finally で必ず行う）
+    ok, lock_reason = _acquire_lock_reason(work, "draft-append")
+    if not ok:
+        print(f"[draft-append] エラー: {lock_reason}（終了コード 3）", file=sys.stderr)
+        return 3
+    try:
+        return _cmd_draft_append_locked(work, chapter, block, start_s, end_s,
+                                        request_id, file)
+    finally:
+        _release_lock(work)
+
+
+def _cmd_draft_append_locked(work: Path, chapter: str, block: str, start_s: str,
+                             end_s: str, request_id: str, file: str | None) -> int:
+    # chapters_meta とブロックの範囲
+    meta_p = work / "chapters_meta.toml"
+    if not meta_p.is_file():
+        meta_p = work / "chapters_meta.json"
+    if not meta_p.is_file():
+        print(f"[draft-append] エラー: chapters_meta がありません: {work}", file=sys.stderr)
+        return 1
+    try:
+        meta = load_chapters_meta(work)
+    except Exception as e:
+        print(f"[draft-append] エラー: {e}", file=sys.stderr)
+        return 1
+    b = block_meta(meta, f"{chapter}/{block}")
+    if b is None:
+        print(f"[draft-append] エラー: {chapter}/{block} は chapters_meta に存在しません",
+              file=sys.stderr)
+        return 1
+    rng = b.get("paras") or []
+    if not (isinstance(rng, (list, tuple)) and len(rng) == 2):
+        print(f"[draft-append] エラー: {chapter}/{block} の paras 範囲がありません",
+              file=sys.stderr)
+        return 1
+    try:
+        bs, be = int(rng[0]), int(rng[1])
+    except (TypeError, ValueError):
+        print(f"[draft-append] エラー: {chapter}/{block} の paras 範囲が不正です: {rng}",
+              file=sys.stderr)
+        return 1
+
+    # 指定範囲（P12 / 12 の両形式）
+    start = _parse_para_arg(start_s)
+    end = _parse_para_arg(end_s)
+    if start is None or end is None or start < 1 or end < 1:
+        print(f"[draft-append] エラー: 範囲の指定が不正です"
+              f"（--start {start_s} --end {end_s}。例: P1）", file=sys.stderr)
+        return 1
+    if start > end:
+        print(f"[draft-append] エラー: 範囲が逆転しています（P{start} > P{end}）",
+              file=sys.stderr)
+        return 1
+    if start < bs or end > be:
+        print(f"[draft-append] エラー: 範囲 {_para_range_str(start, end)} はブロック "
+              f"{chapter}/{block} の範囲 {_para_range_str(bs, be)} の外です（範囲外）",
+              file=sys.stderr)
+        return 1
+
+    # 内容（--file または標準入力）
+    if file:
+        try:
+            raw = Path(file).read_bytes()
+        except OSError as e:
+            print(f"[draft-append] エラー: ファイルを読めません: {file}: {e}", file=sys.stderr)
+            return 1
+    else:
+        if sys.stdin.isatty():
+            print("[draft-append] エラー: 内容がありません（--file か標準入力を使用してください）",
+                  file=sys.stderr)
+            return 1
+        try:
+            if hasattr(sys.stdin, "buffer"):
+                raw = sys.stdin.buffer.read()
+            else:
+                raw = sys.stdin.read().encode("utf-8")
+        except (OSError, ValueError) as e:
+            print(f"[draft-append] エラー: 標準入力を読めません: {e}", file=sys.stderr)
+            return 1
+    try:
+        text = raw.decode("utf-8-sig")  # BOM 付きでも先頭マーカーを読めるように
+    except UnicodeDecodeError:
+        print("[draft-append] エラー: 内容を UTF-8 として読めません", file=sys.stderr)
+        return 1
+    # 改行は LF に正規化して、連結結果を環境によらず決定的にする
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if not text.strip():
+        print("[draft-append] エラー: 内容が空です", file=sys.stderr)
+        return 1
+    digest = sha12(raw)
+
+    # 内容のマーカー検証: 指定範囲と一致すること（欠落・重複・範囲外を拒否）
+    nums, bad = _parse_part_markers(text)
+    if bad:
+        print(f"[draft-append] エラー: マーカーの形式が不正です: {' '.join(bad[:3])}",
+              file=sys.stderr)
+        return 1
+    if not nums:
+        print("[draft-append] エラー: [Pn] マーカーがありません"
+              "（部分ドラフトは番号付きで書いてください）", file=sys.stderr)
+        return 1
+    wanted = list(range(start, end + 1))
+    dup = sorted({n for n in nums if nums.count(n) > 1})
+    if dup:
+        print(f"[draft-append] エラー: 内容のマーカーが重複しています: "
+              f"{_para_ranges_str([(n, n) for n in dup])}（重複）", file=sys.stderr)
+        return 1
+    extra = sorted(set(nums) - set(wanted))
+    if extra:
+        print(f"[draft-append] エラー: 内容のマーカー {_para_ranges_str([(n, n) for n in extra])} "
+              f"は指定範囲 {_para_range_str(start, end)} の外です（範囲外）", file=sys.stderr)
+        return 1
+    missing_in = sorted(set(wanted) - set(nums))
+    if missing_in:
+        print(f"[draft-append] エラー: 内容に "
+              f"{_para_ranges_str([(n, n) for n in missing_in])} がありません（欠落）",
+              file=sys.stderr)
+        return 1
+
+    # 受領記録（依頼ID で冪等に）
+    record = _load_draft_parts_record(work, chapter, block)
+    if record is None:
+        # 既存のドラフト配置（prepare→手書き→commit）を壊さない: 無関係のドラフトが
+        # 置かれている状態では新規の受領を始めない（完成時の上書きを避ける）。
+        draft_p = _draft_path(work, chapter, block)
+        if draft_p.is_file():
+            print(f"[draft-append] エラー: 既存のドラフトがあります: {draft_p}。"
+                  "上書きを避けるため受領を開始しません（退避か削除のうえ再実行してください）",
+                  file=sys.stderr)
+            return 1
+        record = {
+            "chapter": chapter, "block": block,
+            "block_range": [bs, be],
+            "complete": False,
+            "parts": [],
+        }
+    else:
+        rng2 = record.get("block_range") or []
+        try:
+            same_range = (isinstance(rng2, (list, tuple)) and len(rng2) == 2
+                          and int(rng2[0]) == bs and int(rng2[1]) == be)
+        except (TypeError, ValueError):
+            same_range = False
+        if not same_range:
+            print(f"[draft-append] エラー: ブロック範囲が記録時と違います"
+                  f"（記録 {rng2} / 現在 {_para_range_str(bs, be)}）。"
+                  f"作り直すには記録を削除してください: "
+                  f"{_draft_parts_record_path(work, chapter, block)}", file=sys.stderr)
+            return 1
+
+    parts: list[dict] = [p for p in (record.get("parts") or []) if isinstance(p, dict)]
+    existing = next((p for p in parts if str(p.get("request_id")) == request_id), None)
+    resend = False
+    if existing is not None:
+        # 同一依頼IDの再送: 範囲と内容ハッシュが一致するときだけ、記録の更新のみ行う
+        try:
+            same = (int(existing.get("start")) == start and int(existing.get("end")) == end
+                    and str(existing.get("hash")) == digest)
+        except (TypeError, ValueError):
+            same = False
+        if not same:
+            print(f"[draft-append] エラー: 依頼ID {request_id} は受領済みですが内容が一致しません"
+                  f"（受領 {existing.get('start')}-{existing.get('end')} hash {existing.get('hash')}"
+                  f" / 今回 {start}-{end} hash {digest}）。"
+                  "再送は同一の範囲・内容のときだけ受理します", file=sys.stderr)
+            return 1
+        existing["resends"] = int(existing.get("resends", 0) or 0) + 1
+        existing["last_seen_at"] = _now_iso()
+        resend = True
+    else:
+        if record.get("complete") is True:
+            print(f"[draft-append] エラー: {chapter}/{block} のドラフトは完成済みです"
+                  "（全範囲を受領済み）。再送は受領時の --request-id と同じIDを使ってください",
+                  file=sys.stderr)
+            return 1
+        covered, _missing = _draft_parts_coverage(record)
+        next_expected = bs if not covered else covered[-1][1] + 1
+        overlap = next((c for c in covered if not (end < c[0] or start > c[1])), None)
+        if overlap is not None:
+            print(f"[draft-append] エラー: 範囲 {_para_range_str(start, end)} は受領済み範囲 "
+                  f"{_para_range_str(*overlap)} と重複します"
+                  "（重複。再送は同じ --request-id を使ってください）", file=sys.stderr)
+            return 1
+        if start > next_expected:
+            print(f"[draft-append] エラー: 範囲 {_para_range_str(start, end)} の前に欠落があります"
+                  f"（未受領 {_para_range_str(next_expected, start - 1)}。"
+                  "先にその範囲を送ってください）", file=sys.stderr)
+            return 1
+        parts.append({
+            "request_id": request_id,
+            "start": start, "end": end,
+            "hash": digest,
+            "text": text,
+            "resends": 0,
+            "received_at": _now_iso(),
+        })
+        parts.sort(key=lambda p: int(p.get("start", 0)))
+        record["parts"] = parts
+
+    _save_draft_parts_record(work, chapter, block, record)
+
+    if resend:
+        print(f"[draft-append] 再送を受理（記録のみ。範囲 {_para_range_str(start, end)} は"
+              f"重複しません。再送回数 {existing.get('resends')}）")
+    else:
+        covered, missing = _draft_parts_coverage(record)
+        got_n = sum(e - s + 1 for s, e in covered)
+        print(f"[draft-append] 受領: {_para_range_str(start, end)}"
+              f"（{len(record['parts'])}範囲・{got_n}/{be - bs + 1}段落。"
+              f"残り {_para_ranges_str(missing) or 'なし'}）")
+
+    # 全範囲が揃ったら、従来と同じ場所・形式のドラフトへ切り替える
+    if not record.get("complete") and _draft_parts_complete(record):
+        return _finalize_draft_parts(work, chapter, block, record)
+    return 0
+
+
+def _finalize_draft_parts(work: Path, cid: str, bid: str, record: dict) -> int:
+    """受領済みの部分ドラフトを連結し、従来のドラフト配置へ切り替える。"""
+    parts = sorted((p for p in record.get("parts") or [] if isinstance(p, dict)),
+                   key=lambda p: int(p.get("start", 0)))
+    texts = [str(p.get("text") or "") for p in parts]
+    assembled = "\n\n".join(t.strip("\n") for t in texts) + "\n"
+
+    # 連結結果の自己検証（受領時の検証をすり抜けた場合の防波堤）
+    nums, bad = _parse_part_markers(assembled)
+    rng = record.get("block_range") or []
+    try:
+        bs, be = int(rng[0]), int(rng[1])
+    except (TypeError, ValueError, IndexError):
+        bs, be = 0, -1
+    if bad or sorted(nums) != list(range(bs, be + 1)):
+        print("[draft-append] エラー: 連結したドラフトのマーカーが範囲と一致しません"
+              "（受領済みの範囲は保持しています）", file=sys.stderr)
+        return 1
+
+    draft_p = _draft_path(work, cid, bid)
+    if draft_p.exists():
+        # 手書きなど既存のドラフトを上書きしない
+        print(f"[draft-append] エラー: 完成予定のドラフト配置先に既存ファイルがあります: {draft_p}。"
+              "退避か削除のうえ再実行してください（受領済みの範囲は保持されています）",
+              file=sys.stderr)
+        return 1
+    atomic_write_text(draft_p, assembled)
+    record["complete"] = True
+    record["completed_at"] = _now_iso()
+    try:
+        record["draft_path"] = draft_p.relative_to(work).as_posix()
+    except ValueError:
+        record["draft_path"] = str(draft_p)
+    record["draft_hash"] = sha12(assembled.encode("utf-8"))
+    _save_draft_parts_record(work, cid, bid, record)
+    print(f"[draft-append] 完成: ドラフトを配置しました: {draft_p}（commit で確定できます）")
+    return 0
+
+
 def cmd_commit(work: Path, chapter: str, block: str,
                model: str, prompt_version: str, revise: bool = False,
                no_analysis: bool = False) -> int:
@@ -2543,6 +3138,18 @@ def main() -> None:
     p_com.add_argument("--no-analysis", action="store_true",
                        help="未分析ブロックの確定を明示的に許可する（analysis_skipped として記録）")
 
+    # draft-append
+    p_da = sub.add_parser("draft-append",
+                          help="ドラフトの冪等分割書き込み（部分ドラフトの受領）")
+    p_da.add_argument("work", help="作品ディレクトリ")
+    p_da.add_argument("--chapter", required=True, help="章（例: ch001）")
+    p_da.add_argument("--block", required=True, help="ブロック（例: b2）")
+    p_da.add_argument("--start", required=True, help="開始段落（例: P1）")
+    p_da.add_argument("--end", required=True, help="終了段落（例: P3）")
+    p_da.add_argument("--request-id", required=True, dest="request_id",
+                      help="依頼ID（冪等キー。再送は同じIDを使う）")
+    p_da.add_argument("--file", default=None, help="部分ドラフトのファイル（省略時は標準入力）")
+
     args = ap.parse_args()
 
     work = Path(args.work).resolve()
@@ -2564,6 +3171,10 @@ def main() -> None:
                                      args.model, args.prompt_version,
                                      revise=args.revise,
                                      no_analysis=args.no_analysis))
+    elif args.command == "draft-append":
+        raise SystemExit(cmd_draft_append(work, args.chapter, args.block,
+                                          args.start, args.end,
+                                          args.request_id, args.file))
 
 
 if __name__ == "__main__":
