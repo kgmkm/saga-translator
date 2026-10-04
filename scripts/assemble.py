@@ -1,7 +1,10 @@
 """確定済みブロックの結合: 章訳文・対訳・目次・全文。
 対訳(章対訳・全文_対訳.md)は --parallel 指定で生成する。年齢正規化の記録
 (analysis/age_policy_report-[ネタバレあり].md)がある作品では自動で有効。
-全ブロック確定後は原文と中間物を消す(--keep-source で残す)。
+章が1つだけの作品では全文を出さず章ファイルのみとする(--keep-full で従来どおり
+両方)。全ブロック確定後は原文と中間物を消す(--keep-source で残す)が、監査記録
+(output/_work/commit・output/_work/done)と改名の記録(_work/renames.jsonl)は
+残し、assemble の最後に「残る中間物」として一覧表示する。
 titles.toml(analysis/)が無い・空のときは停止する。原題のまま出力するときだけ
 --allow-src-title を指定する（未確定の章題は目次に「題未確定」と明示する）。"""
 from __future__ import annotations
@@ -49,6 +52,42 @@ def _record_assembled(work: Path, outputs: list[str]) -> None:
     save_structured(work / "manifest", {**scalars, **tables})
     print(f"[assemble] 完成を記録: assembled_at={scalars['assembled_at']}"
           f"（出力成果物 {len(outputs)} 件）")
+
+
+def _remaining_intermediates(work: Path) -> list[tuple[str, str]]:
+    """完成後も残る中間物を (work 相対パス, 種類) の一覧で返す（レビュー P3）。
+
+    監査保持契約（#20・P3-2）で purge せず残すものを列挙する:
+      - output/_work/commit/ : 監査記録（commit の報告・段落対応スナップショット）
+      - output/_work/done/   : 退避済み done（確定ドラフト）
+      - _work/renames.jsonl  : 改名の記録（rename_terms の監査記録）
+    """
+    items: list[tuple[str, str]] = []
+    commit = work / "output" / "_work" / "commit"
+    if commit.is_dir():
+        for p in sorted(commit.iterdir()):
+            items.append((f"output/_work/commit/{p.name}", "監査記録"))
+    done = work / "output" / "_work" / "done"
+    if done.is_dir():
+        for p in sorted(done.rglob("*")):
+            if p.is_file():
+                rel = str(p.relative_to(done)).replace("\\", "/")
+                items.append((f"output/_work/done/{rel}", "退避済み done"))
+    if (work / "_work" / "renames.jsonl").is_file():
+        items.append(("_work/renames.jsonl", "改名の記録"))
+    return items
+
+
+def _print_remaining_intermediates(work: Path) -> None:
+    """完成後も残る中間物を `[assemble] 残る中間物: …` の1行で列挙する（レビュー P3）。"""
+    items = _remaining_intermediates(work)
+    if not items:
+        print("[assemble] 残る中間物: なし")
+        return
+    shown = ", ".join(f"{rel}（{kind}）" for rel, kind in items[:12])
+    if len(items) > 12:
+        shown += f"…（他 {len(items) - 12} 件）"
+    print(f"[assemble] 残る中間物: {shown}")
 
 
 def _chapter_has_output(c: dict, out: Path, suf: str) -> bool:
@@ -146,6 +185,9 @@ def main() -> None:
                     help="対訳(章対訳・全文_対訳.md)を生成する。年齢正規化の記録がある作品では指定不要(自動)")
     ap.add_argument("--allow-src-title", action="store_true",
                     help="titles.toml が無い/題未確定のとき原題のまま出力する（目次に「題未確定」を明示）")
+    ap.add_argument("--keep-full", action="store_true",
+                    help="章が1つだけの作品でも全文(全文_訳文.md・全文_対訳.md)を出力する"
+                         "（既定は重複を避けて章ファイルのみ）")
     args = ap.parse_args()
     with timed_stage(args.work, "assemble"):
         _stage_impl(args)
@@ -162,6 +204,10 @@ def _stage_impl(args: argparse.Namespace) -> None:
     ch_titles = {c.get("id"): c for c in (titles.get("chapters") or []) if c.get("id")}
     out = work / "output"
     allow_src_title = args.allow_src_title
+    # 単章作品の重複解消（レビュー P3）: 章が1つだけなら全文は出さない。
+    # --keep-full で従来どおり両方（既存のテスト・運用が全文を参照する場合の互換）。
+    single_chapter = len(meta["chapters"]) == 1
+    emit_full = args.keep_full or not single_chapter
     # titles ゲート: 訳題が未確定のまま原題を黙って出さない（レビュー #2 / P0-2）。
     # 通常経路はここで停止し、--allow-src-title の経路だけ原題のまま続行する。
     problems = _titles_gate_problems(work, meta, titles, dst, out, suf)
@@ -250,17 +296,25 @@ def _stage_impl(args: argparse.Namespace) -> None:
     if done_any:
         atomic_write_text(out / "目次.md", "\n".join(toc) + "\n")
         outputs.append("output/目次.md")
-        full_body = "\n\n".join(full_tr) + "\n"
-        if tr_title:
-            full_body = f"# {tr_title}\n\n" + full_body
-        atomic_write_text(out / "全文_訳文.md", retarget_md_images(full_body))
-        outputs.append("output/全文_訳文.md")
-        print(f"[assemble] 目次/全文を出力: {out / '目次.md'}")
+        print(f"[assemble] 目次を出力: {out / '目次.md'}")
+        if emit_full:
+            full_body = "\n\n".join(full_tr) + "\n"
+            if tr_title:
+                full_body = f"# {tr_title}\n\n" + full_body
+            atomic_write_text(out / "全文_訳文.md", retarget_md_images(full_body))
+            outputs.append("output/全文_訳文.md")
+            print(f"[assemble] 全文を出力: {out / '全文_訳文.md'}")
+        else:
+            # 単章作品の重複解消（レビュー P3）: 全文は章ファイルと同じ内容になるため出さない。
+            print("[assemble] 章が1つのため全文_訳文.md は省略（--keep-full で出力）")
         if make_parallel and full_par:
-            atomic_write_text(out / "全文_対訳.md", retarget_md_images("\n\n".join(full_par) + "\n"))
-            outputs.append("output/全文_対訳.md")
-            why = "--parallel" if args.parallel else f"年齢正規化の記録({AGE_REPORT})"
-            print(f"[assemble] 対訳を出力: {out / '全文_対訳.md'} ({why})")
+            if emit_full:
+                atomic_write_text(out / "全文_対訳.md", retarget_md_images("\n\n".join(full_par) + "\n"))
+                outputs.append("output/全文_対訳.md")
+                why = "--parallel" if args.parallel else f"年齢正規化の記録({AGE_REPORT})"
+                print(f"[assemble] 対訳を出力: {out / '全文_対訳.md'} ({why})")
+            else:
+                print("[assemble] 章が1つのため全文_対訳.md は省略（--keep-full で出力）")
     else:
         print("[assemble] 確定済みブロックなし")
 
@@ -278,7 +332,8 @@ def _stage_impl(args: argparse.Namespace) -> None:
     if notice:
         print("[assemble] " + notice.replace("\n", "\n[assemble] "))
 
-    if all_blocks_emitted(work, meta) and not args.keep_source:
+    complete = all_blocks_emitted(work, meta)
+    if complete and not args.keep_source:
         removed = purge_source(work, keep_parallel=make_parallel)
         print(f"[assemble] 原文・中間物を削除 ({len(removed)}): " + ", ".join(removed[:12]) + ("…" if len(removed) > 12 else ""))
         # 全ブロック確定の assemble が通った = 「完成・中間物削除済み」。
@@ -286,6 +341,9 @@ def _stage_impl(args: argparse.Namespace) -> None:
         _record_assembled(work, outputs)
     elif args.keep_source:
         print("[assemble] --keep-source: 原文を残した")
+    if complete:
+        # 完成後も残る中間物（監査記録・退避済み done・renames.jsonl）の一覧（レビュー P3）。
+        _print_remaining_intermediates(work)
 
 
 if __name__ == "__main__":
