@@ -175,3 +175,18 @@ paras = [13, 40]
 - `qa_translation.py` は段落整合（連番一致・段落数一致）と訳語残留（登場人物表の原語が訳文に残っていないか）を検証する
 - `rename_terms.py` は旧訳語→新訳語の機械置換。影響箇所を一覧化し、確認のうえ適用する
 - `assemble.py` は全ブロック確定後に章訳文・全文・目次を統合し、原文と中間物を消す。対訳（章対訳・`全文_対訳.md`）は `--parallel`、または年齢正規化の記録がある作品で出力する（`> [Pnnn]` 付き）
+
+## 分析の記録（stage3 / P0-2 前半）
+
+「分析済み」＝対象ブロックの原文ハッシュ `analysis_src_hash` に対し、(a) 検証を通った非空差分の反映済み（`analysis_committed_at`）、または (b) 「変更なし」の明示（`analysis_no_changes = true`）。
+
+- `chapters_meta.toml` の各 block に記録: `analysis_committed_at`（従来どおり）/ `analysis_src_hash`（ブロック原文の sha256 先頭12桁。原文が変われば変わる）/ `analysis_no_changes`（(b) の場合のみ true）
+- 分析 delta（analyze-commit の入力）: トップレベル `block = "chNNN/bN"` 必須・chapters_meta に実在、`no_changes = true` は空差分の明示に必須。`[[characters]]`・`[[terms]]` は `match_key`/`match_value` 必須、`[[plot]]` は `block`（delta と一致）/`text` 必須。違反はすべて拒否（exit 1・記録しない）
+- 旧ブロック（`analysis_committed_at` のみ）は hash 未記録を許容
+
+## 裁定記録 `_work/rulings.json`（stage3 / P2-3 前半・`scripts/rulings.py`）
+
+裁定（ack・語彙の許容・誤検出の除外）を全キー一致で照合する記録。1件 = `{work_id, chapter, block, paragraph, rule_id, src_hash, draft_hash, dict_version, rationale, adjudicator, decided_at, disposition, status}`。`find_active_ruling` は **8キーすべて一致する active な記録だけ**を返す（1つでも違えば無効＝裁定の流用・陳腐化を防ぐ）。`revoke_ruling` も全キー一致で `status=revoked` に更新（履歴は残る）。`dict_version` の既定は `'none'`。
+
+- known_terms（作品全体の文字列除去）は house_style.toml の `residue.known_terms` のまま。局所の誤検出裁定と混ぜない
+- align ack の共通土台への移行は後続（stage4/11）
