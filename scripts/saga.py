@@ -15,10 +15,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _lib import (  # noqa: E402
-    acquire_lock, atomic_write_text, block_meta, block_src_hash, direction, dump_toml,
-    load_chapters_meta, load_characters, load_paras, load_plot, load_structured,
-    load_terms, load_toml, read_skill_version, record_timeline, release_lock,
-    save_chapters_meta, save_toml, sha12, target_suffix, timed_stage, utf8,
+    acquire_lock, atomic_write_text, block_meta, block_paras, block_src_hash, direction,
+    dump_toml, load_chapters_meta, load_characters, load_paras, load_plot,
+    load_structured, load_terms, load_toml, read_skill_version, record_timeline,
+    release_lock, save_chapters_meta, save_toml, sha12, target_suffix, timed_stage, utf8,
 )
 
 PLOT_RE = re.compile(r'^block = "([^"]+)"', re.M)
@@ -554,6 +554,34 @@ def _analysis_src_hash(work: Path, block_key: str, meta: dict) -> str:
     return block_src_hash(paras_data, b)
 
 
+def _block_src_text(work: Path, block_key: str, meta: dict) -> str:
+    """block 原文（段落列）を改行で連結して返す。読めなければ空文字。
+
+    辞書の fixed 検査（原文に語が出ているのに規定訳が訳文に無い）に使う。
+    """
+    b = block_meta(meta, block_key)
+    if b is None:
+        return ""
+    cid = block_key.split("/", 1)[0]
+    try:
+        paras_data = load_paras(work, cid)
+    except (FileNotFoundError, OSError, ValueError):
+        return ""
+    return "\n".join(p.get("text", "") for p in block_paras(paras_data, b))
+
+
+def _vocab_ruling_exists(work: Path, finding, cid: str, bid: str,
+                         src_hash: str, draft_hash: str, dict_version: str) -> bool:
+    """語彙 candidates の裁定記録があるか（rule_id="vocab:<src>"・全キー一致のみ有効）。"""
+    from rulings import find_active_ruling
+    return find_active_ruling(
+        work,
+        rule_id=f"vocab:{finding.entry.src}",
+        chapter=cid, block=bid, paragraph=finding.paragraph,
+        src_hash=src_hash, draft_hash=draft_hash, dict_version=dict_version,
+    ) is not None
+
+
 def _analysis_phase_active(work: Path) -> bool:
     """work が分析工程に入っているかを判定する（分析ゲート・残渣検査の適用条件）。
 
@@ -883,9 +911,13 @@ def _classify_commit_failure(snap_dir: Path) -> str:
                 return "non_jis"
         return "qa"
     residue = stages.get("residue", {})
-    if isinstance(residue, dict) and (int(residue.get("errors", 0) or 0) > 0
-                                      or int(residue.get("candidates", 0) or 0) > 0):
-        return "residue"
+    if isinstance(residue, dict):
+        vocab = residue.get("vocab", {})
+        vocab_stops = int(vocab.get("stops", 0) or 0) if isinstance(vocab, dict) else 0
+        if (int(residue.get("errors", 0) or 0) > 0
+                or int(residue.get("candidates", 0) or 0) > 0
+                or vocab_stops > 0):
+            return "residue"
     return "other"
 
 
@@ -1427,11 +1459,12 @@ def _finalize_block(work: Path, chapter: str, block: str,
         # 4) 残渣検査（zh→ja 方向のみ）
         if src == "zh" and dst == "ja":
             from detect.zh2ja import ResidueConfig, find_zh_vocab
+            from vocab import check_draft as vocab_check_draft, house_style_paths, load_vocab
 
-            # house_style の known_terms を読み込む
+            # house_style の known_terms を読み込む（探索先は vocab.house_style_paths に
+            # 共通化。#19: 従来は prepare と commit で探索先が不一致だった）
             known_terms: set[str] = set()
-            for house_candidate in [work / "_house" / "house_style.toml",
-                                    work.parent / "_house" / "house_style.toml"]:
+            for house_candidate in house_style_paths(work):
                 try:
                     h_data = _load_toml_safe(house_candidate)
                     if h_data:
@@ -1474,6 +1507,44 @@ def _finalize_block(work: Path, chapter: str, block: str,
                       file=sys.stderr)
                 out["reason"] = "residue"
                 return 1
+
+            # 統合辞書（作品 terms / house_style / 拡張 vocab.toml）による検査（P0-3 / #6）。
+            # fixed: 違反は停止。candidates: 残存は停止（裁定記録 `vocab:<src>` で通過。
+            # 全キー一致のみ有効）。ja_ok は check_draft が除外する。
+            vocab = load_vocab(work)
+            v_findings = vocab_check_draft(
+                vocab, items, _block_src_text(work, f"{cid}/{bid}", meta),
+                known_terms=known_terms)
+            v_src_hash = _analysis_src_hash(work, f"{cid}/{bid}", meta)
+            v_ruled = 0
+            v_stops = []
+            for vf in v_findings:
+                if vf.kind == "candidates" and _vocab_ruling_exists(
+                        work, vf, cid, bid, v_src_hash, draft_hash,
+                        vocab.dict_version()):
+                    v_ruled += 1
+                    where = f"P{vf.paragraph:03d}" if vf.paragraph else "ブロック全体"
+                    print(f"[commit] 残渣(candidates): 「{vf.form}」は裁定記録により通過 ({where})")
+                    continue
+                v_stops.append(vf)
+            report["stages"]["residue"]["vocab"] = {
+                "fixed": sum(1 for f in v_findings if f.kind == "fixed"),
+                "candidates": sum(1 for f in v_findings if f.kind == "candidates"),
+                "ruled": v_ruled,
+                "stops": len(v_stops),
+            }
+            if v_stops:
+                for vf in v_stops:
+                    where = f"P{vf.paragraph:03d}" if vf.paragraph else "ブロック全体"
+                    print(f"[commit] 残渣({vf.kind}): {vf.detail} ({where})")
+                _write_commit_report(snap_dir, report)
+                print(f"[commit] 中止。辞書の残渣 {len(v_stops)} 件。fixed は本文修正、"
+                      f"candidates は本文修正か裁定記録（rulings.py。dict_version="
+                      f"{vocab.dict_version()}）で通せます。", file=sys.stderr)
+                out["reason"] = "residue"
+                return 1
+            if v_ruled:
+                print(f"[commit] 残渣(辞書): {v_ruled} 件は裁定記録により通過")
 
             print(f"[commit] 残渣検査: PASS（候補 0 件）")
             report["stages"]["residue"]["pass"] = True

@@ -301,17 +301,14 @@ def _compact_plot(
 
 
 def _load_house_style_rules(work: Path) -> list[dict]:
-    """work の _house/house_style.toml または saga_root/_house/house_style.toml から全 rule を読む。"""
-    candidates = []
-    w_house = work / "_house" / "house_style.toml"
-    if w_house.exists():
-        candidates.append(w_house)
-    saga_house = work.parent.parent / "_house" / "house_style.toml"
-    if saga_house.exists():
-        candidates.append(saga_house)
+    """work の _house と work 親の _house の house_style.toml から全 rule を読む。
 
+    探索先は vocab.house_style_paths に共通化（#19。prepare と commit で同じ2箇所。
+    従来はここが work.parent.parent、saga 側が work.parent で不一致だった）。
+    """
+    from vocab import house_style_paths
     rules = []
-    for p in candidates:
+    for p in house_style_paths(work):
         try:
             data = load_toml(p)
             if data and isinstance(data, dict):
@@ -320,6 +317,26 @@ def _load_house_style_rules(work: Path) -> list[dict]:
         except Exception:
             pass
     return rules
+
+
+def _fmt_vocab_selection(work: Path, body_texts: list[str]) -> list[str]:
+    """統合辞書から対象ブロックの原文に出現する語を選別し、訳語セクションを作る（P0-3）。
+
+    作品 terms は既存の用語集の選別が扱うため、ここでは house_style と拡張
+    vocab.toml のエントリ（別字形・別表記の経路を含む）だけを追加する。
+    差し込む語が無ければ空リストを返す（何もしない）。
+    """
+    from vocab import load_vocab
+    selected = [e for e in load_vocab(work).select_by_source(body_texts)
+                if e.origin != "terms"]
+    if not selected:
+        return []
+    lines = ["## 訳語(辞書。原文に出現した語はこれに従う)"]
+    for e in selected:
+        head = f"{e.src}（{' / '.join(e.variants)}）" if e.variants else e.src
+        lines.append(f"- {head} → {e.dst or '(未規定)'} [{e.kind}]")
+    lines.append("")
+    return lines
 
 
 _kind_map = {
@@ -503,6 +520,11 @@ def _stage_impl(
         total_terms = len(terms.get("terms", []))
         lines += ["## 用語集", fmt_terms({"terms": compact_terms_list}), ""]
 
+        # 訳語の差し込み (P0-3): 統合辞書（house_style / 拡張 vocab.toml）から
+        # 対象ブロックの原文に出る語を選別して追加する（terms は既存の選別のまま）。
+        if mode == "translation":
+            lines += _fmt_vocab_selection(work, body_texts)
+
         # plot 時点解決 (E)
         plot_texts, plot_resolved = _compact_plot(plot, cid, bid)
         if not plot_texts:
@@ -566,6 +588,10 @@ def _stage_impl(
             next_head_text(chapters, ci, bi, k_next, chdir),
             "",
         ]
+
+        # 訳語の差し込み (P0-3。翻訳コンテキストのみ)
+        if mode == "translation":
+            lines += _fmt_vocab_selection(work, body_texts)
 
     # 分析モードの生 TOML 廃止 (G): 整形済み人物表は full/compact 両方で既に出ている
     # 旧来の生 TOML ブロックは出力しない
