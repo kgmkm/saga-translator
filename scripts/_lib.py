@@ -616,6 +616,69 @@ def parse_filename(path: Path) -> dict:
     return d
 
 
+def parse_frontmatter(text: str) -> tuple[dict | None, str]:
+    """`---` で囲まれた YAML 風 frontmatter をメタとして読み、本文を返す。
+
+    `title: …` / `author: …` / `tags: [a, b]` 等の単純な `key: value` のみ扱う
+    （YAML パーサは持たないため、スカラーとインライン配列だけ）。先頭が `---`
+    で無い、または閉じ `---` が無い場合は (None, text) を返す。
+    """
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if not lines or lines[0].strip() != "---":
+        return None, text
+    end = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            end = i
+            break
+    if end is None:
+        return None, text
+    meta: dict = {}
+    for raw in lines[1:end]:
+        line = raw.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, _, val = line.partition(":")
+        key = key.strip()
+        val = val.strip()
+        if val.startswith("[") and val.endswith("]"):
+            items = [x.strip().strip("\"'") for x in val[1:-1].split(",")]
+            meta[key] = [x for x in items if x]
+        else:
+            meta[key] = val.strip("\"'")
+    body = "\n".join(lines[end + 1:])
+    return meta, body
+
+
+def read_skill_version(skill_root) -> str | None:
+    """スキルルートの SKILL.md frontmatter から version を返す。無ければ None。"""
+    try:
+        text = (Path(skill_root) / "SKILL.md").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    meta, _ = parse_frontmatter(text)
+    if not meta:
+        return None
+    v = meta.get("version")
+    return str(v).strip() if v else None
+
+
+def skill_commit(skill_root) -> str:
+    """スキルリポジトリの git HEAD 短縮 SHA。git 不可・リポジトリ外なら "unknown"。"""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(Path(skill_root)), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    if r.returncode != 0:
+        return "unknown"
+    sha = r.stdout.strip()
+    return sha or "unknown"
+
+
 # 共通の章見出し。言語固有は scripts/lang/<lang>.py の CHAPTER_ALTS
 COMMON_CHAPTER_ALTS = r"[Cc]hapter\s*\d+|[Cc]HAPTER\s*\d+"
 NUM_LINE = re.compile(r"^\s*[0-9０-９]{1,4}\s*$")

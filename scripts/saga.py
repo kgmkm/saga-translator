@@ -16,11 +16,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from _lib import (  # noqa: E402
     atomic_write_text, direction, dump_toml, load_chapters_meta,
-    load_characters, load_plot, load_terms, load_toml,
-    save_chapters_meta, save_toml, target_suffix, utf8,
+    load_characters, load_plot, load_structured, load_terms, load_toml,
+    read_skill_version, save_chapters_meta, save_toml, target_suffix, utf8,
 )
 
 PLOT_RE = re.compile(r'^block = "([^"]+)"', re.M)
+
+# スキルルート（scripts/ の親）。prepare のドリフト検査で参照する。
+SKILL_ROOT = Path(__file__).resolve().parent.parent
 
 # ---------------------------------------------------------------------------
 # status サブコマンド
@@ -474,6 +477,21 @@ def cmd_prepare(work: Path, chapter: str | None, block: str | None,
     if not work.is_dir():
         print(f"[prepare] エラー: ディレクトリが見つかりません: {work}", file=sys.stderr)
         return 1
+
+    # スキル版ドリフト警告: 記録された skill_version と実行中の版が違えば知らせる
+    # （非致命。記録が無い旧作業ディレクトリでは警告しない）。
+    try:
+        man = load_structured(work / "manifest")
+    except (FileNotFoundError, OSError):
+        man = {}
+    recorded = man.get("skill_version")
+    running = read_skill_version(SKILL_ROOT)
+    if recorded and running and str(recorded) != str(running):
+        print(
+            f"[prepare] 警告: スキル版が作業ディレクトリ作成時と異なります"
+            f"（記録: {recorded} / 実行中: {running}）。挙動差に注意してください",
+            file=sys.stderr,
+        )
 
     meta = load_chapters_meta(work)
     chapters = meta.get("chapters", [])

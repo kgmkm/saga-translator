@@ -12,9 +12,13 @@ from xml.etree import ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _lib import (  # noqa: E402
-    atomic_write_text, guess_lang, parse_filename, parse_novel_header,
-    save_structured, split_paras, utf8,
+    atomic_write_text, guess_lang, parse_filename, parse_frontmatter,
+    parse_novel_header, read_skill_version, save_structured, skill_commit,
+    split_paras, utf8,
 )
+
+# スキルルート（このファイルの2つ上）。版記録の参照元。
+SKILL_ROOT = Path(__file__).resolve().parent.parent
 
 IMG_REF = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
 XHTML_TAG = re.compile(r"<[^>]+>")
@@ -237,11 +241,11 @@ def main() -> None:
     work = parent / work_name
 
     with timed_stage(work, "ingest"):
-        _stage_impl(work, src, parent, args, work_id, part)
+        _stage_impl(work, src, parent, args, work_id, part, fname)
 
 
 def _stage_impl(work: Path, src: Path, parent: Path, args: argparse.Namespace,
-                work_id: str, part: str) -> None:
+                work_id: str, part: str, fname: dict) -> None:
 
     meta: dict = {"source_path": str(src), "work_id": work_id, "part": part}
     images_dir = images_dir_of(work)
@@ -259,7 +263,12 @@ def _stage_impl(work: Path, src: Path, parent: Path, args: argparse.Namespace,
         from _lib import read_text_auto
         text, enc = read_text_auto(src)
         meta["encoding"] = enc
-        if suffix == ".md":
+        fm, fm_body = parse_frontmatter(text)
+        if fm is not None:
+            # `---` frontmatter 形式のヘッダ。title/author 等をそのまま採る。
+            meta.update({k: v for k, v in fm.items() if v})
+            body_text = fm_body
+        elif suffix == ".md":
             hdr, body_text = parse_novel_header(text)
             if hdr:
                 meta.update({k: v for k, v in hdr.items() if k != "tags" or True})
@@ -301,6 +310,12 @@ def _stage_impl(work: Path, src: Path, parent: Path, args: argparse.Namespace,
     meta["work_dir"] = str(work)
 
     atomic_write_text(work / "originals" / "source.md", "\n\n".join(paras) + "\n")
+    meta["skill_version"] = read_skill_version(SKILL_ROOT)
+    meta["skill_commit"] = skill_commit(SKILL_ROOT)
+    # dump_toml はテーブル([stats])以降のスカラーを再読込時にテーブル内へ取り込む。
+    # 版記録などのトップレベル値を保つため、唯一の入れ子dict(stats)を末尾へ回す。
+    if isinstance(meta.get("stats"), dict):
+        meta["stats"] = meta.pop("stats")
     save_structured(work / "manifest", meta)
     for sub in ("chapters", "analysis", "translation_input", "output", "output/_work", "logs"):
         (work / sub).mkdir(parents=True, exist_ok=True)
