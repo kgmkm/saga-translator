@@ -49,6 +49,32 @@ class AlignFinding:
 # zh 原文の会話頭に "[" が含まれるため、制御タグを会話と誤検出するのを防ぐ。
 _NON_DIALOGUE_HEADS = ("[[rb:", "[pixivimage:", "[chapter:", "[newpage]", "[uploadedimage:")
 
+# 短い引用が擬音で、そのあとが地の文の段落（“扑腾”一声，… / “咯咯”地笑起来…）を
+# 対話頭と誤判定しないためのしきい値。
+_ONO_HEAD_MAX = 8
+_ONO_CLOSERS = "”」』\""
+
+
+def is_onomatopoeia_head(text: str, heads) -> bool:
+    """短い引用符付きの語（多くは擬音）で始まり、残りが地の文の段落か。
+
+    中国語の小説は擬音を “…” で括って地の文の頭に置くため、
+    原文側の会話頭判定が fatal を誤爆する。引用が短く、閉じたあとの
+    本文が十分長い場合だけ「擬音頭」とみなす。
+    """
+    t = text.lstrip()
+    if not t.startswith(tuple(heads)):
+        return False
+    end = None
+    for i, ch in enumerate(t[1:], start=1):
+        if ch in _ONO_CLOSERS:
+            end = i
+            break
+    if end is None or end > _ONO_HEAD_MAX:
+        return False
+    rest = t[end + 1:]
+    return len(rest) >= 2 * (end + 1)
+
 
 def parse_numbered(text: str) -> list[tuple[int, str]]:
     """[Pn] マーカー付きドラフトを (番号, 本文) の列にする。重複もそのまま返す。"""
@@ -212,6 +238,8 @@ def check_block(work, chapter, block, acks: list[dict] | None = None,
         src_text = para_map.get(n, "")
         dst_text = draft_map[n]
         if src_text.lstrip().startswith(_NON_DIALOGUE_HEADS):
+            continue
+        if is_onomatopoeia_head(src_text, src_heads):
             continue
         if src_text.startswith(src_heads) and not dst_text.startswith(dst_heads):
             findings.append(AlignFinding(

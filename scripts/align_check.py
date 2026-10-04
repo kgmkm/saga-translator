@@ -26,10 +26,34 @@ QUOTE_HEADS = ("「", "『", "（", "(", "“", "‘", '"', "'", "[", "［")  # 
 # 原文側の [[rb:…]] 始まりの地の文を対話と誤検出するのを防ぐ。
 _NON_DIALOGUE_HEADS = ("[[rb:", "[pixivimage:", "[chapter:", "[newpage]", "[uploadedimage:")
 
+# align.py と同じ擬音頭除外（短い引用＋地の文）を共有する。
+# 会話頭判定が align.py とずれないよう、しきい値とヘルパはここで独立実装する。
+_ONO_HEAD_MAX = 8
+_ONO_CLOSERS = "”」』\""
+_HEAD_QUOTES = ("“", "[", "［", "「", "『", "（", "(", "‘", '"', "'")
+
+
+def is_onomatopoeia_head(t: str) -> bool:
+    """短い引用符付きの語（多くは擬音）で始まり、残りが地の文の段落か。"""
+    s = t.lstrip()
+    if not s.startswith(_HEAD_QUOTES):
+        return False
+    end = None
+    for i, ch in enumerate(s[1:], start=1):
+        if ch in _ONO_CLOSERS:
+            end = i
+            break
+    if end is None or end > _ONO_HEAD_MAX:
+        return False
+    rest = s[end + 1:]
+    return len(rest) >= 2 * (end + 1)
+
 
 def is_dialogue(t: str) -> bool:
     s = t.lstrip()
     if s.startswith(_NON_DIALOGUE_HEADS):
+        return False
+    if is_onomatopoeia_head(s):
         return False
     return s.startswith(QUOTE_HEADS)
 
