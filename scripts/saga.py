@@ -554,6 +554,90 @@ def _analysis_src_hash(work: Path, block_key: str, meta: dict) -> str:
     return block_src_hash(paras_data, b)
 
 
+def _analysis_phase_active(work: Path) -> bool:
+    """work が分析工程に入っているかを判定する（分析ゲート・残渣検査の適用条件）。
+
+    通常フローでは lock_prep が分析の前提（flow-contract: analysis requires
+    lock_prep）。その成果物（``_work/lock_prep.toml`` / ``lock_prep.md``）がある
+    work にだけ、分析ゲートと保存前の残渣検査を適用する。無い work は分析工程に
+    入る前の部分 work とみなし、従来どおりの挙動を保つ（後方互換）。
+    """
+    lp = work / "_work"
+    return (lp / "lock_prep.toml").is_file() or (lp / "lock_prep.md").is_file()
+
+
+def _series_decision(work: Path) -> str:
+    """manifest の series_decision（読めなければ空文字）。"""
+    try:
+        man = load_structured(work / "manifest")
+    except Exception:
+        return ""
+    return str(man.get("series_decision") or "")
+
+
+def _stop_if_undecided(work: Path, tool: str) -> bool:
+    """series_decision が undecided なら分析・翻訳を止める（True=止めた）。
+
+    連作の候補があるのに、引き継ぐか単独かを決めていない状態。決定が記録される
+    まで分析も翻訳も始めさせない。
+    """
+    if _series_decision(work) != "undecided":
+        return False
+    print(
+        f"[{tool}] エラー: series_decision が undecided です（連作の候補があり、決定が未記録）。"
+        f"連作として引き継ぐ場合は carry_analysis を実行してから ingest を "
+        f"--series-from <前作workdir> で再実行し、単独で進める場合は ingest を "
+        f"--standalone 付きで再実行して決定を記録してください",
+        file=sys.stderr,
+    )
+    return True
+
+
+def _translation_analysis_gate(work: Path, meta: dict, block_key: str,
+                               no_analysis: bool, tool: str) -> int:
+    """翻訳 prepare / commit の分析ゲート（0=続行可、1=停止）。
+
+    対象 block が「分析済み」（``analysis_committed_at`` または
+    ``analysis_no_changes``）でなければ停止する。``--no-analysis`` が明示された
+    ときだけ通し、chapters_meta の該当 block に ``analysis_skipped = true`` を
+    記録する（assemble の後でも、どのブロックを飛ばしたか追えるように）。
+    分析記録の ``analysis_src_hash`` が現行の原文ハッシュと違う場合は警告のみ出す
+    （裁定記録の失効は stage11 の範囲）。
+    """
+    b = block_meta(meta, block_key)
+    if b is None:
+        return 0  # 未知 block の扱いは各工程の既存のエラー経路に任せる
+
+    analyzed = bool(b.get("analysis_committed_at") or b.get("analysis_no_changes"))
+    if not analyzed:
+        if not no_analysis:
+            print(
+                f"[{tool}] エラー: {block_key} は未分析です。先に分析を確定してください"
+                f"（prepare --mode analysis → analyze-commit）。"
+                f"分析を省いて進める場合だけ --no-analysis を明示してください",
+                file=sys.stderr,
+            )
+            return 1
+        _set_block_field(meta, block_key, "analysis_skipped", True)
+        save_chapters_meta(work, meta)
+        print(
+            f"[{tool}] 警告: {block_key} の分析を省略します（--no-analysis）。"
+            f"chapters_meta に analysis_skipped = true を記録しました",
+            file=sys.stderr,
+        )
+        return 0
+
+    recorded = str(b.get("analysis_src_hash") or "")
+    current = _analysis_src_hash(work, block_key, meta)
+    if recorded and current and recorded != current:
+        print(
+            f"[{tool}] 警告: {block_key} の分析記録は原文の変更で古くなっている可能性があります"
+            f"（analysis_src_hash {recorded} != 現行 {current}）。警告のみで続行します",
+            file=sys.stderr,
+        )
+    return 0
+
+
 def validate_analysis_delta(meta: dict, delta: dict) -> tuple[bool, str | None, bool]:
     """analyze-commit の受入検証（純関数・I/O 無し）。
 
@@ -614,15 +698,17 @@ def validate_analysis_delta(meta: dict, delta: dict) -> tuple[bool, str | None, 
     return True, None, has_changes
 
 
-def cmd_analyze_commit(work: Path, delta_path: Path) -> int:
+def cmd_analyze_commit(work: Path, delta_path: Path,
+                       force_residue: bool = False) -> int:
     started = time.time()
-    rc = _cmd_analyze_commit_impl(work, delta_path)
+    rc = _cmd_analyze_commit_impl(work, delta_path, force_residue)
     reason = "success" if rc == 0 else "other"
     _record_stage(work, "analyze-commit", None, None, started, rc, reason=reason)
     return rc
 
 
-def _cmd_analyze_commit_impl(work: Path, delta_path: Path) -> int:
+def _cmd_analyze_commit_impl(work: Path, delta_path: Path,
+                             force_residue: bool = False) -> int:
     if not delta_path.is_file():
         print(f"[analyze-commit] エラー: delta ファイルが見つかりません: {delta_path}", file=sys.stderr)
         return 1
@@ -633,6 +719,10 @@ def _cmd_analyze_commit_impl(work: Path, delta_path: Path) -> int:
         return 3
 
     try:
+        # 連作の決定が未記録（undecided）のうちは分析を止める
+        if _stop_if_undecided(work, "analyze-commit"):
+            return 1
+
         delta = _parse_delta(delta_path)
         block = delta.get("block", "").strip()
 
@@ -644,10 +734,49 @@ def _cmd_analyze_commit_impl(work: Path, delta_path: Path) -> int:
             print(f"[analyze-commit] エラー: 拒否しました: {reason}", file=sys.stderr)
             return 1
 
-        # 差分が空（no_changes 明示）のときは analysis ファイルに触れない
+        # 反映後の仮の全体を組み立てる（書き込みはまだ行わない）。
+        # 分析工程に入った work では、対象言語の欄（*_src 以外）に中国語が残って
+        # いないかを保存の前に検査する（P0-4 / #8）。行ではなく TOML の構造で
+        # 対象の欄を選ぶ（find_cn_residue_fields）。
+        check_active = _analysis_phase_active(work)
+        payloads: list[tuple[Path, dict]] | None = None
+        logs: list[str] = []
+        if has_changes or check_active:
+            payloads, logs, errors = _build_analysis_payloads(work, delta)
+            if payloads is None:
+                print("[analyze-commit] エラー: マージ検証失敗、何も書きませんでした", file=sys.stderr)
+                return 1
+
+        forced_residue = False
+        if check_active and payloads is not None:
+            from detect.zh2ja import find_cn_residue_fields
+            residue: list[tuple[str, object]] = []
+            for r_path, r_data in payloads:
+                for f in find_cn_residue_fields(r_data):
+                    residue.append((r_path.name, f))
+            if residue:
+                for r_name, f in residue[:20]:
+                    print(f"[analyze-commit] 残渣: {r_name}: {f.value} ({f.context})")
+                if len(residue) > 20:
+                    print(f"[analyze-commit] … 他 {len(residue) - 20} 件")
+                if not force_residue:
+                    print(
+                        f"[analyze-commit] エラー: 分析 TOML の対象欄に中国語の残渣が "
+                        f"{len(residue)} 件あります。修正するか --force-residue を明示してください"
+                        f"（保存しません）",
+                        file=sys.stderr,
+                    )
+                    return 1
+                forced_residue = True
+                print(
+                    f"[analyze-commit] 警告: --force-residue により残渣 {len(residue)} 件を"
+                    f"無視して保存します",
+                    file=sys.stderr,
+                )
+
         if has_changes:
-            success, logs = _merge_delta(work, delta)
-            if not success:
+            write_errors = _commit_analysis_payloads(payloads, work)
+            if write_errors:
                 print("[analyze-commit] エラー: マージ検証失敗、何も書きませんでした", file=sys.stderr)
                 return 1
         else:
@@ -668,6 +797,10 @@ def _cmd_analyze_commit_impl(work: Path, delta_path: Path) -> int:
         else:
             # 変更なしの明示的な記録
             _set_block_field(meta, block, "analysis_no_changes", True)
+
+        if forced_residue:
+            # 残渣を承知で通したことを block の記録に残す
+            _set_block_field(meta, block, "analysis_forced_residue", True)
 
         save_chapters_meta(work, meta)
 
@@ -770,17 +903,31 @@ def _find_first_undone(work: Path, chapters: list[dict], dst: str) -> tuple[str,
     return None
 
 
+def _find_first_unanalyzed(chapters: list[dict]) -> tuple[str, str, dict] | None:
+    """最初の未分析ブロックを返す（#4b）。
+
+    「未分析」= ``analysis_committed_at`` も ``analysis_no_changes`` も無い block。
+    分析モードの prepare は翻訳の未完了ではなく、この基準で選択する。
+    """
+    for ch in chapters:
+        cid = ch["id"]
+        for b in ch.get("blocks", []):
+            if not (b.get("analysis_committed_at") or b.get("analysis_no_changes")):
+                return cid, b["id"], b
+    return None
+
+
 def cmd_prepare(work: Path, chapter: str | None, block: str | None,
-                mode: str = "translation") -> int:
+                mode: str = "translation", no_analysis: bool = False) -> int:
     started = time.time()
     outcome: dict = {"cid": chapter, "bid": block}
-    rc = _cmd_prepare_impl(work, chapter, block, mode, outcome)
+    rc = _cmd_prepare_impl(work, chapter, block, mode, outcome, no_analysis)
     _record_stage(work, "prepare", outcome["cid"], outcome["bid"], started, rc, mode=mode)
     return rc
 
 
 def _cmd_prepare_impl(work: Path, chapter: str | None, block: str | None,
-                      mode: str, outcome: dict) -> int:
+                      mode: str, outcome: dict, no_analysis: bool = False) -> int:
     if not work.is_dir():
         print(f"[prepare] エラー: ディレクトリが見つかりません: {work}", file=sys.stderr)
         return 1
@@ -791,13 +938,13 @@ def _cmd_prepare_impl(work: Path, chapter: str | None, block: str | None,
         print(f"[prepare] エラー: {lock_reason}（終了コード 3）", file=sys.stderr)
         return 3
     try:
-        return _cmd_prepare_locked(work, chapter, block, mode, outcome)
+        return _cmd_prepare_locked(work, chapter, block, mode, outcome, no_analysis)
     finally:
         _release_lock(work)
 
 
 def _cmd_prepare_locked(work: Path, chapter: str | None, block: str | None,
-                        mode: str, outcome: dict) -> int:
+                        mode: str, outcome: dict, no_analysis: bool = False) -> int:
     # スキル版ドリフト警告: 記録された skill_version と実行中の版が違えば知らせる
     # （非致命。記録が無い旧作業ディレクトリでは警告しない）。
     try:
@@ -838,30 +985,63 @@ def _cmd_prepare_locked(work: Path, chapter: str | None, block: str | None,
         print(f"[prepare] エラー: chapters が空です", file=sys.stderr)
         return 1
 
+    # 連作の決定が未記録（undecided）のうちは、分析も翻訳も始めさせない
+    if _stop_if_undecided(work, "prepare"):
+        return 1
+
     src, dst = direction(work)
     suffix = target_suffix(dst)
 
-    if chapter and block:
-        cid, bid = chapter, block
-    elif chapter:
-        cid = chapter
-        ch = next((c for c in chapters if c["id"] == cid), None)
-        if ch is None:
-            print(f"[prepare] エラー: 章 {cid} が見つかりません", file=sys.stderr)
-            return 1
-        result = _find_first_undone(work, [ch], dst)
-        if result is None:
-            print(f"[prepare] 章 {cid} は全ブロック確定済みです", file=sys.stderr)
-            return 1
-        cid, bid, _ = result
+    if mode == "analysis":
+        # 分析モードは「未分析の先頭ブロック」を選ぶ（翻訳の未完了ではない: #4b）
+        if chapter and block:
+            cid, bid = chapter, block
+        elif chapter:
+            cid = chapter
+            ch = next((c for c in chapters if c["id"] == cid), None)
+            if ch is None:
+                print(f"[prepare] エラー: 章 {cid} が見つかりません", file=sys.stderr)
+                return 1
+            result = _find_first_unanalyzed([ch])
+            if result is None:
+                print(f"[prepare] 章 {cid} は全ブロック分析済みです", file=sys.stderr)
+                return 1
+            cid, bid, _ = result
+        else:
+            result = _find_first_unanalyzed(chapters)
+            if result is None:
+                print("[prepare] 分析は完了しています（全ブロックが分析済みです）", file=sys.stderr)
+                return 1
+            cid, bid, _ = result
     else:
-        result = _find_first_undone(work, chapters, dst)
-        if result is None:
-            print(f"[prepare] 全ブロック確定済みです", file=sys.stderr)
-            return 1
-        cid, bid, _ = result
+        if chapter and block:
+            cid, bid = chapter, block
+        elif chapter:
+            cid = chapter
+            ch = next((c for c in chapters if c["id"] == cid), None)
+            if ch is None:
+                print(f"[prepare] エラー: 章 {cid} が見つかりません", file=sys.stderr)
+                return 1
+            result = _find_first_undone(work, [ch], dst)
+            if result is None:
+                print(f"[prepare] 章 {cid} は全ブロック確定済みです", file=sys.stderr)
+                return 1
+            cid, bid, _ = result
+        else:
+            result = _find_first_undone(work, chapters, dst)
+            if result is None:
+                print(f"[prepare] 全ブロック確定済みです", file=sys.stderr)
+                return 1
+            cid, bid, _ = result
 
     outcome["cid"], outcome["bid"] = cid, bid
+
+    # 分析ゲート: 分析工程に入った work では、未分析ブロックの翻訳は
+    # --no-analysis の明示があるときだけ通す（prepare と commit の両方で確認する）
+    if mode != "analysis" and _analysis_phase_active(work):
+        rc_gate = _translation_analysis_gate(work, meta, f"{cid}/{bid}", no_analysis, "prepare")
+        if rc_gate:
+            return rc_gate
 
     # コンテキスト生成
     work_dir_obj = work
@@ -869,7 +1049,7 @@ def _cmd_prepare_locked(work: Path, chapter: str | None, block: str | None,
     from build_context import _stage_impl as bc_stage
     bc_stage(work, cid, bid, mode)
 
-    ctx_path = work / "translation_input" / f"{cid}_{bid}_translation.md"
+    ctx_path = work / "translation_input" / f"{cid}_{bid}_{mode}.md"
 
     # 既知の訳語候補を表示
     chars = load_characters(work)
@@ -914,11 +1094,13 @@ def _output_path(work: Path, cid: str, bid: str) -> Path:
 
 
 def cmd_commit(work: Path, chapter: str, block: str,
-               model: str, prompt_version: str, revise: bool = False) -> int:
+               model: str, prompt_version: str, revise: bool = False,
+               no_analysis: bool = False) -> int:
     """commit を実行し、成功/失敗いずれでも timeline.jsonl に1行記録する。"""
     started = time.time()
     outcome: dict = {"reason": "other", "commit_id": None, "snap_dir": None}
-    rc = _cmd_commit_impl(work, chapter, block, model, prompt_version, revise, outcome)
+    rc = _cmd_commit_impl(work, chapter, block, model, prompt_version, revise, outcome,
+                          no_analysis)
     # 失敗理由は種類別に分類（成功は success）。chapter/block は指定値をそのまま記録。
     if outcome["snap_dir"] is not None:
         reason = _classify_commit_failure(outcome["snap_dir"])
@@ -937,7 +1119,7 @@ def cmd_commit(work: Path, chapter: str, block: str,
 
 def _cmd_commit_impl(work: Path, chapter: str, block: str,
                      model: str, prompt_version: str, revise: bool,
-                     outcome: dict) -> int:
+                     outcome: dict, no_analysis: bool = False) -> int:
     if not work.is_dir():
         print(f"[commit] エラー: ディレクトリが見つかりません: {work}", file=sys.stderr)
         return 1
@@ -950,6 +1132,26 @@ def _cmd_commit_impl(work: Path, chapter: str, block: str,
         return 3
 
     try:
+        # 連作の決定が未記録（undecided）のうちは確定させない
+        if _stop_if_undecided(work, "commit"):
+            outcome["reason"] = "other"
+            return 1
+
+        # 分析ゲート（確定の直前の確認）: 分析工程に入った work では、
+        # 未分析ブロックの確定は --no-analysis の明示があるときだけ通す
+        try:
+            gate_meta = load_chapters_meta(work)
+        except Exception as e:
+            print(f"[commit] エラー: {e}", file=sys.stderr)
+            outcome["reason"] = "exception"
+            return 1
+        if _analysis_phase_active(work):
+            rc_gate = _translation_analysis_gate(
+                work, gate_meta, f"{chapter}/{block}", no_analysis, "commit")
+            if rc_gate:
+                outcome["reason"] = "other"
+                return rc_gate
+
         rc = _finalize_block(work, chapter, block, model, prompt_version,
                              revise=revise, archive=True, outcome=outcome)
         if rc != 0:
@@ -1774,6 +1976,8 @@ def main() -> None:
     p_ac = sub.add_parser("analyze-commit", help="分析差分のコミット")
     p_ac.add_argument("work", help="作品ディレクトリ")
     p_ac.add_argument("--delta", required=True, help="差分TOMLファイル")
+    p_ac.add_argument("--force-residue", action="store_true",
+                      help="分析 TOML の中国語残渣を警告のうえで通す（block 記録に残す）")
 
     # prepare
     p_prep = sub.add_parser("prepare", help="翻訳コンテキスト準備")
@@ -1782,6 +1986,8 @@ def main() -> None:
     p_prep.add_argument("--block", default=None, help="ブロック（例: b2）")
     p_prep.add_argument("--mode", choices=["translation", "analysis"], default="translation",
                         help="コンテキストのモード（既定: translation）")
+    p_prep.add_argument("--no-analysis", action="store_true",
+                        help="未分析ブロックの翻訳を明示的に許可する（analysis_skipped として記録）")
 
     # review
     p_rev = sub.add_parser("review", help="検収リスト生成")
@@ -1799,6 +2005,8 @@ def main() -> None:
     p_com.add_argument("--prompt-version", default="unknown", help="プロンプトバージョン")
     p_com.add_argument("--revise", action="store_true",
                        help="確定済みブロックを新しいドラフトで改訂する（既定は復旧のみ）")
+    p_com.add_argument("--no-analysis", action="store_true",
+                       help="未分析ブロックの確定を明示的に許可する（analysis_skipped として記録）")
 
     args = ap.parse_args()
 
@@ -1807,9 +2015,11 @@ def main() -> None:
     if args.command == "status":
         raise SystemExit(cmd_status(work))
     elif args.command == "analyze-commit":
-        raise SystemExit(cmd_analyze_commit(work, Path(args.delta)))
+        raise SystemExit(cmd_analyze_commit(work, Path(args.delta),
+                                            force_residue=args.force_residue))
     elif args.command == "prepare":
-        raise SystemExit(cmd_prepare(work, args.chapter, args.block, mode=args.mode))
+        raise SystemExit(cmd_prepare(work, args.chapter, args.block, mode=args.mode,
+                                     no_analysis=args.no_analysis))
     elif args.command == "review":
         raise SystemExit(cmd_review(work, wave=args.wave,
                                      sample_ratio=args.sample_ratio,
@@ -1817,7 +2027,8 @@ def main() -> None:
     elif args.command == "commit":
         raise SystemExit(cmd_commit(work, args.chapter, args.block,
                                      args.model, args.prompt_version,
-                                     revise=args.revise))
+                                     revise=args.revise,
+                                     no_analysis=args.no_analysis))
 
 
 if __name__ == "__main__":

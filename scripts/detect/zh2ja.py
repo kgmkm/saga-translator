@@ -23,6 +23,7 @@ __all__ = [
     "find_non_jis_han",
     "find_zh_vocab",
     "find_cn_residue_toml",
+    "find_cn_residue_fields",
     "find_term_src_leftover",
 ]
 
@@ -260,6 +261,93 @@ def find_cn_residue_toml(toml_path: pathlib.Path,
                 line=lineno,
             ))
 
+    return findings
+
+
+def find_cn_residue_fields(data, config: ResidueConfig | None = None) -> list[Finding]:
+    """パース済み TOML データの「対象言語の欄」に残った中国語を検出する。
+
+    キーが ``src`` / ``*_src`` の値は原文側として除外し、dict / list を再帰して
+    文字列値だけを検査する（行の正規表現では ``*_src`` の全形を除外できない）。
+    検出規則は find_cn_residue_toml と同じ:
+
+    - R1: CP932 外の CJK（非JIS字）
+    - R2: 中国語の機能語（かな無しで2字以上）
+    - R3: 定型語（cn_words。既定は空）
+    - R4: 全角読点（，）
+    - R5: 人称/呼称の欄（first_person / second_person / form）に中国語の人称
+
+    空のデータ（記録なし・コメントのみの TOML）は検出なし（「未分析」扱いと矛盾しない）。
+    """
+    findings: list[Finding] = []
+    cn_words = _load_cn_words()
+    cn_mark = set("你我她她们这吗呢哦呀嘛怎什为从对给还让说您")
+    allow = _load_allow(config)
+    kana_re = re.compile(r"[ぁ-んァ-ヴー]")
+
+    def _is_src_key(key: str) -> bool:
+        return key == "src" or key.endswith("_src")
+
+    def _check(key: str, value: str, path: str) -> None:
+        probe = value
+        for a in allow:
+            probe = probe.replace(a, "")
+
+        reasons: list[str] = []
+
+        # R1: CP932 外の CJK
+        for c in probe:
+            if "\u4e00" <= c <= "\u9fff" or "\u3400" <= c <= "\u4dbf":
+                try:
+                    c.encode("cp932")
+                except UnicodeEncodeError:
+                    reasons.append(f"非JIS字:{c}")
+
+        # R3: 定型語
+        for w in cn_words:
+            if w in probe:
+                reasons.append(f"中文語:{w}")
+
+        # R4: 全角読点
+        if "，" in probe:
+            reasons.append("中文読点")
+
+        # R2: 機能語
+        cnt = sum(1 for c in probe if c in cn_mark)
+        if cnt >= 2 and not kana_re.search(probe):
+            reasons.append(f"中文機能語x{cnt}")
+
+        # R5: 人称/呼称
+        if key in ("first_person", "second_person", "form") and any(
+                c in probe for c in "你我您"):
+            reasons.append("人称/呼称に中文")
+
+        if reasons:
+            findings.append(Finding(
+                rule="cn_field",
+                value=" / ".join(reasons),
+                context=f"{path} = {value[:60]}",
+                line=0,
+            ))
+
+    def _walk(obj, path: str) -> None:
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                key = str(k)
+                if _is_src_key(key):
+                    continue
+                child = f"{path}.{key}" if path else key
+                if isinstance(v, str):
+                    _check(key, v, child)
+                else:
+                    _walk(v, child)
+        elif isinstance(obj, list):
+            for i, v in enumerate(obj):
+                _walk(v, f"{path}[{i}]")
+        elif isinstance(obj, str) and path:
+            _check("", obj, path)
+
+    _walk(data, "")
     return findings
 
 

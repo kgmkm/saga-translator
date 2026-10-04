@@ -277,7 +277,6 @@ class TestFlowScenarioNormal(_ScenarioBase):
 class TestFlowScenarioGates(_ScenarioBase):
     """未実装ゲートのシナリオ（expectedFailure＋段階タグ）。"""
 
-    @unittest.expectedFailure
     def test_s1_translate_blocked_without_analysis(self):
         """S1: 分析未実施のブロックで翻訳 prepare/commit が止まる。
 
