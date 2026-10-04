@@ -18,7 +18,7 @@ from _lib import (  # noqa: E402
     acquire_lock, atomic_write_text, block_meta, block_src_hash, direction, dump_toml,
     load_chapters_meta, load_characters, load_paras, load_plot, load_structured,
     load_terms, load_toml, read_skill_version, record_timeline, release_lock,
-    save_chapters_meta, save_toml, target_suffix, timed_stage, utf8,
+    save_chapters_meta, save_toml, sha12, target_suffix, timed_stage, utf8,
 )
 
 PLOT_RE = re.compile(r'^block = "([^"]+)"', re.M)
@@ -874,11 +874,11 @@ def _output_path(work: Path, cid: str, bid: str) -> Path:
 
 
 def cmd_commit(work: Path, chapter: str, block: str,
-               model: str, prompt_version: str) -> int:
+               model: str, prompt_version: str, revise: bool = False) -> int:
     """commit を実行し、成功/失敗いずれでも timeline.jsonl に1行記録する。"""
     started = time.time()
     outcome: dict = {"reason": "other", "commit_id": None, "snap_dir": None}
-    rc = _cmd_commit_impl(work, chapter, block, model, prompt_version, outcome)
+    rc = _cmd_commit_impl(work, chapter, block, model, prompt_version, revise, outcome)
     # 失敗理由は種類別に分類（成功は success）。chapter/block は指定値をそのまま記録。
     if outcome["snap_dir"] is not None:
         reason = _classify_commit_failure(outcome["snap_dir"])
@@ -896,7 +896,8 @@ def cmd_commit(work: Path, chapter: str, block: str,
 
 
 def _cmd_commit_impl(work: Path, chapter: str, block: str,
-                     model: str, prompt_version: str, outcome: dict) -> int:
+                     model: str, prompt_version: str, revise: bool,
+                     outcome: dict) -> int:
     if not work.is_dir():
         print(f"[commit] エラー: ディレクトリが見つかりません: {work}", file=sys.stderr)
         return 1
@@ -908,238 +909,403 @@ def _cmd_commit_impl(work: Path, chapter: str, block: str,
         outcome["reason"] = "locked"
         return 3
 
-    started = time.time()
-    cid, bid = chapter, block
-    draft_p = _draft_path(work, cid, bid)
-    out_p = _output_path(work, cid, bid)
-
-    src, dst = direction(work)
-
-    # 確定後の次コンテキスト生成はロック解放後に実行する
     try:
-        # 冪等リカバリ: emit 済みなら記録だけ補完
-        meta = load_chapters_meta(work)
-        is_emitted = False
-        for c in meta.get("chapters", []):
-            if c["id"] == cid:
-                for b in c.get("blocks", []):
-                    if b["id"] == bid and b.get("status") == "emitted":
-                        is_emitted = True
-                        break
-
-        if is_emitted and out_p.exists():
-            print(f"[commit] {cid}/{bid} は確定済みです。記録だけ補完します")
-            _record_translation_meta(work, cid, bid, model, prompt_version)
-            elapsed = time.time() - started
-            print(f"[commit] {cid}/{bid} 記録補完完了 ({elapsed:.1f}s)")
-            outcome["reason"] = "success"
-            return 0
-
-        if not draft_p.exists():
-            print(f"[commit] エラー: ドラフトがありません: {draft_p}", file=sys.stderr)
-            outcome["reason"] = "draft_missing"
-            return 1
-
-        # 1) スナップショット
-        text = draft_p.read_text(encoding="utf-8")
-        commit_id = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        snap_dir = work / "output" / "_work" / "commit" / f"{ts}_{cid}_{bid}"
-        snap_dir.mkdir(parents=True, exist_ok=True)
-        snap_draft = snap_dir / "draft.md"
-        shutil.copy2(str(draft_p), str(snap_draft))
-        outcome["snap_dir"] = snap_dir
-        print(f"[commit] スナップショット: {snap_draft}  commit_id={commit_id}")
-
-        report: dict[str, object] = {"commit_id": commit_id, "snapshot": str(snap_draft),
-                                     "chapter": cid, "block": bid, "stages": {}}
-
-        try:
-            # 2) 字形整形（glyph のみ）。翻訳方向に応じた pack を使う。
-            #    ja→zh で zh2ja の字形表を当てると逆変換（开→開）が走り、直後の
-            #    non_gbk_han 検査で自己矛盾して落ちる。
-            src_lang, dst_lang = direction(work)
-            if (src_lang, dst_lang) == ("zh", "ja"):
-                from normalize.zh2ja import shape_glyph
-            elif (src_lang, dst_lang) == ("ja", "zh"):
-                from normalize.ja2zh import shape_glyph
-            else:
-                def shape_glyph(text, **_kw):
-                    return text, []
-            shaped, applied_list = shape_glyph(text)
-            if applied_list:
-                items = ", ".join(f"{a['item']}->{a['replacement']}(x{a['count']})" for a in applied_list)
-                print(f"[commit] 字形整形: {len(applied_list)}件適用 {items}")
-            else:
-                print(f"[commit] 字形整形: 適用なし")
-            report["stages"]["shape_glyph"] = {"applied": len(applied_list)}
-
-            # 書き戻し
-            draft_p.write_text(shaped, encoding="utf-8")
-
-            # 3) align 検査
-            from align import check_block, _load_acks
-            acks = _load_acks(work)
-            findings = check_block(work, cid, bid, acks=acks)
-            fatals = [f for f in findings if f.severity == "fatal"]
-            confirms = [f for f in findings if f.severity == "confirm"]
-            # confirm のうち ack の効いていないものを数える
-            dh = hashlib.sha256(draft_p.read_bytes()).hexdigest()[:12]
-            unacked_confirms = [
-                f for f in confirms
-                if not any(
-                    str(a.get("block", bid)) == bid
-                    and f.para in (int(p) for p in (a.get("paras") or []))
-                    and str(a.get("draft_hash", "")) == dh
-                    for a in acks
-                )
-            ]
-            report["stages"]["align"] = {"fatal": len(fatals), "confirm_unacked": len(unacked_confirms)}
-
-            if fatals:
-                for f in fatals:
-                    print(f"[commit] fatal: P{f.para or '?'} {f.kind}: {f.detail}")
-                _write_commit_report(snap_dir, report)
-                print(f"[commit] 中止。ドラフトを直して再実行。", file=sys.stderr)
-                outcome["reason"] = "align"
-                return 1
-
-            if unacked_confirms:
-                for f in unacked_confirms:
-                    print(f"[commit] confirm(未ack): P{f.para or '?'} {f.kind}: {f.detail}")
-                print(f"[commit] 失敗: confirm {len(unacked_confirms)} 件が未ackです。align.py ack を使って確認してください。", file=sys.stderr)
-                _write_commit_report(snap_dir, report)
-                outcome["reason"] = "confirm_unacked"
-                return 1
-
-            print(f"[commit] align: PASS (fatal={len(fatals)}, confirm(未ack)={len(unacked_confirms)})")
-
-            # 4) QA
-            from qa_translation import run_qa
-            qa_report, items = run_qa(work, cid, bid, draft_p)
-            report["stages"]["qa"] = {"pass": qa_report["pass"],
-                                      "checks": {k: v["pass"] for k, v in qa_report["checks"].items()}}
-
-            if not qa_report["pass"]:
-                for k, v in qa_report["checks"].items():
-                    if not v["pass"]:
-                        print(f"[commit] QA FAIL: {k}: {v}")
-                _write_commit_report(snap_dir, report)
-                print(f"[commit] 中止。QA 不合格。", file=sys.stderr)
-                outcome["reason"] = "qa"
-                return 1
-
-            print(f"[commit] QA: PASS")
-
-            # 5) 残渣検査（zh→ja 方向のみ）
-            if src == "zh" and dst == "ja":
-                from detect.zh2ja import ResidueConfig, find_zh_vocab
-
-                # house_style の known_terms を読み込む
-                known_terms: set[str] = set()
-                for house_candidate in [work / "_house" / "house_style.toml",
-                                        work.parent / "_house" / "house_style.toml"]:
-                    try:
-                        h_data = _load_toml_safe(house_candidate)
-                        if h_data:
-                            kt = h_data.get("residue", {}).get("known_terms", [])
-                            if isinstance(kt, list):
-                                known_terms.update(str(x) for x in kt)
-                    except Exception:
-                        pass
-
-                body_text = "\n".join(t for _, t in items)
-                rconfig = ResidueConfig(known_terms=known_terms)
-                residue_findings = find_zh_vocab(body_text, config=rconfig)
-
-                # safe_fix があるものを「候補」として表示
-                residue_candidates = [f for f in residue_findings if f.safe_fix]
-                residue_errors = [f for f in residue_findings if not f.safe_fix]
-                report["stages"]["residue"] = {"candidates": len(residue_candidates),
-                                               "errors": len(residue_errors)}
-
-                if residue_errors:
-                    for f in residue_errors:
-                        sf = f" → {f.safe_fix}" if f.safe_fix else ""
-                        ctx = f.context[:40]
-                        print(f"[commit] 残渣: 「{f.value}」{sf} (L{f.line}: {ctx})")
-                    _write_commit_report(snap_dir, report)
-                    print(f"[commit] 中止。残渣 {len(residue_errors)} 件を修正してください。", file=sys.stderr)
-                    outcome["reason"] = "residue"
-                    return 1
-
-                if residue_candidates:
-                    for f in residue_candidates:
-                        print(f"[commit] 残渣(候補): 「{f.value}」→ {f.safe_fix} (L{f.line})")
-                    # 候補にも safe_fix があるものは修正提案に過ぎないが、放置したまま
-                    # 確定するのはレビュー完了条件「既知パターンの機械検査の未解決エラー
-                    # 0件（emit 時）」に反する。候補が残る場合は確定を止め、修正か
-                    # house_style.toml の known_terms 登録を促す。
-                    _write_commit_report(snap_dir, report)
-                    print(f"[commit] 中止。残渣候補 {len(residue_candidates)} 件が残っています。"
-                          f"修正するか house_style.toml の residue.known_terms に登録してください。",
-                          file=sys.stderr)
-                    outcome["reason"] = "residue"
-                    return 1
-
-                print(f"[commit] 残渣検査: PASS（候補 0 件）")
-                report["stages"]["residue"]["pass"] = True
-
-            elif src == "ja" and dst == "zh":
-                from detect.ja2zh import find_ja_residue
-                body_text = "\n".join(t for _, t in items)
-                ja_residue = find_ja_residue(body_text)
-                report["stages"]["residue"] = {"errors": len(ja_residue)}
-                if ja_residue:
-                    for f in ja_residue[:20]:
-                        print(f"[commit] 残渣: {f}")
-                    _write_commit_report(snap_dir, report)
-                    print(f"[commit] 中止。残渣 {len(ja_residue)} 件を修正してください。", file=sys.stderr)
-                    outcome["reason"] = "residue"
-                    return 1
-                print(f"[commit] 残渣検査: PASS")
-
-            # 6) 確定（emit --archive）— ここまでが「確定」。成功したら exit 0 を確定させる。
-            from qa_translation import emit
-            emit(work, cid, bid, items, archive=True)
-
-            out_p = _output_path(work, cid, bid)
-            print(f"[commit] 確定: {out_p}")
-
-            # 7) 版記録
-            _record_translation_meta(work, cid, bid, model, prompt_version)
-
-            elapsed = time.time() - started
-            n_residue = 0
-            r_stage = report["stages"].get("residue", {})
-            if isinstance(r_stage, dict):
-                rc = r_stage.get("candidates", 0)
-                n_residue = len(rc) if isinstance(rc, list) else int(rc)
-            if src == "ja" and dst == "zh":
-                re = r_stage.get("errors", 0)
-                n_residue = len(re) if isinstance(re, list) else int(re)
-
-            print(f"[commit] {cid}/{bid} を確定 (commit_id={commit_id}, {elapsed:.1f}s)")
-            print(f"[commit] 残渣候補: {n_residue}件")
-
-            _write_commit_report(snap_dir, report)
-            outcome["reason"] = "success"
-            outcome["commit_id"] = commit_id
-
-        except Exception as e:
-            print(f"[commit] エラー: {e}", file=sys.stderr)
-            _write_commit_report(snap_dir, report)
-            outcome["reason"] = "exception"
-            return 1
+        rc = _finalize_block(work, chapter, block, model, prompt_version,
+                             revise=revise, archive=True, outcome=outcome)
+        if rc != 0:
+            return rc
     finally:
         # 正常・例外いずれでも自分のロックを必ず解放する。
         _release_lock(work)
 
-    # 8) 次のコンテキスト生成は「確定の外」（ロック解放後）。ここで失敗しても確定は既に success。
-    #    exit 0 を保ち、警告だけを出す（次回 prepare で再試行できる）。
-    _generate_next_context(work, dst)
+    # 確定後の次コンテキスト生成は「確定の外」（ロック解放後）。ここで失敗しても確定は
+    # 既に success。exit 0 を保ち、警告だけを出す（次回 prepare で再試行できる）。
+    # 復旧（記録の補完）だけの再実行では次コンテキストを作り直さない。
+    if outcome.get("finalized"):
+        _, dst = direction(work)
+        _generate_next_context(work, dst)
 
     return 0
+
+
+def _config_hash(work: Path) -> str:
+    """検査設定（house_style.toml 等）の版を表す sha256 先頭12桁。
+
+    確定記録の config_hash に使う（dict_version と同義の用途）。house_style が
+    無い場合も「無し」を表す決定的な値になる（探索先の中身が変われば値が変わる）。
+    """
+    parts: list[str] = []
+    for label, path in (("work", work / "_house" / "house_style.toml"),
+                        ("parent", work.parent / "_house" / "house_style.toml")):
+        try:
+            data = path.read_bytes() if path.is_file() else b""
+        except OSError:
+            data = b""
+        parts.append(f"{label}:{sha12(data)}")
+    return sha12("|".join(parts).encode("utf-8"))
+
+
+def _hashes_for_block(work: Path, meta: dict, block_key: str,
+                      draft_hash: str, final_hash: str) -> dict[str, str]:
+    """確定記録に残す由来のハッシュ（sha256 先頭12桁）を組み立てる。
+
+    src_hash: 原文（現在の paragraphs）/ analysis_src_hash: 分析記録の値 /
+    config_hash: 検査設定の版 / draft_hash: 正規化後ドラフト / final_hash: 確定出力
+    """
+    b = block_meta(meta, block_key) or {}
+    return {
+        "src_hash": _analysis_src_hash(work, block_key, meta),
+        "analysis_src_hash": str(b.get("analysis_src_hash") or ""),
+        "config_hash": _config_hash(work),
+        "draft_hash": str(draft_hash or ""),
+        "final_hash": str(final_hash or ""),
+    }
+
+
+def _translation_record(work: Path, meta: dict, block_key: str,
+                        draft_hash: str, final_hash: str,
+                        model: str | None, prompt_version: str | None,
+                        tokens_in, tokens_out) -> dict:
+    """chapters_meta の block.translation に書く確定記録（由来ハッシュ付き）。
+
+    model / prompt_version / translated_at / tokens_in / tokens_out の既存キーは
+    そのまま残し、由来のハッシュを追加する（既存キーを壊さない）。
+    """
+    rec: dict = {
+        "model": model if model else "unknown",
+        "prompt_version": prompt_version if prompt_version else "unknown",
+        "translated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "tokens_in": tokens_in if tokens_in is not None else "unmeasured",
+        "tokens_out": tokens_out if tokens_out is not None else "unmeasured",
+    }
+    rec.update(_hashes_for_block(work, meta, block_key, draft_hash, final_hash))
+    return rec
+
+
+def _complete_emitted_record(work: Path, meta: dict, cid: str, bid: str, suf: str,
+                             model: str | None, prompt_version: str | None,
+                             tokens_in, tokens_out) -> bool:
+    """確定済みブロックの「途中の段階」を完遂する（#16 の復旧）。
+
+    emit 済みなのに中断で記録が欠けている場合は、残った成果物（_work/done/ の
+    ドラフトと確定出力）から分かる範囲で記録を補完する。既にある由来の記録は
+    上書きしない。何か変更したら True を返す。
+    """
+    key = f"{cid}/{bid}"
+    b = block_meta(meta, key)
+    if b is None:
+        return False
+    changed = False
+
+    tr = b.get("translation")
+    if not isinstance(tr, dict) or not tr:
+        done_p = work / "output" / "_work" / "done" / f"{cid}_{bid}{suf}_numbered.md"
+        draft_hash = sha12(done_p.read_bytes()) if done_p.is_file() else ""
+        out_p = _output_path(work, cid, bid)
+        final_hash = sha12(out_p.read_bytes()) if out_p.is_file() else ""
+        b["translation"] = _translation_record(work, meta, key, draft_hash, final_hash,
+                                               model, prompt_version, tokens_in, tokens_out)
+        changed = True
+
+    if b.get("status") != "emitted":
+        b["status"] = "emitted"
+        if not b.get("emitted_at"):
+            b["emitted_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        changed = True
+
+    for c in meta.get("chapters", []):
+        if c.get("id") == cid:
+            blocks = c.get("blocks", [])
+            if blocks and all(x.get("status") == "emitted" for x in blocks):
+                if c.get("status") != "done":
+                    c["status"] = "done"
+                    changed = True
+            break
+    return changed
+
+
+def _finalize_block(work: Path, chapter: str, block: str,
+                    model: str | None = None, prompt_version: str | None = None,
+                    revise: bool = False, archive: bool = True,
+                    tokens_in=None, tokens_out=None,
+                    outcome: dict | None = None) -> int:
+    """共通の確定処理（#17）。「検査（align / QA / 残渣 / 非JIS / 会話頭）→ emit → 記録」。
+
+    検査・emit・記録は、検査開始時に取得した正規化済みドラフトのバイト列
+    スナップショット（output/_work/commit/<ts>_<cid>_<bid>/draft.md）に対して行う（#16）。
+    必要な正規化（字形整形）は検査前に一括適用する。
+
+    確定済みブロックへの再実行は、既定では「復旧」＝途中の段階の完遂だけを行い、
+    由来の記録を上書きしない（未使用の新ドラフトがあれば --revise を案内する）。
+    `revise=True` のときだけ新しいドラフトで改訂し、旧記録を translation_history
+    に残して新しい記録（revised_at / prev_draft_hash 付き）へ更新する。
+
+    commit / safe_emit / qa_translation --emit はすべてこの関数を通る。
+    呼び出し側が共有ロック（_lib.acquire_lock）を保持している前提。
+    戻り値は終了コード（0=確定または復旧の完遂、非0=検査で停止）。
+    """
+    out = outcome if outcome is not None else {}
+    out.setdefault("reason", "other")
+    out.setdefault("commit_id", None)
+    out.setdefault("snap_dir", None)
+    out["finalized"] = False
+
+    cid, bid = chapter, block
+    started = time.time()
+    try:
+        meta = load_chapters_meta(work)
+    except Exception as e:
+        print(f"[commit] エラー: {e}", file=sys.stderr)
+        out["reason"] = "exception"
+        return 1
+    if block_meta(meta, f"{cid}/{bid}") is None:
+        print(f"[commit] エラー: {cid}/{bid} は chapters_meta に存在しません", file=sys.stderr)
+        out["reason"] = "other"
+        return 1
+
+    src, dst = direction(work)
+    suf = target_suffix(dst)
+    draft_p = _draft_path(work, cid, bid)
+    out_p = _output_path(work, cid, bid)
+
+    # ---- 確定済み: 復旧（既定）と改訂（--revise 明示）を分ける（#16）----
+    if out_p.is_file() and not revise:
+        changed = _complete_emitted_record(work, meta, cid, bid, suf,
+                                           model, prompt_version, tokens_in, tokens_out)
+        if changed:
+            save_chapters_meta(work, meta)
+        if draft_p.is_file():
+            print(f"[commit] {cid}/{bid} は確定済みです。新しいドラフトは使わず、由来の記録も上書きしません")
+            print(f"[commit] 改訂するには --revise を付けて再実行してください: saga.py commit --revise")
+        elif changed:
+            print(f"[commit] {cid}/{bid} は確定済みです。記録を補完しました")
+        else:
+            print(f"[commit] {cid}/{bid} は確定済みです（記録に変更はありません）")
+        out["reason"] = "success"
+        return 0
+
+    if not draft_p.is_file():
+        if revise:
+            print(f"[commit] エラー: 改訂には新しいドラフトが必要です: {draft_p}", file=sys.stderr)
+        else:
+            print(f"[commit] エラー: ドラフトがありません: {draft_p}", file=sys.stderr)
+        out["reason"] = "draft_missing"
+        return 1
+
+    snap_dir: Path | None = None
+    report: dict | None = None
+    try:
+        # 1) 正規化は検査前に一括適用し、その結果をスナップショットにする（#16）
+        text = draft_p.read_text(encoding="utf-8")
+        if (src, dst) == ("zh", "ja"):
+            from normalize.zh2ja import shape_glyph
+        elif (src, dst) == ("ja", "zh"):
+            from normalize.ja2zh import shape_glyph
+        else:
+            def shape_glyph(text, **_kw):
+                return text, []
+
+        shaped, applied_list = shape_glyph(text)
+        if applied_list:
+            items_s = ", ".join(f"{a['item']}->{a['replacement']}(x{a['count']})" for a in applied_list)
+            print(f"[commit] 字形整形: {len(applied_list)}件適用 {items_s}")
+        else:
+            print(f"[commit] 字形整形: 適用なし")
+
+        # 正規化の結果をドラフトへ反映する。以降の検査・emit・記録はこのバイト列で行う。
+        draft_p.write_text(shaped, encoding="utf-8")
+        snap_bytes = draft_p.read_bytes()
+        draft_hash = sha12(snap_bytes)
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        snap_dir = work / "output" / "_work" / "commit" / f"{ts}_{cid}_{bid}"
+        snap_dir.mkdir(parents=True, exist_ok=True)
+        snap_draft = snap_dir / "draft.md"
+        snap_draft.write_bytes(snap_bytes)
+        out["snap_dir"] = snap_dir
+        print(f"[commit] スナップショット: {snap_draft}  commit_id={draft_hash}")
+
+        report = {"commit_id": draft_hash, "snapshot": str(snap_draft),
+                  "chapter": cid, "block": bid, "revise": bool(revise), "stages": {}}
+
+        # 2) align 検査（会話頭・欠落・重複マーカー）
+        from align import check_block, _load_acks
+        acks = _load_acks(work)
+        findings = check_block(work, cid, bid, acks=acks)
+        fatals = [f for f in findings if f.severity == "fatal"]
+        confirms = [f for f in findings if f.severity == "confirm"]
+        # confirm のうち ack の効いていないものを数える（ack は正規化後ドラフトの
+        # バイト列ハッシュに紐づく）
+        unacked_confirms = [
+            f for f in confirms
+            if not any(
+                str(a.get("block", bid)) == bid
+                and f.para in (int(p) for p in (a.get("paras") or []))
+                and str(a.get("draft_hash", "")) == draft_hash
+                for a in acks
+            )
+        ]
+        report["stages"]["align"] = {"fatal": len(fatals), "confirm_unacked": len(unacked_confirms)}
+
+        if fatals:
+            for f in fatals:
+                print(f"[commit] fatal: P{f.para or '?'} {f.kind}: {f.detail}")
+            _write_commit_report(snap_dir, report)
+            print(f"[commit] 中止。ドラフトを直して再実行。", file=sys.stderr)
+            out["reason"] = "align"
+            return 1
+
+        if unacked_confirms:
+            for f in unacked_confirms:
+                print(f"[commit] confirm(未ack): P{f.para or '?'} {f.kind}: {f.detail}")
+            print(f"[commit] 失敗: confirm {len(unacked_confirms)} 件が未ackです。align.py ack を使って確認してください。", file=sys.stderr)
+            _write_commit_report(snap_dir, report)
+            out["reason"] = "confirm_unacked"
+            return 1
+
+        print(f"[commit] align: PASS (fatal={len(fatals)}, confirm(未ack)={len(unacked_confirms)})")
+
+        # 3) QA（非JIS・段落整合など）。検査対象はスナップショットと同じバイト列。
+        from qa_translation import run_qa
+        qa_report, items = run_qa(work, cid, bid, snap_draft)
+        report["stages"]["qa"] = {"pass": qa_report["pass"],
+                                  "checks": {k: v["pass"] for k, v in qa_report["checks"].items()}}
+
+        if not qa_report["pass"]:
+            for k, v in qa_report["checks"].items():
+                if not v["pass"]:
+                    print(f"[commit] QA FAIL: {k}: {v}")
+            _write_commit_report(snap_dir, report)
+            print(f"[commit] 中止。QA 不合格。", file=sys.stderr)
+            out["reason"] = "qa"
+            return 1
+
+        print(f"[commit] QA: PASS")
+
+        # 4) 残渣検査（zh→ja 方向のみ）
+        if src == "zh" and dst == "ja":
+            from detect.zh2ja import ResidueConfig, find_zh_vocab
+
+            # house_style の known_terms を読み込む
+            known_terms: set[str] = set()
+            for house_candidate in [work / "_house" / "house_style.toml",
+                                    work.parent / "_house" / "house_style.toml"]:
+                try:
+                    h_data = _load_toml_safe(house_candidate)
+                    if h_data:
+                        kt = h_data.get("residue", {}).get("known_terms", [])
+                        if isinstance(kt, list):
+                            known_terms.update(str(x) for x in kt)
+                except Exception:
+                    pass
+
+            body_text = "\n".join(t for _, t in items)
+            rconfig = ResidueConfig(known_terms=known_terms)
+            residue_findings = find_zh_vocab(body_text, config=rconfig)
+
+            # safe_fix があるものを「候補」として表示
+            residue_candidates = [f for f in residue_findings if f.safe_fix]
+            residue_errors = [f for f in residue_findings if not f.safe_fix]
+            report["stages"]["residue"] = {"candidates": len(residue_candidates),
+                                           "errors": len(residue_errors)}
+
+            if residue_errors:
+                for f in residue_errors:
+                    sf = f" → {f.safe_fix}" if f.safe_fix else ""
+                    ctx = f.context[:40]
+                    print(f"[commit] 残渣: 「{f.value}」{sf} (L{f.line}: {ctx})")
+                _write_commit_report(snap_dir, report)
+                print(f"[commit] 中止。残渣 {len(residue_errors)} 件を修正してください。", file=sys.stderr)
+                out["reason"] = "residue"
+                return 1
+
+            if residue_candidates:
+                for f in residue_candidates:
+                    print(f"[commit] 残渣(候補): 「{f.value}」→ {f.safe_fix} (L{f.line})")
+                # 候補にも safe_fix があるものは修正提案に過ぎないが、放置したまま
+                # 確定するのはレビュー完了条件「既知パターンの機械検査の未解決エラー
+                # 0件（emit 時）」に反する。候補が残る場合は確定を止め、修正か
+                # house_style.toml の known_terms 登録を促す。
+                _write_commit_report(snap_dir, report)
+                print(f"[commit] 中止。残渣候補 {len(residue_candidates)} 件が残っています。"
+                      f"修正するか house_style.toml の residue.known_terms に登録してください。",
+                      file=sys.stderr)
+                out["reason"] = "residue"
+                return 1
+
+            print(f"[commit] 残渣検査: PASS（候補 0 件）")
+            report["stages"]["residue"]["pass"] = True
+
+        elif src == "ja" and dst == "zh":
+            from detect.ja2zh import find_ja_residue
+            body_text = "\n".join(t for _, t in items)
+            ja_residue = find_ja_residue(body_text)
+            report["stages"]["residue"] = {"errors": len(ja_residue)}
+            if ja_residue:
+                for f in ja_residue[:20]:
+                    print(f"[commit] 残渣: {f}")
+                _write_commit_report(snap_dir, report)
+                print(f"[commit] 中止。残渣 {len(ja_residue)} 件を修正してください。", file=sys.stderr)
+                out["reason"] = "residue"
+                return 1
+            print(f"[commit] 残渣検査: PASS")
+
+        # 5) 確定（emit）— ここまでが「確定」。成功したら exit 0 を確定させる。
+        from qa_translation import emit
+        emit(work, cid, bid, items, archive=archive)
+
+        out_p = _output_path(work, cid, bid)
+        final_hash = sha12(out_p.read_bytes())
+        print(f"[commit] 確定: {out_p}")
+
+        # 6) 記録（由来のハッシュ。改訂時は旧記録を履歴に残す）
+        meta2 = load_chapters_meta(work)
+        b2 = block_meta(meta2, f"{cid}/{bid}")
+        rec = _translation_record(work, meta2, f"{cid}/{bid}", draft_hash, final_hash,
+                                  model, prompt_version, tokens_in, tokens_out)
+        if b2 is not None:
+            if revise:
+                old = b2.get("translation")
+                if isinstance(old, dict) and old:
+                    hist = b2.get("translation_history")
+                    if not isinstance(hist, list):
+                        hist = []
+                    hist.append(old)
+                    b2["translation_history"] = hist
+                    rec["prev_draft_hash"] = str(old.get("draft_hash") or "")
+                    rec["revised_at"] = rec["translated_at"]
+            b2["translation"] = rec
+            save_chapters_meta(work, meta2)
+
+        report["hashes"] = {k: rec[k] for k in
+                            ("src_hash", "analysis_src_hash", "config_hash",
+                             "draft_hash", "final_hash")}
+
+        elapsed = time.time() - started
+        n_residue = 0
+        r_stage = report["stages"].get("residue", {})
+        if isinstance(r_stage, dict):
+            cnt = r_stage.get("candidates", 0)
+            n_residue = len(cnt) if isinstance(cnt, list) else int(cnt)
+        if src == "ja" and dst == "zh":
+            cnt = r_stage.get("errors", 0)
+            n_residue = len(cnt) if isinstance(cnt, list) else int(cnt)
+
+        verb = "改訂" if revise else "確定"
+        print(f"[commit] {cid}/{bid} を{verb} (commit_id={draft_hash}, {elapsed:.1f}s)")
+        print(f"[commit] 残渣候補: {n_residue}件")
+
+        _write_commit_report(snap_dir, report)
+        out["reason"] = "success"
+        out["commit_id"] = draft_hash
+        out["finalized"] = True
+        return 0
+    except Exception as e:
+        print(f"[commit] エラー: {e}", file=sys.stderr)
+        if snap_dir is not None and report is not None:
+            _write_commit_report(snap_dir, report)
+        out["reason"] = "exception"
+        return 1
 
 
 def _generate_next_context(work: Path, dst: str) -> None:
@@ -1162,28 +1328,6 @@ def _generate_next_context(work: Path, dst: str) -> None:
     except Exception as e:
         print(f"[commit] 確定しました。次のコンテキスト生成に失敗"
               f"（次回 prepare で再試行できます）: {e}", file=sys.stderr)
-
-
-def _record_translation_meta(work: Path, cid: str, bid: str,
-                              model: str, prompt_version: str) -> None:
-    """版記録。model/prompt_version はオプション"""
-    import argparse
-    meta = load_chapters_meta(work)
-    rec = {
-        "model": model if model else "unknown",
-        "prompt_version": prompt_version if prompt_version else "unknown",
-        "translated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "tokens_in": "unmeasured",
-        "tokens_out": "unmeasured",
-    }
-    for c in meta["chapters"]:
-        if c["id"] == cid:
-            for b in c["blocks"]:
-                if b["id"] == bid:
-                    b["translation"] = rec
-            save_chapters_meta(work, meta)
-            return
-    print(f"[meta] 警告: {cid}/{bid} が見つかりません", file=sys.stderr)
 
 
 def _write_commit_report(snap_dir: Path, report: dict) -> None:
@@ -1556,6 +1700,8 @@ def main() -> None:
     p_com.add_argument("--block", required=True, help="ブロック（例: b1）")
     p_com.add_argument("--model", default="unknown", help="翻訳に使ったモデル")
     p_com.add_argument("--prompt-version", default="unknown", help="プロンプトバージョン")
+    p_com.add_argument("--revise", action="store_true",
+                       help="確定済みブロックを新しいドラフトで改訂する（既定は復旧のみ）")
 
     args = ap.parse_args()
 
@@ -1573,7 +1719,8 @@ def main() -> None:
                                      json_output=args.json))
     elif args.command == "commit":
         raise SystemExit(cmd_commit(work, args.chapter, args.block,
-                                     args.model, args.prompt_version))
+                                     args.model, args.prompt_version,
+                                     revise=args.revise))
 
 
 if __name__ == "__main__":

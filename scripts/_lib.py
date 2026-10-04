@@ -310,6 +310,12 @@ def block_paras(paras_data: dict, block: dict) -> list[dict]:
     ]
 
 
+def sha12(data: bytes) -> str:
+    """バイト列の sha256 先頭12桁。裁定・確定記録のハッシュ形式に合わせる。"""
+    import hashlib
+    return hashlib.sha256(data).hexdigest()[:12]
+
+
 def block_src_hash(paras_data: dict, block: dict) -> str:
     """ブロック原文（paragraphs）の sha256 先頭12桁。原文が変われば値も変わる。
 

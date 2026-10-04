@@ -370,7 +370,6 @@ class TestFlowScenarioIntegrity(_ScenarioBase):
         p = _run(str(SCRIPTS / "assemble.py"), str(self.fx.work))
         self.assertNotEqual(p.returncode, 0, f"画像欠落なのに assemble が通った:\n{p.stdout}")
 
-    @unittest.expectedFailure
     def test_s5_interrupted_commit_recovers_record_only(self):
         """S5: 保存失敗・中断後の復旧が「記録だけ補完」で完結する。
 
@@ -396,7 +395,6 @@ class TestFlowScenarioIntegrity(_ScenarioBase):
         # 確定出力を壊さない
         self.assertEqual(hashlib.sha256(out.read_bytes()).hexdigest(), h1)
 
-    @unittest.expectedFailure
     def test_s6_recommit_splits_recovery_and_revision(self):
         """S6: 確定済みブロックの再実行が復旧/改訂に分かれ、由来を上書きしない。
 
@@ -414,21 +412,38 @@ class TestFlowScenarioIntegrity(_ScenarioBase):
         first = meta["chapters"][0]["blocks"][0].get("translation", {})
         self.assertEqual(first.get("model"), "modelA")
 
-        # 新しいドラフトで再実行（改訂）→ 由来が上書きされず、改訂として記録される
+        # 新しいドラフトを置いて --revise 無しで再実行 → 復旧:
+        # 由来の記録は上書きされず、確定出力も変わらず、exit 0 で --revise を案内する
         self.fx.place_draft("ch001", [
             "第一章　始まり",
             "空は曇っていた。風が冷たい。",
             "低い鐘が響く。雪が降る。",
         ])
+        out = self.fx.work / "output" / "ch001" / "b1_ja.md"
+        out_h1 = hashlib.sha256(out.read_bytes()).hexdigest()
         p = _saga("commit", str(self.fx.work), "--chapter", "ch001", "--block", "b1",
                   "--model", "modelB", "--prompt-version", "v2")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         meta2 = tomllib.loads((self.fx.work / "chapters_meta.toml").read_text(encoding="utf-8"))
-        blk = meta2["chapters"][0]["blocks"][0]
+        blk2 = meta2["chapters"][0]["blocks"][0]
         # 由来の記録（初回の modelA）が残っていること
-        self.assertEqual(blk.get("translation", {}).get("model"), "modelA",
+        self.assertEqual(blk2.get("translation", {}).get("model"), "modelA",
                          "初回の由来が上書きされた")
-        # 改訂の履歴が残ること
+        # 未使用の新ドラフトで確定出力を上書きしないこと
+        self.assertEqual(hashlib.sha256(out.read_bytes()).hexdigest(), out_h1,
+                         "--revise 無しで確定出力が上書きされた")
+        # 改訂の案内が出ること
+        self.assertIn("--revise", p.stdout + p.stderr)
+
+        # --revise を付けた再実行 → 改訂として記録され、旧記録は履歴に残る
+        p = _saga("commit", str(self.fx.work), "--chapter", "ch001", "--block", "b1",
+                  "--model", "modelB", "--prompt-version", "v2", "--revise")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        meta3 = tomllib.loads((self.fx.work / "chapters_meta.toml").read_text(encoding="utf-8"))
+        blk = meta3["chapters"][0]["blocks"][0]
+        # 由来が改訂後の記録へ更新される
+        self.assertEqual(blk.get("translation", {}).get("model"), "modelB")
+        # 改訂の履歴が残ること（初回の記録は上書きされず保持される）
         self.assertTrue(
             blk.get("translation_history") or blk.get("revision"),
             "改訂の履歴が記録されていない")

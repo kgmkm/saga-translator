@@ -1,4 +1,8 @@
-"""訳文ドラフトの機械QA → 合格なら正式出力へ確定(--emit)。"""
+"""訳文ドラフトの機械QA → 合格なら正式出力へ確定(--emit)。
+
+--emit の確定は saga.py の共通確定処理（_finalize_block）を通る（#17）。
+align / QA / 残渣の検査に通らない確定経路は無い。
+"""
 from __future__ import annotations
 
 import argparse
@@ -10,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _lib import (  # noqa: E402
+    acquire_lock,
     atomic_write_text,
     direction,
     find_non_jis_han,
@@ -18,6 +23,7 @@ from _lib import (  # noqa: E402
     load_json,
     load_paras,
     load_toml,
+    release_lock,
     save_chapters_meta,
     save_json,
     target_quotes,
@@ -276,6 +282,17 @@ def _stage_impl(args: argparse.Namespace) -> None:
 
     work = Path(args.work)
     cid, bid = args.chapter, args.block
+
+    if args.emit:
+        # 確定は saga.py の共通確定処理（検査込み）に一本化した（#17）。
+        suf = target_suffix(direction(work)[1])
+        canon = work / "output" / "_work" / f"{cid}_{bid}{suf}_numbered.md"
+        if args.draft and Path(args.draft).resolve() != canon.resolve():
+            print("[qa] エラー: --emit は既定の場所のドラフト（output/_work/）を検査・確定します。"
+                  "別のドラフトは先に既定の場所へ置いてください", file=sys.stderr)
+            sys.exit(1)
+        sys.exit(_emit_via_common_finalize(work, cid, bid, archive=bool(args.archive)))
+
     suf = target_suffix(direction(work)[1])
     draft = Path(args.draft) if args.draft else work / "output" / "_work" / f"{cid}_{bid}{suf}_numbered.md"
     if not draft.exists():
@@ -287,12 +304,24 @@ def _stage_impl(args: argparse.Namespace) -> None:
     for k, v in report["checks"].items():
         print(f"[qa] {k}: {'PASS' if v['pass'] else 'FAIL'} {'' if v['pass'] else v}")
     print(f"[qa] result: {'PASS' if report['pass'] else 'FAIL'}")
-
-    if report["pass"] and args.emit:
-        emit(work, cid, bid, items, archive=args.archive)
-        print(f"[emit] {work / 'output' / cid / (bid + suf + '.md')}")
-        sys.exit(0)
     sys.exit(0 if report["pass"] else 1)
+
+
+def _emit_via_common_finalize(work: Path, cid: str, bid: str, archive: bool) -> int:
+    """共通確定処理（saga._finalize_block）を共有ロックの内側で呼ぶ（#17）。
+
+    commit / safe_emit と同じ検査（align / QA / 残渣）を通ってから確定する。
+    戻り値は終了コード（0=確定または復旧の完遂、1=検査で停止、3=ロック中）。
+    """
+    ok, reason = acquire_lock(work, "qa_translation_emit")
+    if not ok:
+        print(f"[qa] エラー: {reason}（終了コード 3）", file=sys.stderr)
+        return 3
+    try:
+        from saga import _finalize_block
+        return _finalize_block(work, cid, bid, archive=archive)
+    finally:
+        release_lock(work)
 
 
 if __name__ == "__main__":
