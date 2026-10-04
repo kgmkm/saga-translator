@@ -1,7 +1,8 @@
 """段落QA(--emit)と版記録(record_meta)をロック付きで直列実行するラッパー。
 
 複数の翻訳エージェントが同一作品を並行で進めても chapters_meta の
-書き込み競合が起きないようにする（ロックは output/_work/.emit.lock の mkdir）。
+書き込み競合が起きないようにする。ロックは saga.py と同じ共有ロック
+（<work>/_work/.lock、_lib に一元化）を使う。
 
 使い方:
   python3 safe_emit.py <work_dir> --chapter chXXX --block bN [--model M]
@@ -16,28 +17,11 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-
-def acquire(lock: Path, timeout: float = 600.0) -> bool:
-    t0 = time.time()
-    while time.time() - t0 < timeout:
-        try:
-            lock.mkdir(parents=True, exist_ok=False)
-            return True
-        except FileExistsError:
-            # 壊れたロック（30分以上前）は回収する
-            try:
-                if time.time() - lock.stat().st_mtime > 1800:
-                    lock.rmdir()
-                    continue
-            except OSError:
-                pass
-            time.sleep(2.0)
-    return False
+from _lib import acquire_lock, release_lock  # noqa: E402
 
 
 def main() -> int:
@@ -52,11 +36,11 @@ def main() -> int:
     args = ap.parse_args()
 
     scripts_dir = Path(__file__).parent
-    lockdir = args.work / "output" / "_work" / ".emit.lock"
-    lockdir.parent.mkdir(parents=True, exist_ok=True)
+    args.work.mkdir(parents=True, exist_ok=True)
 
-    if not acquire(lockdir):
-        print("[safe_emit] ロック取得に失敗（他プロセスが長時間保持）", file=sys.stderr)
+    ok, reason = acquire_lock(args.work, "safe_emit")
+    if not ok:
+        print(f"[safe_emit] ロック取得に失敗: {reason}", file=sys.stderr)
         return 2
     try:
         qa = subprocess.run(
@@ -80,10 +64,7 @@ def main() -> int:
         sys.stderr.write(rec.stderr or "")
         return 0 if rec.returncode == 0 else 1
     finally:
-        try:
-            lockdir.rmdir()
-        except OSError:
-            pass
+        release_lock(args.work)
 
 
 if __name__ == "__main__":

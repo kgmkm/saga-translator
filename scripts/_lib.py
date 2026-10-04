@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
+import socket
 import sys
+import time
 import tomllib
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -854,3 +857,233 @@ def timed_stage(work, stage, chapter=None, block=None, reason=None, mode=None):
         record_timeline(work, stage, chapter=chapter, block=block,
                         started=started, ended=datetime.now(timezone.utc),
                         exit_code=code, reason=reason, mode=mode)
+
+
+# ---------------------------------------------------------------------------
+# 共有排他ロック（workspace 単位で1つ: <work>/_work/.lock）
+#
+# ロックファイルには所有者情報（PID・ホスト名・取得時刻・工程名）を JSON で書く。
+# 排他失敗は False（呼び出し側が exit 3 にする）。
+# stale（LOCK_STALE_SECONDS 超）でも所有者の生存確認が取れて初めて上書きする:
+#   - 同一ホスト: PID の生存を確認（Windows=ctypes の OpenProcess、POSIX=os.kill(pid,0)）
+#   - 所有者が生存 → 上書きしない
+#   - 生死判定不能（別ホスト・権限不足等）→ 上書きしない（推測で上書きしない）
+# ---------------------------------------------------------------------------
+
+LOCK_STALE_SECONDS = 600.0
+
+try:  # 実行環境のホスト名（別ホスト判定に使う。失敗しても致命ではない）
+    _HOSTNAME = socket.gethostname()
+except OSError:  # pragma: no cover - 環境依存
+    _HOSTNAME = ""
+
+
+def lock_path(work) -> Path:
+    """共有ロックファイルのパス（<work>/_work/.lock）。"""
+    return Path(work) / "_work" / ".lock"
+
+
+def _read_lock_owner(path: Path) -> dict | None:
+    """ロックファイルの所有者情報を読む。
+
+    新形式: JSON（pid/host/acquired_at/stage）。
+    旧形式: PID を1行書いただけのテキスト（後方互換。host 不明として扱う）。
+    読めない場合は None。
+    """
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return None
+        if isinstance(data, dict):
+            return data
+        return None
+    # 旧形式: 先頭行の整数を PID とみなす
+    first = raw.splitlines()[0].strip()
+    if first.isdigit():
+        return {"pid": int(first), "host": "", "acquired_at": None, "stage": ""}
+    return None
+
+
+def _pid_alive(pid: int) -> bool | None:
+    """PID のプロセスが生きているか。True=生存 / False=死亡 / None=判定不能。
+
+    標準ライブラリのみを使う。別ユーザー等で権限不足のときは None を返し、
+    呼び出し側が「上書きしない」判断に使う。
+    """
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    if os.name == "nt":
+        return _pid_alive_windows(pid)
+    return _pid_alive_posix(pid)
+
+
+def _pid_alive_posix(pid: int) -> bool | None:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # プロセスは存在するがシグナル送出の権限がない → 生存
+        return True
+    except OSError:
+        return None
+    return True
+
+
+def _pid_alive_windows(pid: int) -> bool | None:
+    """Windows: ctypes の OpenProcess / GetExitCodeProcess で生存確認。"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:  # pragma: no cover - 通常は到達しない
+        return None
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    OpenProcess = kernel32.OpenProcess
+    OpenProcess.restype = wintypes.HANDLE
+    OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    GetExitCodeProcess = kernel32.GetExitCodeProcess
+    GetExitCodeProcess.restype = wintypes.BOOL
+    GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    CloseHandle = kernel32.CloseHandle
+    CloseHandle.restype = wintypes.BOOL
+    CloseHandle.argtypes = [wintypes.HANDLE]
+
+    handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        # 取得不可: プロセス不在か、権限不足か区別できない。
+        # ERROR_INVALID_PARAMETER(87) は PID 不在を意味する。
+        if ctypes.get_last_error() == 87:
+            return False
+        return None
+    code = wintypes.DWORD()
+    try:
+        if not GetExitCodeProcess(handle, ctypes.byref(code)):
+            return None
+        return code.value == STILL_ACTIVE
+    finally:
+        CloseHandle(handle)
+
+
+def _owner_is_confirmed_dead(owner: dict | None) -> bool:
+    """所有者が死んでいることを確認できた場合のみ True を返す。
+
+    - 別ホスト（host が記録されていて自ホストと違う）→ False（判定不能扱い）
+    - host 未記録（旧形式）→ 自ホストのプロセスとみなして生存確認する
+    - 生存 → False / 死亡 → True / 判定不能 → False
+    """
+    if not owner:
+        return False
+    host = owner.get("host")
+    if host and host != _HOSTNAME:
+        return False
+    pid = owner.get("pid")
+    alive = _pid_alive(pid) if isinstance(pid, int) else None
+    return alive is False
+
+
+def _write_lock_owner(path: Path, stage: str) -> None:
+    """所有者情報を書く（原子的に置換）。"""
+    payload = json.dumps({
+        "pid": os.getpid(),
+        "host": _HOSTNAME,
+        "acquired_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "stage": stage,
+    }, ensure_ascii=False)
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    try:
+        tmp.write_text(payload + "\n", encoding="utf-8")
+        os.replace(str(tmp), str(path))
+    except OSError:
+        # 置換に失敗しても直接書く
+        try:
+            path.write_text(payload + "\n", encoding="utf-8")
+        except OSError:
+            pass
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
+def acquire_lock(work, stage: str = "") -> tuple[bool, str | None]:
+    """共有ロックを取得する。
+
+    戻り値: (取得できたか, 失敗理由)。成功時は (True, None)。
+    排他失敗（所有者生存・判定不能を含む）時は (False, 理由文字列) を返す。
+    呼び出し側は理由を stderr に出し exit 3 とする。
+    """
+    path = lock_path(work)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 1) 新規作成（排他）
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        _write_lock_owner(path, stage)
+        return True, None
+    except FileExistsError:
+        pass
+    except OSError as e:
+        return False, f"ロックファイルを開けません: {e}"
+
+    # 2) 既存ロックの stale 判定
+    try:
+        age = time.time() - path.stat().st_mtime
+    except OSError:
+        # stat できない（直後に消えた等）→ 再取得を試みる
+        try:
+            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            _write_lock_owner(path, stage)
+            return True, None
+        except OSError:
+            return False, "ロックの状態を確認できません"
+
+    if age <= LOCK_STALE_SECONDS:
+        owner = _read_lock_owner(path)
+        pid = (owner or {}).get("pid")
+        return False, f"他の書き手がロック中です（PID {pid}）"
+
+    # stale: 所有者の死亡を確認できた場合のみ上書き
+    owner = _read_lock_owner(path)
+    if not _owner_is_confirmed_dead(owner):
+        pid = (owner or {}).get("pid")
+        host = (owner or {}).get("host") or ""
+        if pid and host and host != _HOSTNAME:
+            return False, f"stale ですが所有者 PID {pid} は別ホスト {host} のため生存確認できません"
+        if pid:
+            return False, f"stale ですが所有者 PID {pid} は生存中"
+        return False, "stale ですが所有者の生死を判定できません"
+
+    # 死亡確認済み → 上書きして取得
+    try:
+        _write_lock_owner(path, stage)
+    except OSError as e:
+        return False, f"stale ロックの上書きに失敗: {e}"
+    return True, None
+
+
+def release_lock(work) -> None:
+    """自分が所有するロックのみ解放する。他人のロックは消さない。"""
+    path = lock_path(work)
+    try:
+        if not path.exists():
+            return
+        owner = _read_lock_owner(path)
+        if not owner or owner.get("pid") != os.getpid():
+            return
+        path.unlink()
+    except OSError:
+        pass
