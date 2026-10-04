@@ -19,15 +19,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _lib import (  # noqa: E402
+    VOICE_STATUS_DEFAULT,
     characters_toml_path,
     load_toml,
     save_toml,
     utf8,
+    voice_status_of,
 )
 
 CHAR_FIELDS = (
     "name_src",
     "name_ja",
+    "aliases",
     "ruby",
     "role",
     "first_person",
@@ -35,6 +38,8 @@ CHAR_FIELDS = (
     "speech_style",
     "vocab",
     "catchphrase",
+    "voice_status",
+    "voice_note",
     "appearance",
     "relationships",
     "address",
@@ -76,7 +81,11 @@ def _fold_arcs(item: dict) -> dict:
 
 
 def _merge_items(prev_items: list, cur_items: list, key: str, fields: tuple, note: str) -> tuple[list, int, int]:
-    """前作の項目を現作へ足す。戻り値: (統合後の列, 追加数, 空欄補完数)。"""
+    """前作の項目を現作へ足す。戻り値: (統合後の列, 追加数, 空欄補完数)。
+
+    voice_status は unconfirmed（＝未確定）を空欄の明示として扱い、前作の
+    確定状態だけが埋める。aliases / voice_note は既存の他欄と同じ扱い（P0-4）。
+    """
     order: list = []
     by_key: dict = {}
     for it in cur_items:
@@ -94,11 +103,23 @@ def _merge_items(prev_items: list, cur_items: list, key: str, fields: tuple, not
             for f in fields:
                 if f == key:
                     continue
+                if f == "voice_status":
+                    # unconfirmed は「未確定」＝空欄の明示。前作の確定状態で埋める。
+                    if (voice_status_of(cur) == VOICE_STATUS_DEFAULT
+                            and voice_status_of(pi) != VOICE_STATUS_DEFAULT):
+                        cur[f] = pi[f]
+                        filled += 1
+                    continue
                 if not cur.get(f) and pi.get(f):
                     cur[f] = pi[f]
                     filled += 1
             continue
         item = {f: pi.get(f, "") for f in fields}
+        if not isinstance(item.get("aliases"), list):
+            item["aliases"] = []
+        if not str(item.get("voice_status") or "").strip():
+            # 空文字列の印をやめ、既定を明示する（P0-4）
+            item["voice_status"] = VOICE_STATUS_DEFAULT
         item["arcs"] = [{"at_block": "carry", "note": note}]
         order.append(k)
         by_key[k] = item

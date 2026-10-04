@@ -3,11 +3,15 @@
 # セリフがある人物は口調を tone に混ぜない。欄を分けて書く。
 # speech_style には語尾の実例を2〜4個。形容詞（丁寧・元気）だけで済ませない。
 # address は相手別の呼び方。arcs は変化した欄だけ書く。
+# aliases は別名・愛称・原文の異表記。本体の人物と統合し、別人として二重登録しない。
+# voice_status は声の状態: confirmed / unconfirmed / insufficient_evidence / no_speech_yet。
+# 声の記述が使えるのは confirmed のとき。根拠の段落・理由は voice_note に1〜2文で書く。
 # proposed = 訳語の変更候補。ユーザー承認後に name_ja へ反映し rename_terms.py で伝播。
 
 [[characters]]
 name_src = "(原語表記 例: 张三-李四)"
 name_ja = "(訳語 例: チョウサン・リシ)"
+aliases = ["(別名・愛称・原文の異表記 例: 三儿)"]
 ruby = "(読み 例: ちょうさん・りし)"
 role = "(役割 例: ヒロイン/最強剣士)"
 first_person = "(一人称 例: 私(わたくし))"
@@ -15,6 +19,8 @@ second_person = "(二人称の既定 例: あなた)"
 speech_style = "(口調。敬語/タメ口 + 語尾の実例 例: 丁寧な令嬢口調。語尾は「〜ですわ」「〜ますわね」「〜ですわよ」)"
 vocab = "(語彙の特徴 例: 漢語は使うが俗語は使わない。擬音は少ない)"
 catchphrase = "(口癖 例: 〜ですわね。なければ空)"
+voice_status = "unconfirmed"
+voice_note = "(根拠の段落・理由 例: ch001/b1 で初発話を確認)"
 appearance = "(外見。1文)"
 relationships = "(関係性の要約。1文)"
 address = [

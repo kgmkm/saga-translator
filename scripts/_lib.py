@@ -387,6 +387,11 @@ def _load_analysis_file(work: Path, names: list[str], empty: dict) -> dict:
 
 
 def load_characters(work: Path) -> dict:
+    """登場人物表を読む。
+
+    `aliases` / `voice_status` / `voice_note` は任意欄。無い既存データも
+    そのまま読める（欠落は unconfirmed 扱い。P0-4）。
+    """
     return _load_analysis_file(work, [
         "characters-[ネタバレあり].toml",
         "characters.toml",
@@ -416,6 +421,53 @@ def characters_toml_path(work: Path) -> Path:
         if p.exists():
             return p
     return adir / "characters-[ネタバレあり].toml"
+
+
+def save_characters(work: Path, data: dict) -> None:
+    """登場人物表を保存する。既存ファイルの名前（characters-[ネタバレあり].toml / characters.toml）を維持する。"""
+    save_toml(characters_toml_path(work), data)
+
+
+# ── 人物表の追加欄（aliases / voice_status。P0-4） ─────────────────────────
+# aliases は別名・愛称・原文の異表記（任意の文字列リスト。無ければ空扱い）。
+# voice_status は声の状態。欠落は既定 unconfirmed として扱い、既存データ
+# （両欄なし）を壊さない。声の記述が使えるのは confirmed のとき。
+
+VOICE_STATUSES = ("confirmed", "unconfirmed", "insufficient_evidence", "no_speech_yet")
+VOICE_STATUS_DEFAULT = "unconfirmed"
+
+# 声の記述を構成する欄（1つでも非空なら「記述あり」）。
+VOICE_DESCRIPTION_KEYS = ("speech_style", "first_person", "second_person",
+                          "vocab", "catchphrase")
+
+
+def character_aliases(entry: dict) -> list[str]:
+    """`aliases` 欄（別名・愛称・原文の異表記）を返す。無ければ空リスト。"""
+    v = entry.get("aliases")
+    if not isinstance(v, list):
+        return []
+    return [x.strip() for x in v if isinstance(x, str) and x.strip()]
+
+
+def voice_status_of(entry: dict) -> str:
+    """`voice_status` を返す。欠落・不正値は既定 `unconfirmed` 扱い（既存データを壊さない）。"""
+    v = entry.get("voice_status")
+    return v if v in VOICE_STATUSES else VOICE_STATUS_DEFAULT
+
+
+def voice_description_present(entry: dict) -> bool:
+    """声の記述（口調・一人称・二人称・語彙・口癖・呼び方）が1つでもあるか。
+
+    voice_status を confirmed へ遷移してよいかの判定に使う（P0-4）。
+    """
+    if any(str(entry.get(k) or "").strip() for k in VOICE_DESCRIPTION_KEYS):
+        return True
+    addr = entry.get("address")
+    if isinstance(addr, list):
+        for a in addr:
+            if isinstance(a, dict) and any(str(v or "").strip() for v in a.values()):
+                return True
+    return False
 
 
 def _under_work(work: Path, path: Path) -> Path:

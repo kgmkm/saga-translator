@@ -15,10 +15,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _lib import (  # noqa: E402
-    acquire_lock, atomic_write_text, block_meta, block_paras, block_src_hash, direction,
-    dump_toml, load_chapters_meta, load_characters, load_paras, load_plot,
+    VOICE_STATUSES, acquire_lock, atomic_write_text, block_meta, block_paras, block_src_hash,
+    direction, dump_toml, load_chapters_meta, load_characters, load_paras, load_plot,
     load_structured, load_terms, load_toml, read_skill_version, record_timeline,
     release_lock, save_chapters_meta, save_toml, sha12, target_suffix, timed_stage, utf8,
+    voice_description_present,
 )
 
 PLOT_RE = re.compile(r'^block = "([^"]+)"', re.M)
@@ -228,8 +229,45 @@ def _find_entry_by_key(entries: list[dict], key: str, value: str) -> int | None:
     return None
 
 
+def _merge_aliases(existing, incoming) -> list[str]:
+    """aliases の追記マージ（P0-4）。既存の順を保ち、重複（既存・差分内）は足さない。"""
+    out: list[str] = list(existing) if isinstance(existing, list) else []
+    seen = {v.strip() for v in out if isinstance(v, str) and v.strip()}
+    values = incoming if isinstance(incoming, list) else [incoming]
+    for v in values:
+        if not isinstance(v, str) or not v.strip():
+            continue
+        if v.strip() in seen:
+            continue
+        seen.add(v.strip())
+        out.append(v.strip())
+    return out
+
+
+def _check_voice_transition(entry: dict, provided: dict, match_value: str) -> None:
+    """voice_status の遷移検証（P0-4）。
+
+    confirmed へ遷移するには声の記述（口調・人称・呼び方・語彙・口癖）が必要。
+    無ければ ValueError で拒否する（呼び出し側は何も書き込まない）。
+    """
+    status = provided.get("voice_status")
+    if status is not None and status not in VOICE_STATUSES:
+        raise ValueError(
+            f"{match_value}: voice_status は "
+            + " / ".join(VOICE_STATUSES) + " のいずれかであるべきです")
+    if status == "confirmed" and not voice_description_present(entry):
+        raise ValueError(
+            f"{match_value}: voice_status を confirmed にするには声の記述"
+            "（speech_style / first_person / second_person / address / vocab / catchphrase）"
+            "が必要です")
+
+
 def _apply_chars_delta(chars: list[dict], delta_list: list[dict]) -> list[str]:
-    """キャラ差分を適用。proposed が発生した変更を説明する文字列リストを返す。"""
+    """キャラ差分を適用。proposed が発生した変更を説明する文字列リストを返す。
+
+    aliases は既存への追記マージ（重複排除）。voice_status = confirmed への
+    遷移は声の記述が必要で、無ければ ValueError（P0-4）。
+    """
     proposed_log: list[str] = []
     SPECIAL = {"match_key", "match_value", "updates", "new_fields",
                "characters_delta", "terms_delta", "plot_delta", "block"}
@@ -248,7 +286,15 @@ def _apply_chars_delta(chars: list[dict], delta_list: list[dict]) -> list[str]:
             for k, v in delta.items():
                 if k not in SPECIAL:
                     updates[k] = v
+            # 声の遷移検証は適用前に行う（拒否時にエントリを変更しない）
+            prospective = dict(entry)
+            prospective.update({k: v for k, v in updates.items() if k != "aliases"})
+            _check_voice_transition(prospective, updates, match_value)
             for k, v in updates.items():
+                if k == "aliases":
+                    # 追記マージ（既存 aliases を置き換えず、重複を足さない）
+                    entry["aliases"] = _merge_aliases(entry.get("aliases"), v)
+                    continue
                 existing = entry.get(k)
                 if existing is not None and str(existing).strip() and k in protect_keys:
                     proposed = entry.get("proposed") or ""
@@ -274,6 +320,9 @@ def _apply_chars_delta(chars: list[dict], delta_list: list[dict]) -> list[str]:
             for k, v in delta.items():
                 if k not in SPECIAL:
                     base[k] = v
+            if "aliases" in base:
+                base["aliases"] = _merge_aliases([], base["aliases"])
+            _check_voice_transition(base, base, match_value)
             chars.append(base)
     return proposed_log
 
@@ -701,6 +750,22 @@ def validate_analysis_delta(meta: dict, delta: dict) -> tuple[bool, str | None, 
         for key in ("match_key", "match_value"):
             if not _str_field(c, key):
                 return False, f"characters_delta[{i}] に必須キー `{key}`（文字列）がありません", False
+        # 追加欄の型検証（aliases / voice_status / voice_note。P0-4）
+        for key in ("voice_status", "voice_note", "aliases"):
+            for loc, holder in (("", c), ("updates", c.get("updates")),
+                                ("new_fields", c.get("new_fields"))):
+                if not isinstance(holder, dict) or key not in holder:
+                    continue
+                where = f"characters_delta[{i}]" + (f".{loc}" if loc else "") + f".{key}"
+                v = holder[key]
+                if key == "voice_status" and (not isinstance(v, str) or v not in VOICE_STATUSES):
+                    return False, (f"{where} は "
+                                   + " / ".join(VOICE_STATUSES) + " のいずれかであるべきです"), False
+                if key == "voice_note" and not isinstance(v, str):
+                    return False, f"{where} は文字列であるべきです", False
+                if key == "aliases" and (not isinstance(v, list)
+                                         or not all(isinstance(x, str) for x in v)):
+                    return False, f"{where} は文字列の配列であるべきです", False
     for i, t in enumerate(delta.get("terms_delta", [])):
         if not isinstance(t, dict):
             return False, f"terms_delta[{i}] はテーブル（配列ofテーブル）であるべきです", False
@@ -772,6 +837,8 @@ def _cmd_analyze_commit_impl(work: Path, delta_path: Path,
         if has_changes or check_active:
             payloads, logs, errors = _build_analysis_payloads(work, delta)
             if payloads is None:
+                for e in errors:
+                    print(f"[analyze-commit] エラー: {e}", file=sys.stderr)
                 print("[analyze-commit] エラー: マージ検証失敗、何も書きませんでした", file=sys.stderr)
                 return 1
 

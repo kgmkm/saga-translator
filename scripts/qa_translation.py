@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from _lib import (  # noqa: E402
     acquire_lock,
     atomic_write_text,
+    character_aliases,
     direction,
     find_non_jis_han,
     load_chapters_meta,
@@ -94,6 +95,9 @@ def run_qa(work: Path, cid: str, bid: str, draft: Path, strict: bool = True) -> 
         # 訳文に残るのは部分名だけのことが多い(例: 张三-李四 → 张三)
         parts = [p for p in re.split(r"[-·・‐—_ ]+", src_name) if len(p) >= 2]
         candidates = [src_name] + parts if len(src_name) >= 2 else parts
+        # aliases（別名・愛称・原文の異表記）の各形も照合対象にする（P0-4）。
+        # 別名が訳文に原語のまま残るのを検出する。
+        candidates += [a for a in character_aliases(c) if a not in candidates]
         for name in candidates:
             if name in ja:
                 continue  # 訳語にそのまま含まれる漢字(例: 灰狼→暗影団の頭目・灰狼)は残留扱いしない

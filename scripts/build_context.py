@@ -7,9 +7,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _lib import (  # noqa: E402
-    characters_toml_path, direction, load_chapters_meta, load_characters, load_config, load_json,
-    load_paras, load_plot, load_structured, load_terms, load_titles, load_toml,
-    save_chapters_meta, save_json, target_suffix, target_title, utf8,
+    character_aliases, characters_toml_path, direction, load_chapters_meta, load_characters,
+    load_config, load_json, load_paras, load_plot, load_structured, load_terms, load_titles,
+    load_toml, save_chapters_meta, save_json, target_suffix, target_title, utf8, voice_status_of,
 )
 
 
@@ -24,8 +24,21 @@ def load_analysis(work: Path) -> tuple[dict, dict, dict]:
     return load_characters(work), load_terms(work), load_plot(work)
 
 
+# voice_status の表示名（人物表に必ず出す。P0-4）
+VOICE_STATUS_LABELS = {
+    "confirmed": "確定",
+    "unconfirmed": "未確認",
+    "insufficient_evidence": "根拠不足",
+    "no_speech_yet": "現時点で発話なし",
+}
+
+
 def fmt_characters(chars: dict) -> str:
-    """翻訳コンテキスト用。声の欄を混ぜずに出す。旧 tone は speech_style が空のときだけ。"""
+    """翻訳コンテキスト用。声の欄を混ぜずに出す。旧 tone は speech_style が空のときだけ。
+
+    aliases（別名・愛称）は空なら省略。声の状態（voice_status）は必ず出し、
+    根拠（voice_note）があれば添える（P0-4）。
+    """
     blocks: list[str] = []
     for c in chars.get("characters", []):
         name = c.get("name_ja") or c.get("name_src") or "(無名)"
@@ -36,7 +49,16 @@ def fmt_characters(chars: dict) -> str:
             v = str(c.get(key) or "").strip()
             if v:
                 lines.append(f"- {label}: {v}")
+        aliases = character_aliases(c)
+        if aliases:
+            lines.append("- 別名: " + " / ".join(aliases))
         add("役割", "role")
+        status = voice_status_of(c)
+        voice_line = f"- 声: {VOICE_STATUS_LABELS.get(status, VOICE_STATUS_LABELS['unconfirmed'])}"
+        note = str(c.get("voice_note") or "").strip()
+        if note:
+            voice_line += f"（根拠: {note}）"
+        lines.append(voice_line)
         add("一人称", "first_person")
         add("二人称", "second_person")
         addr = c.get("address") or []
