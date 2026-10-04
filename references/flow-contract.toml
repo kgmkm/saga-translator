@@ -1,0 +1,125 @@
+# flow-contract.toml — 通常フローの工程契約（正本）
+#
+# 旧版 SKILL.md から引き継ぐべき工程の一覧。SKILL.md を短くするときは、
+# この一覧から外す判断を明示的に記録する（黙って消さない）。
+# 根拠: docs/v1beta_integration_review_final(2).md §3 P1-1 / docs/refactor-plan-2.md
+#
+# フィールド:
+#   id       : 工程ID（安定キー。テスト・コメントから参照する）
+#   script   : 実行するスクリプト（リポジトリルート相対の単一パス）
+#   scripts  : 実行するスクリプトが複数のときの配列（script の代わり）
+#   skill_md : SKILL.md の記載位置の目印（人間向け。機械照合は status で行う）
+#   marker   : SKILL.md 本文に出現すべき/出現してはならない識別子
+#              （script を持たない手作業工程のときのみ）
+#   requires : 前提条件（例: "analysis_committed"）。コード側のゲートで担保する
+#   ensures  : 終了条件
+#   status   : documented（SKILL.md に記載あり）| missing（記載が無く復活対象）
+#   stage    : status="missing" の復活予定段階（refactor-plan-2.md の段階番号）
+#   note     : 任意メモ
+
+[[flow]]
+id = "ingest"
+script = "scripts/ingest.py"
+skill_md = "§1 取り込み"
+requires = []
+ensures = ["<作品>/_saga/<作品ID>/ 生成", "manifest 生成（lang / dst / 画像記録）"]
+status = "documented"
+note = "入力 TXT/MD/EPUB。連作候補の提示は P0-2（#8b 系）で追加予定。"
+
+[[flow]]
+id = "normalize_images"
+script = "scripts/normalize_images.py"
+skill_md = "§1 取り込みの直後"
+requires = ["ingest"]
+ensures = ["画像ファイル名の正規化", "本文の画像参照の更新（改名と参照更新を一体で）"]
+status = "missing"
+stage = 6
+note = "レビュー #1。多章・衝突・中断復旧のテスト後に通常フローへ復活。"
+
+[[flow]]
+id = "split_chapters"
+script = "scripts/split_chapters.py"
+skill_md = "§2 章分割・段落採番"
+requires = ["ingest"]
+ensures = ["chapters/chNNN.paras.toml 生成", "chapters_meta.toml 生成"]
+status = "documented"
+
+[[flow]]
+id = "lock_prep"
+script = "scripts/lock_prep.py"
+skill_md = "§2.5 初期訳語ロック"
+requires = ["split_chapters"]
+ensures = ["_work/lock_prep.md 生成", "主要人物・用語の初期訳語の確定"]
+status = "documented"
+
+[[flow]]
+id = "carry_analysis"
+script = "scripts/carry_analysis.py"
+skill_md = "§3 分析（ローリング）"
+requires = ["lock_prep"]
+ensures = ["前作の分析（人物・用語）の引き継ぎ"]
+status = "documented"
+note = "条件付き: 前作があるときのみ。連作検出（P0-2）で自動提示予定。"
+
+[[flow]]
+id = "analysis"
+script = "scripts/saga.py"
+skill_md = "§3 分析（ローリング）"
+requires = ["lock_prep"]
+ensures = ["対象ブロックの分析 committed 記録（analysis_committed_at）"]
+status = "documented"
+note = "prepare --mode analysis → analyze-commit の順。block 必須・存在・スキーマ検証は P0-2（#8b / stage3）。"
+
+[[flow]]
+id = "titles"
+script = ""
+skill_md = "§3 分析（ローリング）の直後"
+marker = "titles.toml"
+requires = ["analysis"]
+ensures = ["titles.toml 生成（章題の訳題の正本）"]
+status = "missing"
+stage = 6
+note = "レビュー #2。分析1周後に章題を確定して titles.toml を作る手順。assemble の題ゲートの前提。"
+
+[[flow]]
+id = "translate"
+script = "scripts/saga.py"
+skill_md = "§4 翻訳"
+requires = ["analysis_committed"]
+ensures = ["確定出力 output/<ch>/<id>.md", "翻訳 meta 記録"]
+status = "documented"
+note = "prepare → commit。分析未実施のブロックは止める（P0-2 / stage5）。翻訳 ← 分析 committed（レビュー #4）。"
+
+[[flow]]
+id = "status"
+script = "scripts/saga.py"
+skill_md = "§5 進捗確認"
+requires = []
+ensures = ["フラグと実体の突き合わせ表示"]
+status = "documented"
+
+[[flow]]
+id = "review"
+script = "scripts/saga.py"
+skill_md = "§6 検収"
+requires = ["translate"]
+ensures = ["_work/review_waveN.md 生成（機械指摘＋リスク＋抜き取り）"]
+status = "documented"
+
+[[flow]]
+id = "assemble"
+script = "scripts/assemble.py"
+skill_md = "§7 全ブロック確定後"
+requires = ["all_blocks_emitted", "titles"]
+ensures = ["章訳文・全文訳文・対訳（--parallel）の生成"]
+status = "documented"
+note = "assemble ← 全ブロック確定＋titles（レビュー #4）。titles 無しは止める（--allow-src-title で回避 / P0-2）。"
+
+[[flow]]
+id = "build_series_edition"
+script = "scripts/build_series_edition.py"
+skill_md = "§7 全ブロック確定後（合本）"
+requires = ["assemble"]
+ensures = ["シリーズ合本の生成"]
+status = "documented"
+note = "条件付き: シリーズ複数作品の合本を行うときのみ。references/saga-series.md 参照。"

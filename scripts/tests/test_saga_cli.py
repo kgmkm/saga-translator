@@ -268,16 +268,76 @@ class TestSagaAnalyzeCommit(unittest.TestCase):
                 return
 
     def test_ac_rollback_on_failure(self):
-        """検証失敗（ここでは不正なフィールド型など）→ 何も書かない。"""
-        # 不正な差分 — match_key のない delta → 既存エントリを特定できず新規追加になる
+        """検証失敗（delta の型不正）→ 何も書かない（3ファイル all-or-nothing）。"""
+        # 差分のスキーマ違反（characters_delta が配列でない）→ マージ検証失敗
+        chars_path = self.work / "analysis" / "characters-[ネタバレあり].toml"
+        terms_path = self.work / "analysis" / "terms.toml"
+        plot_path = self.work / "analysis" / "plot-[ネタバレあり].toml"
+        before = {
+            chars_path: chars_path.read_bytes(),
+            terms_path: terms_path.read_bytes(),
+            plot_path: plot_path.read_bytes(),
+        }
+        d = self.tmp / "delta.toml"
+        d.write_text('block = "ch001/b1"\ncharacters_delta = 1\n', encoding="utf-8")
+        code, out = self._run_ac(d)
+        self.assertEqual(code, 1)
+        # 3ファイルとも一切書かれていない
+        for path, data in before.items():
+            self.assertEqual(path.read_bytes(), data, f"{path.name} が書き換わった")
+        # block の確定フラグも立たない
+        meta = _lib.load_chapters_meta(self.work)
+        b = meta["chapters"][0]["blocks"][0]
+        self.assertNotIn("analysis_committed_at", b)
+
+    @unittest.expectedFailure
+    def test_ac_all_or_nothing_on_corrupt_existing_file(self):
+        """既存の分析ファイルが壊れていても部分書き込みしない（all-or-nothing）。
+
+        現状は load_terms が try/except の外で例外を投げ、終了コードを返さず
+        クラッシュする。stage4 実装（世代切替トランザクション / #18）で通常テストへ。
+        """
+        # stage4 実装で通常テストへ
+        # terms.toml を壊す（読み込み時に例外）
+        terms_path = self.work / "analysis" / "terms.toml"
+        terms_path.write_text("this is not = = valid [[[", encoding="utf-8")
+        chars_before = (self.work / "analysis" / "characters-[ネタバレあり].toml").read_bytes()
         d = self.tmp / "delta.toml"
         _make_delta_file(d, "ch001/b1",
-                         chars=[{"name_src": "张三", "name_ja": "チョウサン"}])
-        # 3ファイルの元の状態を保存
-        chars_before = _lib.load_characters(self.work)
-        from scripts.saga import cmd_analyze_commit
-        # 正常系動作になるので、別の"失敗"ケースを試す
-        pass
+                         plot=[{"block": "ch001/b1", "text": "要点。"}])
+        code, _ = self._run_ac(d)
+        self.assertEqual(code, 1)
+        # 壊れたファイルはそのまま（上書きしない）、他ファイルにも書かない
+        self.assertEqual(terms_path.read_text(encoding="utf-8"),
+                         "this is not = = valid [[[")
+        self.assertEqual(
+            (self.work / "analysis" / "characters-[ネタバレあり].toml").read_bytes(),
+            chars_before)
+        plot_path = self.work / "analysis" / "plot-[ネタバレあり].toml"
+        self.assertNotIn("要点。", plot_path.read_text(encoding="utf-8"))
+
+    def test_ac_reemit_is_record_only_idempotent(self):
+        """冪等リカバリ: 同一 delta の再実行は重複せず、確定フラグも保たれる。"""
+        d = self.tmp / "delta.toml"
+        _make_delta_file(d, "ch001/b1",
+                         plot=[{"block": "ch001/b1", "text": "要点。"}])
+        code1, _ = self._run_ac(d)
+        self.assertEqual(code1, 0)
+        meta1 = _lib.load_chapters_meta(self.work)
+        flag1 = meta1["chapters"][0]["blocks"][0].get("analysis_committed_at")
+        self.assertTrue(flag1)
+
+        # 再実行 → exit 0、plot は重複しない、既存の確定フラグを上書きしない
+        code2, _ = self._run_ac(d)
+        self.assertEqual(code2, 0)
+        plot = _lib.load_plot(self.work)
+        entries = [e for e in plot.get("entries", [])
+                   if str(e.get("block", "")).strip() == "ch001/b1"]
+        self.assertEqual(len(entries), 1, "同一 plot は重複しない")
+        meta2 = _lib.load_chapters_meta(self.work)
+        self.assertEqual(
+            meta2["chapters"][0]["blocks"][0].get("analysis_committed_at"), flag1,
+            "既存の確定フラグを書き換えない")
 
     def test_ac_multiple(self):
         """複数 delta のマージ。"""
