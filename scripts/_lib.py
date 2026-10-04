@@ -289,6 +289,45 @@ def save_chapters_meta(work: Path, obj) -> None:
     save_structured(Path(work) / "chapters_meta", obj)
 
 
+def block_paras(paras_data: dict, block: dict) -> list[dict]:
+    """paras.toml の内容から block 範囲（`[a, b]` 段落番号）の段落を取り出す。
+
+    段落番号は 1 始まり。範囲外は無視する（欠番はそのまま返す）。
+    """
+    rng = block.get("paras") or []
+    if not isinstance(rng, (list, tuple)) or len(rng) != 2:
+        return []
+    try:
+        lo, hi = int(rng[0]), int(rng[1])
+    except (TypeError, ValueError):
+        return []
+    return [
+        p for p in (paras_data.get("paras") or [])
+        if isinstance(p, dict) and isinstance(p.get("n"), int) and lo <= p["n"] <= hi
+    ]
+
+
+def block_src_hash(paras_data: dict, block: dict) -> str:
+    """ブロック原文（paragraphs）の sha256 先頭12桁。原文が変われば値も変わる。
+
+    改行は LF に正規化し、段落番号と本文を `n\\ttext` の形で連結してからハッシュ化する。
+    """
+    import hashlib
+    parts = [f"{p['n']}\t{p.get('text', '')}" for p in block_paras(paras_data, block)]
+    blob = "\n".join(parts).replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
+
+
+def block_meta(meta: dict, block_key: str) -> dict | None:
+    """chapters_meta の該当 block 辞書を返す（無ければ None）。"""
+    for ch in meta.get("chapters", []):
+        cid = ch.get("id")
+        for b in ch.get("blocks", []):
+            if f"{cid}/{b.get('id')}" == block_key:
+                return b
+    return None
+
+
 def load_paras(work: Path, cid: str) -> dict:
     p = Path(work) / "chapters" / f"{cid}.paras"
     data = load_structured(p)

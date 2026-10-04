@@ -15,10 +15,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _lib import (  # noqa: E402
-    atomic_write_text, direction, dump_toml, load_chapters_meta,
-    load_characters, load_plot, load_structured, load_terms, load_toml,
-    read_skill_version, record_timeline, save_chapters_meta, save_toml,
-    target_suffix, timed_stage, utf8,
+    atomic_write_text, block_meta, block_src_hash, direction, dump_toml,
+    load_chapters_meta, load_characters, load_paras, load_plot, load_structured,
+    load_terms, load_toml, read_skill_version, record_timeline,
+    save_chapters_meta, save_toml, target_suffix, timed_stage, utf8,
 )
 
 PLOT_RE = re.compile(r'^block = "([^"]+)"', re.M)
@@ -416,7 +416,7 @@ def _release_lock(work: Path) -> None:
         pass
 
 
-def _ensure_block_field(meta: dict, block_key: str, field: str, value: str) -> None:
+def _ensure_block_field(meta: dict, block_key: str, field: str, value) -> None:
     """meta の該当 block に field = value を設定（冪等: 既存ならスキップ）。"""
     for ch in meta.get("chapters", []):
         cid = ch["id"]
@@ -426,6 +426,93 @@ def _ensure_block_field(meta: dict, block_key: str, field: str, value: str) -> N
                 if field not in b or not b.get(field):
                     b[field] = value
                 return
+
+
+def _set_block_field(meta: dict, block_key: str, field: str, value) -> None:
+    """meta の該当 block に field = value を無条件で設定（上書き）。"""
+    for ch in meta.get("chapters", []):
+        cid = ch["id"]
+        for b in ch.get("blocks", []):
+            bid = b["id"]
+            if f"{cid}/{bid}" == block_key:
+                b[field] = value
+                return
+
+
+def _analysis_src_hash(work: Path, block_key: str, meta: dict) -> str:
+    """block 原文（paragraphs）の sha256 先頭12桁。原文が変われば値が変わる。
+
+    原文が読めない場合は空文字を返す（旧データ互換: hash 未記録を許容）。
+    """
+    b = block_meta(meta, block_key)
+    if b is None:
+        return ""
+    cid = block_key.split("/", 1)[0]
+    try:
+        paras_data = load_paras(work, cid)
+    except (FileNotFoundError, OSError, ValueError):
+        return ""
+    return block_src_hash(paras_data, b)
+
+
+def validate_analysis_delta(meta: dict, delta: dict) -> tuple[bool, str | None, bool]:
+    """analyze-commit の受入検証（純関数・I/O 無し）。
+
+    戻り値 ``(ok, reason, has_changes)``:
+    - ``ok``: 受理してマージ・記録してよいか
+    - ``reason``: 拒否理由（ok=True なら None）
+    - ``has_changes``: 非空の差分（characters/terms/plot いずれか）があるか
+
+    判定順:
+    1. ``block`` 必須
+    2. ``block`` が chapters_meta に存在（``chNNN/bN`` 形式）
+    3. スキーマ検証（型不一致は拒否。block 以外のキーは無視）
+    4. plot エントリの ``block`` は delta の block と一致
+    5. 差分が空なら ``no_changes = true`` の明示が必要
+    """
+    block = delta.get("block")
+    if not isinstance(block, str) or not block.strip():
+        return False, "delta に必須キー `block` がありません（ブロック単位で分析すること）", False
+    block = block.strip()
+    if block_meta(meta, block) is None:
+        return False, f"`block = \"{block}\"` は chapters_meta に存在しません（未知のブロック）", False
+
+    def _str_field(entry: dict, key: str) -> bool:
+        return isinstance(entry.get(key), str) and entry[key].strip() != ""
+
+    for key in ("characters_delta", "terms_delta", "plot_delta"):
+        if not isinstance(delta.get(key, []), list):
+            return False, f"`{key}` は配列（[[{key}]]）であるべきです", False
+
+    for i, c in enumerate(delta.get("characters_delta", [])):
+        if not isinstance(c, dict):
+            return False, f"characters_delta[{i}] はテーブル（配列ofテーブル）であるべきです", False
+        for key in ("match_key", "match_value"):
+            if not _str_field(c, key):
+                return False, f"characters_delta[{i}] に必須キー `{key}`（文字列）がありません", False
+    for i, t in enumerate(delta.get("terms_delta", [])):
+        if not isinstance(t, dict):
+            return False, f"terms_delta[{i}] はテーブル（配列ofテーブル）であるべきです", False
+        for key in ("match_key", "match_value"):
+            if not _str_field(t, key):
+                return False, f"terms_delta[{i}] に必須キー `{key}`（文字列）がありません", False
+    for i, p in enumerate(delta.get("plot_delta", [])):
+        if not isinstance(p, dict):
+            return False, f"plot_delta[{i}] はテーブル（配列ofテーブル）であるべきです", False
+        if not _str_field(p, "text"):
+            return False, f"plot_delta[{i}] に必須キー `text`（文字列）がありません", False
+        pb = p.get("block")
+        if not isinstance(pb, str) or pb.strip() != block:
+            return False, (f"plot_delta[{i}] の `block` が delta の block と一致しません"
+                           f"（対象外ブロックの plot は拒否: {pb!r} != {block!r}）"), False
+
+    has_changes = any(len(delta.get(k, [])) > 0
+                      for k in ("characters_delta", "terms_delta", "plot_delta"))
+    if not has_changes and delta.get("no_changes") is not True:
+        return False, ("差分が空です。分析の結果として変更が無い場合は `no_changes = true` を"
+                       "明示してください（黙っての空コミットは拒否）"), False
+
+    return True, None, has_changes
 
 
 def cmd_analyze_commit(work: Path, delta_path: Path) -> int:
@@ -450,22 +537,49 @@ def _cmd_analyze_commit_impl(work: Path, delta_path: Path) -> int:
         block = delta.get("block", "").strip()
 
         meta = load_chapters_meta(work)
-        success, logs = _merge_delta(work, delta)
 
-        if not success:
-            print("[analyze-commit] エラー: マージ検証失敗、何も書きませんでした", file=sys.stderr)
+        # 受入検証（_merge_delta の前に実施。拒否時は一切書かない）
+        ok, reason, has_changes = validate_analysis_delta(meta, delta)
+        if not ok:
+            print(f"[analyze-commit] エラー: 拒否しました: {reason}", file=sys.stderr)
             return 1
 
-        # 成功: block の analysis_committed_at を立てる
-        if block:
-            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            _ensure_block_field(meta, block, "analysis_committed_at", now)
-            save_chapters_meta(work, meta)
+        # 差分が空（no_changes 明示）のときは analysis ファイルに触れない
+        if has_changes:
+            success, logs = _merge_delta(work, delta)
+            if not success:
+                print("[analyze-commit] エラー: マージ検証失敗、何も書きませんでした", file=sys.stderr)
+                return 1
+        else:
+            logs = []
+
+        # 成功: block の「分析済み」を記録する
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        _ensure_block_field(meta, block, "analysis_committed_at", now)
+        _set_block_field(
+            meta, block, "analysis_src_hash",
+            _analysis_src_hash(work, block, meta))
+
+        if has_changes:
+            # 変更が反映された → 変更なしフラグは残さない
+            b = block_meta(meta, block)
+            if b is not None:
+                b.pop("analysis_no_changes", None)
+        else:
+            # 変更なしの明示的な記録
+            _set_block_field(meta, block, "analysis_no_changes", True)
+
+        save_chapters_meta(work, meta)
 
         if logs:
             for l in logs:
                 print(f"[analyze-commit] {l}")
-        print(f"[analyze-commit] 完了: {len(delta.get('characters_delta', [])) + len(delta.get('terms_delta', [])) + len(delta.get('plot_delta', []))} 件マージ（{len([l for l in logs if '→proposed' in l])} 件は proposed に退避）")
+        n = (len(delta.get("characters_delta", [])) + len(delta.get("terms_delta", []))
+             + len(delta.get("plot_delta", [])))
+        if has_changes:
+            print(f"[analyze-commit] 完了: {n} 件マージ（{len([l for l in logs if '→proposed' in l])} 件は proposed に退避）")
+        else:
+            print("[analyze-commit] 完了: 差分なし（analysis_no_changes = true を記録）")
         return 0
     finally:
         _release_lock(work)

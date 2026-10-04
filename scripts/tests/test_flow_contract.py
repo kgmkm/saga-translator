@@ -294,7 +294,6 @@ class TestFlowScenarioGates(_ScenarioBase):
         p = _saga("commit", str(self.fx.work), "--chapter", "ch001", "--block", "b1")
         self.assertNotEqual(p.returncode, 0, f"commit が止まらない:\n{p.stdout}")
 
-    @unittest.expectedFailure
     def test_s2_invalid_delta_rejected(self):
         """S2: 無効な分析 delta（block 欠落・未知 block・スキーマ違反）で止まる。
 
