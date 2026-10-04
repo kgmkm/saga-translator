@@ -157,7 +157,7 @@ class VocabFinding:
 class Vocab:
     """統合辞書。優先順位つきのエントリ列と原文字形索引を持つ。"""
 
-    def __init__(self, entries=None, versions=None):
+    def __init__(self, entries=None, versions=None, alias_forms=None):
         self._entries: list[VocabEntry] = [e for e in (entries or []) if e and e.src]
         self._versions: list[str] = [v for v in (versions or []) if v]
         # 原文字形索引: src / src_variants の両方で引ける。同じ字形を複数の
@@ -167,6 +167,13 @@ class Vocab:
             for form in e.forms:
                 if form and form not in self._index:
                     self._index[form] = e
+        # 優先順位で重複として落とした下位エントリの別字形も、勝者への
+        # エイリアスとして残す（src が上書きされても別字形の索引を失わない）。
+        for form, src in (alias_forms or ()):
+            if form and form not in self._index:
+                winner = next((x for x in self._entries if x.src == src), None)
+                if winner is not None:
+                    self._index[form] = winner
 
     @property
     def entries(self) -> list[VocabEntry]:
@@ -290,10 +297,17 @@ def load_vocab(work) -> Vocab:
     work = Path(work)
     entries: list[VocabEntry] = []
     seen: set[str] = set()
+    alias_forms: list[tuple[str, str]] = []
 
     def add_all(items) -> None:
         for e in items:
-            if e is None or not e.src or e.src in seen:
+            if e is None or not e.src:
+                continue
+            if e.src in seen:
+                # 重複は上位が勝つが、下位の別字形は勝者へのエイリアスに回す
+                for form in e.forms:
+                    if form and form != e.src:
+                        alias_forms.append((form, e.src))
                 continue
             seen.add(e.src)
             entries.append(e)
@@ -315,7 +329,7 @@ def load_vocab(work) -> Vocab:
         if isinstance(rows, list):
             add_all(_entry_from_vocab_row(r) for r in rows)
 
-    return Vocab(entries, versions=versions)
+    return Vocab(entries, versions=versions, alias_forms=alias_forms)
 
 
 # ── 検査（commit の残渣検査） ───────────────────────────────────────────

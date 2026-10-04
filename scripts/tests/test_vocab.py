@@ -504,5 +504,40 @@ class TestCommitVocab(_TempBase):
         self.assertEqual(last["reason"], "residue")
 
 
+class TestAliasAfterPriorityOverride(unittest.TestCase):
+    """優先順位で src が上書きされても、下位の別字形（src_variants）の索引を失わない。
+
+    作品 terms が拡張 vocab と同じ src を持つ実運用（terms に転記される）では、
+    上書き前のエントリが持つ別字形エイリアスが消えると原文字形索引が機能しなくなる。
+    """
+
+    def test_variant_alias_survives_override(self):
+        import os
+        import tempfile
+        from unittest import mock
+        from pathlib import Path
+        import vocab as vocab_mod
+
+        td = Path(tempfile.mkdtemp(prefix="vocab_alias_"))
+        work = td / "testwork"
+        (work / "analysis").mkdir(parents=True)
+        # 作品 terms（上位）が拡張の src を上書き
+        (work / "analysis" / "terms.toml").write_text(
+            'terms = [{ term_src = "胶液", term_ja = "作品規定訳" }]\n', encoding="utf-8")
+        ext = td / "ext" / "references"
+        ext.mkdir(parents=True)
+        (ext / "vocab.toml").write_text(
+            'version = "7"\n\n[[vocab]]\nsrc = "胶液"\nsrc_variants = ["膠液"]\n'
+            'dst = "拡張訳"\nkind = "fixed"\n', encoding="utf-8")
+        with mock.patch.dict(os.environ, {"SAGA_VOCAB_PATH": str(ext / "vocab.toml")}):
+            v = vocab_mod.load_vocab(work)
+        hit = v.lookup("胶液")
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit.dst, "作品規定訳")      # 上位が勝つ
+        alias = v.lookup("膠液")                      # 別字形の索引は残る
+        self.assertIsNotNone(alias, "別字形の索引が上書きで消えた")
+        self.assertEqual(alias.src, "胶液")
+
+
 if __name__ == "__main__":
     unittest.main()

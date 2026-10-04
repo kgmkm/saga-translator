@@ -190,3 +190,24 @@ paras = [13, 40]
 
 - known_terms（作品全体の文字列除去）は house_style.toml の `residue.known_terms` のまま。局所の誤検出裁定と混ぜない
 - align ack の共通土台への移行は後続（stage4/11）
+
+## 拡張語彙データの形式（stage7 / P0-3。spicy 側が中身を作る）
+
+拡張スキル（saga-translator-spicy 等）が語彙マップを機械可読 TOML で提供する（`vocab.toml`。置き場所は拡張スキルの `references/`。本体は探索先リストから読む）:
+
+```toml
+version = "1"          # 辞書の版。裁定記録（rulings）の dict_version に接続する
+
+[[vocab]]
+src = "胶液"            # 原語（原文字形＝簡体字のまま）
+src_variants = ["膠液"]  # 別字形・別表記（任意。両方で索引される）
+dst = "液状ラテックス"    # 既定訳
+kind = "fixed"          # fixed | candidates | ja_ok
+note = ""               # 任意の注記
+```
+
+- `fixed`: 機械で確定できる語。原文に出たら訳文は `dst` でなければならない。違反は commit 停止。
+- `candidates`: 文脈で変わる語。訳文に原語相当の語が残れば commit 停止（通すのは本文修正か裁定記録）。
+- `ja_ok`: 日本語としても正当な語（触手・改造など）。検査から除外。
+- **優先順位**: 作品 terms（analysis/terms.toml）＞ house_style.toml ＞ 拡張 vocab.toml。同じ `src` は上位が勝つ。
+- **原文字形索引**: `src` と `src_variants` の両方で引ける（spicy の見出しが日本語字形（膠液）でも原文（胶液）で当たる）。
