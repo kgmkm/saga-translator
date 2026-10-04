@@ -162,10 +162,21 @@ def shape_glyph(text: str) -> tuple[str, list[dict]]:
     """glyph 分類のみ適用し、(変換後テキスト, 適用履歴) を返す。
 
     適用履歴の各要素: {"item": str, "replacement": str, "count": int}
+
+    画像リンク ![alt](path) のパスは実ファイル名(=原語表記)と一致させる必要が
+    あるため、整形の対象から退避し、変換後に復元する。
     """
     s2t, t2jp = _load_opencc()
     out = text
     applied: list[dict] = []
+    SENT_OPEN, SENT_CLOSE = "", ""
+
+    # 0) 画像リンクを退避（パス内の簡体字を字形整形から守る）
+    img_pat = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+    imgs = img_pat.findall(out)
+    if imgs:
+        stash = imgs
+        out = img_pat.sub(lambda m: SENT_OPEN + str(stash.index(m.group(0))) + SENT_CLOSE, out)
 
     # 1) glyph 複合語
     for pat, rep in _get_glyph_compounds():
@@ -191,6 +202,11 @@ def shape_glyph(text: str) -> tuple[str, list[dict]]:
             n = out.count(ch)
             applied.append({"item": ch, "replacement": glyph_map[ch], "count": n})
             out = out.replace(ch, glyph_map[ch])
+
+    # 4) 画像リンクを復元
+    if imgs:
+        for i, im in enumerate(imgs):
+            out = out.replace(SENT_OPEN + str(i) + SENT_CLOSE, im)
 
     return out, applied
 

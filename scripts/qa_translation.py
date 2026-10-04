@@ -56,6 +56,11 @@ def run_qa(work: Path, cid: str, bid: str, draft: Path, strict: bool = True) -> 
     items, problems = parse_draft(text)
     nums = [n for n, _ in items]
 
+    # 画像リンク ![](images/...) は実ファイル名(=原語表記)を保持せねばならず、
+    # 訳文の用字チェック対象ではない。本文点検用にタグを除去したビューを作る。
+    _IMG_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+    qa_items = [(n, _IMG_RE.sub("", t)) for n, t in items]
+
     report = {"chapter": cid, "block": bid, "draft": str(draft), "checks": {}}
     ok = True
     src, dst = direction(work)
@@ -86,7 +91,7 @@ def run_qa(work: Path, cid: str, bid: str, draft: Path, strict: bool = True) -> 
         for name in candidates:
             if name in ja:
                 continue  # 訳語にそのまま含まれる漢字(例: 灰狼→暗影団の頭目・灰狼)は残留扱いしない
-            cnt = sum(1 for _, t in items if name in t)
+            cnt = sum(1 for _, t in qa_items if name in t)
             if cnt:
                 leftover.append({"name_src": name, "name_ja": ja, "count": cnt})
                 break
@@ -101,7 +106,7 @@ def run_qa(work: Path, cid: str, bid: str, draft: Path, strict: bool = True) -> 
             find_jp_quotes, find_kana, find_non_gbk_han, find_rb_kana,
             find_trad_markers, find_vfm,
         )
-        body_text = "\n".join(t for _, t in items)
+        body_text = "\n".join(t for _, t in qa_items)
         kana = find_kana(body_text)
         report["checks"]["kana_leftover"] = {"pass": not kana, "found": kana}
         if kana:
@@ -129,7 +134,7 @@ def run_qa(work: Path, cid: str, bid: str, draft: Path, strict: bool = True) -> 
         # 原文の誤字を原文ママで訳出すると、その簡体字が完成後まで残る。
         # このチェックでブロック確定時に落とす。
         non_jis = []
-        for ch, cnt in find_non_jis_han("\n".join(t for _, t in items)):
+        for ch, cnt in find_non_jis_han("\n".join(t for _, t in qa_items)):
             non_jis.append({"char": ch, "count": cnt})
         report["checks"]["non_jis_han"] = {"pass": not non_jis, "found": non_jis}
         if non_jis:

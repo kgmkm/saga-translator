@@ -45,6 +45,10 @@ class AlignFinding:
 
 # ── パース ────────────────────────────────────────────────────
 
+# 構造マーカーで始まる段落は対話ではない（ルビ・挿絵タグ・章見出し・改ページ）。
+# zh 原文の会話頭に "[" が含まれるため、制御タグを会話と誤検出するのを防ぐ。
+_NON_DIALOGUE_HEADS = ("[[rb:", "[pixivimage:", "[chapter:", "[newpage]", "[uploadedimage:")
+
 
 def parse_numbered(text: str) -> list[tuple[int, str]]:
     """[Pn] マーカー付きドラフトを (番号, 本文) の列にする。重複もそのまま返す。"""
@@ -200,11 +204,15 @@ def check_block(work, chapter, block, acks: list[dict] | None = None,
         return (block, para, dh) in ack_index
 
     # 会話頭不一致 (fatal)
+    # 構造マーカー([newpage]・[chapter:]・[[rb:…]] 等)で始まる段落は対話判定から除外。
+    # 原文側の会話頭に "[" が含まれるため、制御タグを会話と誤検出するのを防ぐ。
     for n in expected:
         if n not in draft_map:
             continue
         src_text = para_map.get(n, "")
         dst_text = draft_map[n]
+        if src_text.lstrip().startswith(_NON_DIALOGUE_HEADS):
+            continue
         if src_text.startswith(src_heads) and not dst_text.startswith(dst_heads):
             findings.append(AlignFinding(
                 "fatal", "dialogue_head", n,
