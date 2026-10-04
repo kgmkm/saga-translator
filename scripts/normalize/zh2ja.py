@@ -158,6 +158,19 @@ _LEGACY = _is_legacy()
 # 公開 API
 # ---------------------------------------------------------------------------
 
+def _pick_sentinels(text: str) -> tuple[str, str]:
+    """画像リンクの退避に使う開き・閉じの2文字を選ぶ（#25）。
+
+    どちらも PUA (U+E000–U+F8FF) から選び、対象テキストに含まれない
+    ことを実行時に確認する。本文に同文字があると、退避したリンクと
+    本文を取り違えるため。候補が無ければ推測で使わず例外で止める。
+    """
+    pool = [chr(c) for c in range(0xE000, 0xF8FF + 1) if chr(c) not in text]
+    if len(pool) < 2:
+        raise ValueError("画像退避の sentinel に使える PUA 文字が本文中に存在しません")
+    return pool[0], pool[1]
+
+
 def shape_glyph(text: str) -> tuple[str, list[dict]]:
     """glyph 分類のみ適用し、(変換後テキスト, 適用履歴) を返す。
 
@@ -169,14 +182,14 @@ def shape_glyph(text: str) -> tuple[str, list[dict]]:
     s2t, t2jp = _load_opencc()
     out = text
     applied: list[dict] = []
-    SENT_OPEN, SENT_CLOSE = "", ""
 
     # 0) 画像リンクを退避（パス内の簡体字を字形整形から守る）
     img_pat = re.compile(r"!\[[^\]]*\]\([^)]*\)")
     imgs = img_pat.findall(out)
     if imgs:
-        stash = imgs
-        out = img_pat.sub(lambda m: SENT_OPEN + str(stash.index(m.group(0))) + SENT_CLOSE, out)
+        # 開きと閉じに別の文字を使い、本文に含まれないことを確認する（#25）。
+        SENT_OPEN, SENT_CLOSE = _pick_sentinels(out)
+        out = img_pat.sub(lambda m: SENT_OPEN + str(imgs.index(m.group(0))) + SENT_CLOSE, out)
 
     # 1) glyph 複合語
     for pat, rep in _get_glyph_compounds():
