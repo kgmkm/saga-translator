@@ -2012,6 +2012,12 @@ def _load_toml_safe(path: Path) -> dict | None:
 # review サブコマンド
 # ---------------------------------------------------------------------------
 
+# review 出力の冒頭に固定で入れる限界の明示（文言固定・改変禁止）
+REVIEW_LIMITATION = (
+    "この抜き取りは補助です。意味・否定・話者・固有名・声・自然さは、"
+    "機械の PASS では保証されません。必ず目視で確認してください。"
+)
+
 
 def _list_committed_blocks(work: Path) -> list[tuple[str, str]]:
     """output/<ch>/<bid><suffix>.md が存在する確定ブロックを列挙。"""
@@ -2194,9 +2200,18 @@ def _find_risk_blocks(work: Path, blocks: list[tuple[str, str]]) -> list[dict]:
     return deduped
 
 
+def _review_seed(work_id: str, wave: int) -> str:
+    """抜き取りの固定 seed（work + wave の sha256 先頭16桁）。
+
+    Python の hash() はプロセスごとに変わる（PYTHONHASHSEED）ため使わない。
+    同じ work・同じ wave ならプロセスが違っても同じ箇所を選ぶ。
+    """
+    return hashlib.sha256(f"{work_id}:{wave}".encode("utf-8")).hexdigest()[:16]
+
+
 def _sample_paragraphs(work: Path, blocks: list[tuple[str, str]],
-                        ratio: float, seed: int) -> list[dict]:
-    """指定ブロックの段落から ratio の割合でランダム選択。"""
+                        ratio: float, seed: str) -> list[dict]:
+    """指定ブロックの段落から ratio の割合で決定的に選択する（seed は固定）。"""
     from _lib import load_paras
     rng = random.Random(seed)
     samples: list[dict] = []
@@ -2226,14 +2241,55 @@ def _sample_paragraphs(work: Path, blocks: list[tuple[str, str]],
     return samples
 
 
-def _read_dst_output(work: Path, cid: str, bid: str) -> str | None:
-    """確定済み訳文を読む。"""
-    _, dst = direction(work)
-    suf = target_suffix(dst)
-    out_p = work / "output" / cid / f"{bid}{suf}.md"
-    if out_p.is_file():
-        return out_p.read_text(encoding="utf-8")
-    return None
+def _canonical_translation_index(work: Path) -> dict[tuple[str, str, int], str]:
+    """実訳の索引: text_scope の正本を (章, ブロック, 段落番号) で引けるようにする。
+
+    正本は text_scope.block_texts（done → 確定ブロック出力の順）。段落対応の
+    データ（段落番号）から実訳を引くので、[Pnnn] の文字列探索に依存しない。
+    段落対応が壊れたブロックがあっても全体を落とさず、読める範囲だけを
+    索引する（読めない段落は呼び出し側で「不明」と出す）。
+    """
+    import text_scope as ts
+    try:
+        entries = ts.block_texts(work)
+    except ts.TextScopeError:
+        entries = _canonical_translation_entries_degraded(work)
+    return {(e.chapter, e.block, e.para): e.text for e in entries}
+
+
+def _canonical_translation_entries_degraded(work: Path) -> list:
+    """読める範囲の正本だけをブロック単位で集める（旧形式対応）。
+
+    text_scope.block_texts は一括で読むため、1 ブロックの段落数不一致などで
+    全体が読めなくなる。review は「現行の確定出力から読める範囲で動く」ため、
+    text_scope のブロック単位の読取関数を再利用し、壊れたブロックだけを飛ばす。
+    """
+    import text_scope as ts
+    try:
+        meta = load_chapters_meta(work)
+    except FileNotFoundError:
+        return []
+    suf = target_suffix(direction(work)[1])
+    entries: list = []
+    for ch in meta.get("chapters", []):
+        cid = ch.get("id")
+        if not isinstance(cid, str):
+            continue
+        for blk in ch.get("blocks", []):
+            if not isinstance(blk, dict) or not isinstance(blk.get("id"), str):
+                continue
+            bid = blk["id"]
+            done_p = ts._done_path(work, cid, bid, suf)
+            if done_p.is_file():
+                entries.extend(ts._block_from_numbered(cid, bid, done_p, "done"))
+                continue
+            emit_p = ts._emitted_path(work, cid, bid, suf)
+            if emit_p.is_file():
+                try:
+                    entries.extend(ts._block_from_emitted(cid, bid, emit_p, blk))
+                except ts.TextScopeError:
+                    continue
+    return entries
 
 
 def cmd_review(work: Path, wave: int = 1, sample_ratio: float = 0.1,
@@ -2272,10 +2328,13 @@ def _cmd_review_impl(work: Path, wave: int = 1, sample_ratio: float = 0.1,
     # 2) リスク箇所
     risk_items = _find_risk_blocks(work, blocks)
 
-    # 3) 抜き取り（work.name + wave でシード）
-    seed_str = f"{work.name}_wave{wave}"
-    seed = abs(hash(seed_str))
+    # 3) 抜き取り（work + wave の sha256 由来の固定 seed。プロセス非依存）
+    seed = _review_seed(work.name, wave)
     sample_items = _sample_paragraphs(work, blocks, sample_ratio, seed)
+
+    # 実訳は text_scope の正本（done → 確定ブロック出力）から段落番号で引く。
+    # [Pnnn] の文字列探索はしない（通常の emit はマーカーを消すため）。
+    trans_index = _canonical_translation_index(work)
 
     # 出力
     src, dst = direction(work)
@@ -2283,14 +2342,17 @@ def _cmd_review_impl(work: Path, wave: int = 1, sample_ratio: float = 0.1,
     rev_dir.mkdir(parents=True, exist_ok=True)
     rev_path = rev_dir / f"review_wave{wave}.md"
 
-    # 検収リストを書く
+    # 検収リストを書く（冒頭に限界の明示。文言固定）
     rev_lines = [
+        REVIEW_LIMITATION,
+        "",
         f"# 検収リスト wave {wave}",
-        f"",
+        "",
         f"work: {work.name}",
         f"対象ブロック数: {len(blocks)}",
+        f"seed: {seed}",
         f"生成: {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
-        f"",
+        "",
     ]
 
     # 機械指摘
@@ -2311,9 +2373,12 @@ def _cmd_review_impl(work: Path, wave: int = 1, sample_ratio: float = 0.1,
         rev_lines.append("（なし）")
     rev_lines.append("")
 
-    # 抜き取り — 原文と訳文を並べる
+    # 抜き取り — 原文と訳文（正本から段落番号で引く）を並べる
     rev_lines.append(f"## 3. 抜き取り（{len(sample_items)}段落）")
     if sample_items:
+        rev_lines.append(
+            "選定: " + ", ".join(f"{s['block']} P{s['para']}" for s in sample_items))
+        rev_lines.append("")
         for s in sample_items:
             blk = s["block"]
             pn = s["para"]
@@ -2321,28 +2386,21 @@ def _cmd_review_impl(work: Path, wave: int = 1, sample_ratio: float = 0.1,
             rev_lines.append("")
             rev_lines.append(f"原文: {s['text']}")
             cid, bid = blk.split("/")
-            dst_text = _read_dst_output(work, cid, bid)
-            if dst_text:
-                # 該当段落を探す
-                para_lines = dst_text.splitlines()
-                found = None
-                for line in para_lines:
-                    if line.startswith(f"[P{pn:03d}]") or line.startswith(f"[P{pn}]"):
-                        found = line
-                        break
-                if found:
-                    rev_lines.append(f"訳文: {found}")
-                else:
-                    rev_lines.append(f"訳文: （該当段落なし）")
+            dst_text = trans_index.get((cid, bid, pn))
+            if dst_text is None:
+                rev_lines.append("訳文: 不明")
             else:
-                rev_lines.append(f"訳文: （未出力）")
+                rev_lines.append(f"訳文: {dst_text}")
             rev_lines.append("")
     else:
         rev_lines.append("（なし）")
     rev_lines.append("")
 
     rev_lines.append("---")
-    rev_lines.append("機械指摘は commit 時の report.json から抽出。リスク箇所は characters.toml の arcs/address/ruby から。抜き取りは乱数シード（work名+wave）で決定的。")
+    rev_lines.append("機械指摘は commit 時の report.json から抽出。リスク箇所は characters.toml の arcs/address/ruby から。")
+    rev_lines.append(
+        f"抜き取りは固定 seed（work + wave の sha256 先頭16桁 = {seed}）で決定的。"
+        "実訳は text_scope の正本（done → 確定ブロック出力）から段落番号で引く。")
     rev_lines.append("")
 
     rev_path.write_text("\n".join(rev_lines), encoding="utf-8")
@@ -2352,6 +2410,8 @@ def _cmd_review_impl(work: Path, wave: int = 1, sample_ratio: float = 0.1,
         out = {
             "wave": wave,
             "total_blocks": len(blocks),
+            "seed": seed,
+            "limitation": REVIEW_LIMITATION,
             "machine_items": machine_items,
             "risk_items": risk_items,
             "sample_items": sample_items,
@@ -2367,10 +2427,12 @@ def _cmd_review_impl(work: Path, wave: int = 1, sample_ratio: float = 0.1,
             parts.append("...")
         return ", ".join(parts)
 
+    print(f"[review] {REVIEW_LIMITATION}")
     print(f"[review] wave {wave}: 対象 {len(blocks)} ブロック")
     print(f"[review] 機械指摘: {len(machine_items)}件 ({_fmt(machine_items)})")
     print(f"[review] リスク箇所: {len(risk_items)}件 ({_fmt(risk_items)})")
     print(f"[review] 抜き取り: {len(sample_items)}段落 ({_fmt(sample_items)})")
+    print(f"[review] seed: {seed}（work + wave の sha256 先頭16桁）")
     print(f"[review] 検収対象ファイル: {rev_path}")
     if assembled_at:
         print(f"[review] assemble 済み（assembled_at={assembled_at}）")
