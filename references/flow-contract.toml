@@ -32,7 +32,7 @@ script = "scripts/normalize_images.py"
 skill_md = "§1 取り込みの直後"
 requires = ["ingest"]
 ensures = ["画像ファイル名の正規化", "本文の画像参照の更新（改名と参照更新を一体で）"]
-status = "missing"
+status = "documented"
 stage = 6
 note = "レビュー #1。多章・衝突・中断復旧のテスト後に通常フローへ復活。"
 

@@ -53,6 +53,14 @@ python3 scripts/ingest.py "入力ファイル"   # --dst ja / --dst zh
 
 `<入力フォルダ>/_saga/<作品ID>/` 生成。TXT/MD/EPUB 対応。manifest にスキル版・コミットを記録する。
 
+### 1.5. 画像の正規化
+
+```
+python3 scripts/normalize_images.py <workdir> --apply
+```
+
+画像ファイル名を `<作品ID>-<画像ID>` に改名し、参照を一括更新する（改名と更新は一体）。
+
 ### 2. 章分割・段落採番
 
 ```

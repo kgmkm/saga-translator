@@ -13,10 +13,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _lib import (  # noqa: E402
-    all_blocks_emitted, atomic_write_text, chapter_title, direction, load_chapters_meta, load_structured,
-    load_titles, purge_source, save_chapters_meta, save_structured, target_suffix, target_title, utf8,
+    all_blocks_emitted, atomic_write_text, block_paras, chapter_title, direction, load_chapters_meta,
+    load_paras, load_structured, load_titles, purge_source, save_chapters_meta, save_structured,
+    target_suffix, target_title, utf8,
 )
-from ingest import missing_image_notice, relink_markdown_files, retarget_md_images  # noqa: E402
+from ingest import (  # noqa: E402
+    MD_IMAGE_SRC, missing_image_notice, relink_markdown_files, retarget_md_images,
+)
 
 AGE_REPORT = "age_policy_report-[ネタバレあり].md"
 
@@ -81,6 +84,58 @@ def _titles_gate_problems(work: Path, meta: dict, titles: dict, dst: str, out: P
     return []
 
 
+def _image_ref_names(text: str) -> set[str]:
+    """Markdown の画像参照（images/ 配下）からファイル名を集める。"""
+    names: set[str] = set()
+    for m in MD_IMAGE_SRC.finditer(text):
+        name = m.group(2).strip()
+        if name:
+            names.add(name)
+    return names
+
+
+def _image_gate_problems(work: Path, meta: dict, out: Path, suf: str) -> list[str]:
+    """画像参照ゲートの停止理由を返す（空リストなら通過）。S4 / P0-1。
+
+    確定出力（output/<ch>/<block><suf>.md）ごとに、
+      - 参照先ファイルが output/images/ に実在すること
+      - 画像参照が原文（chapters/<ch>.paras.toml の該当段落）と一致すること
+    を検査する。原文が読めない章（purge 後など）は実在検査のみ行う。
+    """
+    problems: list[str] = []
+    for c in meta["chapters"]:
+        cid = c["id"]
+        try:
+            src_paras = load_paras(work, cid)
+        except FileNotFoundError:
+            src_paras = None
+        for b in c.get("blocks") or []:
+            f = out / cid / f"{b['id']}{suf}.md"
+            if not f.exists():
+                continue
+            out_refs = _image_ref_names(f.read_text(encoding="utf-8"))
+            for name in sorted(out_refs):
+                if not (out / "images" / name).is_file():
+                    problems.append(
+                        f"{cid}/{b['id']}: 参照先の画像が output/images/ にありません: images/{name}")
+            if src_paras is None:
+                continue
+            src_refs: set[str] = set()
+            for p in block_paras(src_paras, b):
+                src_refs |= _image_ref_names(p.get("text") or "")
+            if out_refs != src_refs:
+                detail: list[str] = []
+                extra = sorted(out_refs - src_refs)
+                lost = sorted(src_refs - out_refs)
+                if extra:
+                    detail.append("訳文のみ: " + ", ".join(f"images/{x}" for x in extra))
+                if lost:
+                    detail.append("原文のみ: " + ", ".join(f"images/{x}" for x in lost))
+                problems.append(
+                    f"{cid}/{b['id']}: 訳文の画像参照が原文と一致しません（{' / '.join(detail)}）")
+    return problems
+
+
 def main() -> None:
     from _lib import timed_stage
     utf8()
@@ -118,6 +173,16 @@ def _stage_impl(args: argparse.Namespace) -> None:
     if allow_src_title:
         print("[assemble] --allow-src-title: 原題のまま出力する経路で実行します"
               "（未確定の章題は目次に「題未確定」を明示）")
+    # 画像参照ゲート: 確定出力の参照が原文と一致し、参照先が output/images/ に実在すること。
+    # 欠落・不一致は理由を出して停止する（回避フラグは作らない。S4 / P0-1）。
+    img_problems = _image_gate_problems(work, meta, out, suf)
+    if img_problems:
+        print("[assemble] 画像参照の検査で停止しました:")
+        for ip in img_problems:
+            print(f"[assemble]   - {ip}")
+        print("[assemble] 参照先の画像を output/images/ に置くか、"
+              "訳文の参照を原文に合わせてから再実行してください。")
+        sys.exit(1)
     make_parallel = args.parallel or (work / "analysis" / AGE_REPORT).exists()
     toc = [f"# {tr_title}", "", "# 目次", ""] if tr_title else ["# 目次", ""]
     full_tr: list[str] = []

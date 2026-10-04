@@ -183,10 +183,14 @@ class TestFlowContractIntegrity(unittest.TestCase):
         self.assertEqual(missing_lines, [], "\n".join(missing_lines))
 
     def test_missing_entries_have_expected_failure_scenario(self):
-        """missing の各工程に対応する expectedFailure シナリオがテスト内に存在する。"""
+        """missing の各工程に対応する expectedFailure シナリオがテスト内に存在する。
+
+        missing が空（全工程 documented ＝ 復活完了）のときは検査対象が無いため通過する。
+        """
         src = Path(__file__).read_text(encoding="utf-8")
         missing_ids = [f["id"] for f in self.flows if f["status"] == "missing"]
-        self.assertTrue(missing_ids, "missing 工程が無い（契約の想定と不一致）")
+        if not missing_ids:
+            return
         absent = []
         for eid in missing_ids:
             tag = f"{SCENARIO_TAG} {eid}"
@@ -356,11 +360,10 @@ class TestFlowScenarioGates(_ScenarioBase):
 class TestFlowScenarioIntegrity(_ScenarioBase):
     """データ整合・復旧・改訂のシナリオ（expectedFailure＋段階タグ）。"""
 
-    @unittest.expectedFailure
     def test_s4_missing_image_detected_before_assemble(self):
         """S4: 画像参照の欠落が assemble 前に検出されて止まる。
 
-        # scenario: S4 / stage6（P0-1）実装で通常テストへ
+        # scenario: S4 / stage6 で画像参照検査を実装済み（通常テスト）
         """
         self.fx.ingest()
         self.fx.split()
@@ -463,11 +466,10 @@ class TestFlowScenarioIntegrity(_ScenarioBase):
 class TestFlowScenarioMissingSteps(_ScenarioBase):
     """SKILL.md から消えた工程（missing）の復活シナリオ（expectedFailure＋段階タグ）。"""
 
-    @unittest.expectedFailure
     def test_normalize_images_step_in_flow(self):
         """S8: 取り込み後の画像正規化が通常フローで機能する（多章・参照更新一体）。
 
-        # scenario: normalize_images / stage6（P0-1）実装で通常テストへ
+        # scenario: normalize_images / stage6 で復活済み（通常テスト）
         """
         self.fx.ingest()
         self.fx.split()
