@@ -4,12 +4,60 @@
 """
 from __future__ import annotations
 
+import builtins
 import sys
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from normalize.zh2ja import shape_glyph, meaning_candidates, fix_text, MANUAL_COMPOUND, MANUAL_CHAR
+
+
+class TestOpenccIndependentFallback(unittest.TestCase):
+    """opencc が無くても手当て表だけで字形整形が成立する（P1-4）。
+
+    opencc 未導入環境を pip アンインストールせず、import をスタブして
+    プロセス内で再現する。実際の opencc 依存の変換（恶→悪 等）は
+    test_opencc_optional.py 側で skipUnless 明示する。
+    """
+
+    def _block_opencc(self):
+        real_import = builtins.__import__
+        saved = sys.modules.pop("opencc", None)
+
+        def blocked(name, *args, **kwargs):
+            if name == "opencc" or name.startswith("opencc."):
+                raise ImportError("opencc blocked for test (P1-4)")
+            return real_import(name, *args, **kwargs)
+
+        builtins.__import__ = blocked
+        self.addCleanup(self._restore_import, real_import, saved)
+
+    @staticmethod
+    def _restore_import(real_import, saved):
+        builtins.__import__ = real_import
+        if saved is not None:
+            sys.modules["opencc"] = saved
+
+    def test_glyph_char_without_opencc(self):
+        """opencc 無しでも glyph 単字（沉→沈）は手当て表で適用される。"""
+        self._block_opencc()
+        out, applied = shape_glyph("沉")
+        self.assertEqual(out, "沈")
+        self.assertTrue(any(a["item"] == "沉" for a in applied))
+
+    def test_glyph_compound_without_opencc(self):
+        """opencc 無しでも glyph 複合語（强行→強行）は適用される。"""
+        self._block_opencc()
+        out, applied = shape_glyph("强行")
+        self.assertEqual(out, "強行")
+        self.assertTrue(any(a["item"] == "强行" for a in applied))
+
+    def test_fix_text_without_opencc(self):
+        """opencc 無しでも fix_text の glyph 単字適用が成立する。"""
+        self._block_opencc()
+        out, applied, _ = fix_text("沉", None, None)
+        self.assertEqual(out, "沈")
 
 
 class TestShapeGlyph(unittest.TestCase):

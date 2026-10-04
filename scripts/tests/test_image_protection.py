@@ -31,21 +31,47 @@ sys.path.insert(0, str(SCRIPTS))
 # 合成データ。字形整形の対象になる簡体字（馈・恶）を含む。
 IMAGE_PATH = "images/example-10000000-馈字测试——样例.png"
 
+try:  # opencc があれば 恶→悪 の字形変換結果を検査できる（導入環境でのみ実行）
+    import opencc  # noqa: F401
+    OPENCC_AVAILABLE = True
+except Exception:  # pragma: no cover - 環境依存
+    OPENCC_AVAILABLE = False
+
 
 class TestShapeGlyphImageProtection(unittest.TestCase):
     """BUG-02: 画像リンクのパスは字形整形から保護される。"""
 
     def test_image_path_preserved(self):
+        """画像リンクのパスは字形整形の対象にならない（opencc の有無に依らない）。"""
         from normalize.zh2ja import shape_glyph
         src = f"本文。![]({IMAGE_PATH}) 恶梦"
         out, applied = shape_glyph(src)
-        # 画像リンクは実ファイル名のまま
+        # 画像リンクは実ファイル名のまま（opencc 無しでも保たれる）
         self.assertIn(IMAGE_PATH, out)
-        # 本文中の簡体字は整形される
-        self.assertIn("悪梦", out)
         # 適用記録に画像パス内の字（馈）が入っていないこと
         items = [a["item"] for a in applied]
         self.assertNotIn("馈", items)
+
+    def test_image_path_protected_glyph_shaping_handtable(self):
+        """本文側の字形整形（手当て表で解決できる字）は opencc 無しでも効く。"""
+        from normalize.zh2ja import shape_glyph
+        # 沉→沈 は手当て表（MANUAL_CHAR）にある glyph 単字 → opencc 非依存
+        src = f"本文。![]({IMAGE_PATH}) 沉む"
+        out, _ = shape_glyph(src)
+        self.assertIn(IMAGE_PATH, out)   # パスは無傷
+        self.assertIn("沈", out)         # 本文は整形される
+
+    @unittest.skipUnless(
+        OPENCC_AVAILABLE,
+        "opencc 任意依存（P1-4）: 恶→悪 は opencc による字形変換のため未導入環境ではスキップ",
+    )
+    def test_image_path_preserved_body_glyph_via_opencc(self):
+        """opencc あり: 本文中の簡体字（恶→悪）が整形され、パスは無傷。"""
+        from normalize.zh2ja import shape_glyph
+        src = f"本文。![]({IMAGE_PATH}) 恶梦"
+        out, _ = shape_glyph(src)
+        self.assertIn(IMAGE_PATH, out)
+        self.assertIn("悪梦", out)
 
     def test_no_image_unchanged(self):
         from normalize.zh2ja import shape_glyph
