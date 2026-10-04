@@ -290,14 +290,8 @@ class TestSagaAnalyzeCommit(unittest.TestCase):
         b = meta["chapters"][0]["blocks"][0]
         self.assertNotIn("analysis_committed_at", b)
 
-    @unittest.expectedFailure
     def test_ac_all_or_nothing_on_corrupt_existing_file(self):
-        """既存の分析ファイルが壊れていても部分書き込みしない（all-or-nothing）。
-
-        現状は load_terms が try/except の外で例外を投げ、終了コードを返さず
-        クラッシュする。stage4 実装（世代切替トランザクション / #18）で通常テストへ。
-        """
-        # stage4 実装で通常テストへ
+        """既存の分析ファイルが壊れていても部分書き込みしない（all-or-nothing）。"""
         # terms.toml を壊す（読み込み時に例外）
         terms_path = self.work / "analysis" / "terms.toml"
         terms_path.write_text("this is not = = valid [[[", encoding="utf-8")

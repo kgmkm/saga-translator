@@ -320,44 +320,127 @@ def _apply_plot_delta(entries: list[dict], delta_list: list[dict]) -> list[str]:
     return proposed_log
 
 
-def _merge_delta(work: Path, delta: dict) -> tuple[bool, list[str]]:
-    """差分を3ファイルにマージ。(成功, ログ)"""
-    chars = load_characters(work)
-    terms = load_terms(work)
-    plot = load_plot(work)
+def _analysis_backup_dir(work: Path) -> Path:
+    """書き込み失敗時の復元用バックアップを置くディレクトリ。"""
+    return work / "_work" / "analysis_backup"
+
+
+def _build_analysis_payloads(work: Path, delta: dict) -> tuple[list[tuple[Path, dict]] | None, list[str], list[str]]:
+    """差分を適用した書き込み対象（パス, データ）を組み立てる。書き込みは行わない。
+
+    戻り値 ``(payloads, logs, errors)``:
+
+    - ``payloads``: 成功時のみ ``[(path, data), ...]``。失敗時は ``None``。
+    - ``logs``: 適用ログ（proposed 退避など）
+    - ``errors``: 検証・構築に失敗した理由（成功時は空）
+
+    反映対象（characters / terms / plot）を**すべて先に組み立て・検証**する。
+    ここで例外が出れば一切書き込まずに ``payloads=None`` を返す。
+    """
+    try:
+        chars = load_characters(work)
+        terms = load_terms(work)
+        plot = load_plot(work)
+    except Exception as e:  # 壊れた既存 TOML 等 → 何も書かない
+        return None, [], [str(e)]
 
     chars_list = chars.get("characters", [])
     terms_list = terms.get("terms", [])
     plot_entries = plot.get("entries", [])
 
     all_logs: list[str] = []
-
-    # 各deltaを適用（検証を含む）
     try:
         cl = _apply_chars_delta(chars_list, delta.get("characters_delta", []))
         tl = _apply_terms_delta(terms_list, delta.get("terms_delta", []))
         pl = _apply_plot_delta(plot_entries, delta.get("plot_delta", []))
     except Exception as e:
-        return False, [str(e)]
+        return None, [], [str(e)]
 
     all_logs.extend(cl)
     all_logs.extend(tl)
     all_logs.extend(pl)
 
-    # All-or-nothing: ここで書き出す
     chars["characters"] = chars_list
     terms["terms"] = terms_list
     plot["entries"] = plot_entries
 
-    chars_path = _analysis_path(work, "characters")
-    terms_path = _analysis_path(work, "terms")
-    plot_path = _analysis_path(work, "plot")
+    payloads = [
+        (_analysis_path(work, "characters"), chars),
+        (_analysis_path(work, "terms"), terms),
+        (_analysis_path(work, "plot"), plot),
+    ]
+    return payloads, all_logs, []
 
-    save_toml(chars_path, chars)
-    save_toml(terms_path, terms)
-    save_toml(plot_path, plot)
 
-    return True, all_logs
+def _commit_analysis_payloads(payloads: list[tuple[Path, dict]],
+                              work: Path) -> list[str]:
+    """``[(path, data)]`` を書き込む。失敗時は書き込み済みを元バイト列に復元する。
+
+    戻り値はエラーメッセージのリスト（空ならすべて成功）。復元できなかった
+    ファイルがあれば、その旨とバックアップパスをメッセージに含める。
+    """
+    # 元のバイト列を退避（存在しないファイルは None として記録）
+    originals: list[tuple[Path, bytes | None]] = []
+    for path, _ in payloads:
+        try:
+            originals.append((path, path.read_bytes() if path.is_file() else None))
+        except OSError:
+            originals.append((path, None))
+
+    backup_dir = _analysis_backup_dir(work)
+    written: list[Path] = []
+    for path, data in payloads:
+        try:
+            save_toml(path, data)
+            written.append(path)
+        except Exception as e:
+            # ここまでに書いたファイルを元に戻す。まだ書いていないファイルは無傷。
+            unsaved = ", ".join(str(p) for p, _ in payloads if p not in written)
+            msgs = [f"書き込み失敗: {path.name}: {e}"]
+            if unsaved:
+                msgs.append(f"  未書き込み（無変更）: {unsaved}")
+            for wpath in written:
+                orig = next(b for p, b in originals if p == wpath)
+                try:
+                    if orig is None:
+                        if wpath.exists():
+                            wpath.unlink()
+                    else:
+                        wpath.write_bytes(orig)
+                    msgs.append(f"  復元: {wpath.name}")
+                except OSError as re:
+                    # 復元できない場合はバックアップを残して明示する
+                    try:
+                        backup_dir.mkdir(parents=True, exist_ok=True)
+                        for p, b in originals:
+                            if b is not None:
+                                (backup_dir / p.name).write_bytes(b)
+                        msgs.append(
+                            f"  復元失敗: {wpath.name}（{re}）。"
+                            f"元の内容のバックアップ: {backup_dir}")
+                    except OSError:
+                        msgs.append(
+                            f"  復元失敗: {wpath.name}（{re}）。バックアップも作成できませんでした")
+            return msgs
+    return []
+
+
+def _merge_delta(work: Path, delta: dict) -> tuple[bool, list[str]]:
+    """差分を3ファイルにマージ。(成功, ログ)
+
+    All-or-nothing: 3ファイルの内容をすべて先に組み立て・検証し、書き込みは
+    最後に行う。書き込み途中で失敗した場合は、書き込み済みファイルを元の
+    バイト列に復元してから失敗を返す（部分状態を残さない）。
+    """
+    payloads, logs, errors = _build_analysis_payloads(work, delta)
+    if payloads is None:
+        return False, errors
+
+    write_errors = _commit_analysis_payloads(payloads, work)
+    if write_errors:
+        return False, write_errors
+
+    return True, logs
 
 
 def _analysis_path(work: Path, kind: str) -> Path:
@@ -1020,7 +1103,7 @@ def _cmd_commit_impl(work: Path, chapter: str, block: str,
                 return 1
             print(f"[commit] 残渣検査: PASS")
 
-        # 6) 確定（emit --archive）
+        # 6) 確定（emit --archive）— ここまでが「確定」。成功したら exit 0 を確定させる。
         from qa_translation import emit
         emit(work, cid, bid, items, archive=True)
 
@@ -1030,7 +1113,6 @@ def _cmd_commit_impl(work: Path, chapter: str, block: str,
         # 7) 版記録
         _record_translation_meta(work, cid, bid, model, prompt_version)
 
-        # 8) 次の prepare
         elapsed = time.time() - started
         n_residue = 0
         r_stage = report["stages"].get("residue", {})
@@ -1044,6 +1126,34 @@ def _cmd_commit_impl(work: Path, chapter: str, block: str,
         print(f"[commit] {cid}/{bid} を確定 (commit_id={commit_id}, {elapsed:.1f}s)")
         print(f"[commit] 残渣候補: {n_residue}件")
 
+        _write_commit_report(snap_dir, report)
+        _release_lock(work)
+        outcome["reason"] = "success"
+        outcome["commit_id"] = commit_id
+
+    except Exception as e:
+        print(f"[commit] エラー: {e}", file=sys.stderr)
+        _write_commit_report(snap_dir, report)
+        _release_lock(work)
+        outcome["reason"] = "exception"
+        return 1
+    except BaseException:
+        _release_lock(work)
+        raise
+
+    # 8) 次のコンテキスト生成は「確定の外」。ここで失敗しても確定は既に success。
+    #    exit 0 を保ち、警告だけを出す（次回 prepare で再試行できる）。
+    _generate_next_context(work, dst)
+
+    return 0
+
+
+def _generate_next_context(work: Path, dst: str) -> None:
+    """確定後に次の未確定ブロックのコンテキストを生成する（失敗しても確定は壊さない）。
+
+    例外は投げず、失敗時は警告を表示する。reason/exit code は呼び出し側が決める。
+    """
+    try:
         meta2 = load_chapters_meta(work)
         next_result = _find_first_undone(work, meta2.get("chapters", []), dst)
         if next_result:
@@ -1055,22 +1165,9 @@ def _cmd_commit_impl(work: Path, chapter: str, block: str,
             print(f"[next] {ncid}/{nbid} コンテキスト: {nctx}")
         else:
             print(f"[next] 全ブロック確定済み")
-
-        _write_commit_report(snap_dir, report)
-        _release_lock(work)
-        outcome["reason"] = "success"
-        outcome["commit_id"] = commit_id
-        return 0
-
     except Exception as e:
-        print(f"[commit] エラー: {e}", file=sys.stderr)
-        _write_commit_report(snap_dir, report)
-        _release_lock(work)
-        outcome["reason"] = "exception"
-        return 1
-    except BaseException:
-        _release_lock(work)
-        raise
+        print(f"[commit] 確定しました。次のコンテキスト生成に失敗"
+              f"（次回 prepare で再試行できます）: {e}", file=sys.stderr)
 
 
 def _record_translation_meta(work: Path, cid: str, bid: str,
