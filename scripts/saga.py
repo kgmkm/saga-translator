@@ -17,7 +17,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from _lib import (  # noqa: E402
     atomic_write_text, direction, dump_toml, load_chapters_meta,
     load_characters, load_plot, load_structured, load_terms, load_toml,
-    read_skill_version, save_chapters_meta, save_toml, target_suffix, utf8,
+    read_skill_version, record_timeline, save_chapters_meta, save_toml,
+    target_suffix, timed_stage, utf8,
 )
 
 PLOT_RE = re.compile(r'^block = "([^"]+)"', re.M)
@@ -113,6 +114,14 @@ def _next_work(chapters: list[dict]) -> str | None:
 
 
 def cmd_status(work: Path) -> int:
+    started = time.time()
+    rc = _cmd_status_impl(work)
+    _record_stage(work, "status", None, None, started, rc,
+                  reason="success" if rc == 0 else "other")
+    return rc
+
+
+def _cmd_status_impl(work: Path) -> int:
     if not work.is_dir():
         print(f"[status] エラー: ディレクトリが見つかりません: {work}", file=sys.stderr)
         return 1
@@ -420,6 +429,14 @@ def _ensure_block_field(meta: dict, block_key: str, field: str, value: str) -> N
 
 
 def cmd_analyze_commit(work: Path, delta_path: Path) -> int:
+    started = time.time()
+    rc = _cmd_analyze_commit_impl(work, delta_path)
+    reason = "success" if rc == 0 else "other"
+    _record_stage(work, "analyze-commit", None, None, started, rc, reason=reason)
+    return rc
+
+
+def _cmd_analyze_commit_impl(work: Path, delta_path: Path) -> int:
     if not delta_path.is_file():
         print(f"[analyze-commit] エラー: delta ファイルが見つかりません: {delta_path}", file=sys.stderr)
         return 1
@@ -458,6 +475,73 @@ def cmd_analyze_commit(work: Path, delta_path: Path) -> int:
 # prepare サブコマンド
 # ---------------------------------------------------------------------------
 
+def _record_stage(work: Path, stage: str, chapter: str | None, block: str | None,
+                  started: float, exit_code: int, reason: str | None = None,
+                  mode: str | None = None) -> None:
+    """工程の所要時間を timeline.jsonl に1行記録する（成功・失敗の両方）。
+
+    started は time.time() の値。record_timeline が失敗しても本処理は止めない。
+    """
+    record_timeline(
+        work, stage, chapter=chapter or None, block=block or None,
+        exit_code=exit_code, reason=reason, mode=mode,
+        started=datetime.fromtimestamp(started, tz=timezone.utc),
+        ended=datetime.now(timezone.utc),
+    )
+
+
+# 失敗理由の分類（commit の検査工程の順序に合わせる）。
+# 値を増やすと commit の timeline に載る reason の種類が増える。
+COMMIT_FAIL_REASONS = (
+    "success",           # 成功
+    "align",             # align fatal（会話頭・欠落・重複マーカー等）
+    "confirm_unacked",   # confirm 未 ack
+    "qa",                # QA 不合格
+    "merged_paragraphs",  # QA のうち段落結合
+    "non_jis",           # QA のうち CP932 外漢字の残存
+    "residue",           # 残渣（エラー/候補）
+    "draft_missing",     # ドラフト不在
+    "locked",            # 他 writer がロック中
+    "exception",         # 想定外の例外
+    "other",             # 分類不能
+)
+
+
+def _classify_commit_failure(snap_dir: Path) -> str:
+    """commit 失敗時の理由を種類別に分類する。
+
+    検査ごとの検出数を記録した report.json を優先して読み、無ければ None。
+    分類記号は COMMIT_FAIL_REASONS のいずれか。
+    """
+    report_p = Path(snap_dir) / "report.json"
+    if not report_p.is_file():
+        return "other"
+    try:
+        report = json.loads(report_p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "other"
+    stages = report.get("stages", {})
+    align = stages.get("align", {})
+    if isinstance(align, dict) and int(align.get("fatal", 0) or 0) > 0:
+        return "align"
+    if isinstance(align, dict) and int(align.get("confirm_unacked", 0) or 0) > 0:
+        return "confirm_unacked"
+    qa = stages.get("qa")
+    if isinstance(qa, dict) and not qa.get("pass", True):
+        checks = qa.get("checks", {})
+        if isinstance(checks, dict):
+            if checks.get("merged_paragraphs") is False:
+                return "merged_paragraphs"
+            if checks.get("non_jis_han") is False:
+                return "non_jis"
+        return "qa"
+    residue = stages.get("residue", {})
+    if isinstance(residue, dict) and (int(residue.get("errors", 0) or 0) > 0
+                                      or int(residue.get("candidates", 0) or 0) > 0):
+        return "residue"
+    return "other"
+
+
 def _find_first_undone(work: Path, chapters: list[dict], dst: str) -> tuple[str, str, dict] | None:
     """最初の未確定ブロック（output/<ch>/<bid><suffix>.md が存在しない）を返す。
     戻り値: (cid, bid, block_dict)"""
@@ -474,6 +558,15 @@ def _find_first_undone(work: Path, chapters: list[dict], dst: str) -> tuple[str,
 
 def cmd_prepare(work: Path, chapter: str | None, block: str | None,
                 mode: str = "translation") -> int:
+    started = time.time()
+    outcome: dict = {"cid": chapter, "bid": block}
+    rc = _cmd_prepare_impl(work, chapter, block, mode, outcome)
+    _record_stage(work, "prepare", outcome["cid"], outcome["bid"], started, rc, mode=mode)
+    return rc
+
+
+def _cmd_prepare_impl(work: Path, chapter: str | None, block: str | None,
+                      mode: str, outcome: dict) -> int:
     if not work.is_dir():
         print(f"[prepare] エラー: ディレクトリが見つかりません: {work}", file=sys.stderr)
         return 1
@@ -530,6 +623,8 @@ def cmd_prepare(work: Path, chapter: str | None, block: str | None,
             return 1
         cid, bid, _ = result
 
+    outcome["cid"], outcome["bid"] = cid, bid
+
     # コンテキスト生成
     work_dir_obj = work
     (work_dir_obj / "translation_input").mkdir(parents=True, exist_ok=True)
@@ -582,6 +677,28 @@ def _output_path(work: Path, cid: str, bid: str) -> Path:
 
 def cmd_commit(work: Path, chapter: str, block: str,
                model: str, prompt_version: str) -> int:
+    """commit を実行し、成功/失敗いずれでも timeline.jsonl に1行記録する。"""
+    started = time.time()
+    outcome: dict = {"reason": "other", "commit_id": None, "snap_dir": None}
+    rc = _cmd_commit_impl(work, chapter, block, model, prompt_version, outcome)
+    # 失敗理由は種類別に分類（成功は success）。chapter/block は指定値をそのまま記録。
+    if outcome["snap_dir"] is not None:
+        reason = _classify_commit_failure(outcome["snap_dir"])
+    else:
+        reason = outcome["reason"]
+    if rc == 0:
+        reason = "success"
+    record_timeline(
+        work, "commit", chapter=chapter or None, block=block or None,
+        exit_code=rc, reason=reason, commit_id=outcome["commit_id"],
+        started=datetime.fromtimestamp(started, tz=timezone.utc),
+        ended=datetime.now(timezone.utc),
+    )
+    return rc
+
+
+def _cmd_commit_impl(work: Path, chapter: str, block: str,
+                     model: str, prompt_version: str, outcome: dict) -> int:
     if not work.is_dir():
         print(f"[commit] エラー: ディレクトリが見つかりません: {work}", file=sys.stderr)
         return 1
@@ -589,6 +706,7 @@ def cmd_commit(work: Path, chapter: str, block: str,
     # 排他ロック
     if not _acquire_lock(work):
         print("[commit] エラー: 他の書き手がロック中です（終了コード 3）", file=sys.stderr)
+        outcome["reason"] = "locked"
         return 3
 
     started = time.time()
@@ -614,11 +732,13 @@ def cmd_commit(work: Path, chapter: str, block: str,
         elapsed = time.time() - started
         print(f"[commit] {cid}/{bid} 記録補完完了 ({elapsed:.1f}s)")
         _release_lock(work)
+        outcome["reason"] = "success"
         return 0
 
     if not draft_p.exists():
         print(f"[commit] エラー: ドラフトがありません: {draft_p}", file=sys.stderr)
         _release_lock(work)
+        outcome["reason"] = "draft_missing"
         return 1
 
     # 1) スナップショット
@@ -629,6 +749,7 @@ def cmd_commit(work: Path, chapter: str, block: str,
     snap_dir.mkdir(parents=True, exist_ok=True)
     snap_draft = snap_dir / "draft.md"
     shutil.copy2(str(draft_p), str(snap_draft))
+    outcome["snap_dir"] = snap_dir
     print(f"[commit] スナップショット: {snap_draft}  commit_id={commit_id}")
 
     report: dict[str, object] = {"commit_id": commit_id, "snapshot": str(snap_draft),
@@ -682,6 +803,7 @@ def cmd_commit(work: Path, chapter: str, block: str,
             _write_commit_report(snap_dir, report)
             print(f"[commit] 中止。ドラフトを直して再実行。", file=sys.stderr)
             _release_lock(work)
+            outcome["reason"] = "align"
             return 1
 
         if unacked_confirms:
@@ -690,6 +812,7 @@ def cmd_commit(work: Path, chapter: str, block: str,
             print(f"[commit] 失敗: confirm {len(unacked_confirms)} 件が未ackです。align.py ack を使って確認してください。", file=sys.stderr)
             _write_commit_report(snap_dir, report)
             _release_lock(work)
+            outcome["reason"] = "confirm_unacked"
             return 1
 
         print(f"[commit] align: PASS (fatal={len(fatals)}, confirm(未ack)={len(unacked_confirms)})")
@@ -707,6 +830,7 @@ def cmd_commit(work: Path, chapter: str, block: str,
             _write_commit_report(snap_dir, report)
             print(f"[commit] 中止。QA 不合格。", file=sys.stderr)
             _release_lock(work)
+            outcome["reason"] = "qa"
             return 1
 
         print(f"[commit] QA: PASS")
@@ -746,6 +870,7 @@ def cmd_commit(work: Path, chapter: str, block: str,
                 _write_commit_report(snap_dir, report)
                 print(f"[commit] 中止。残渣 {len(residue_errors)} 件を修正してください。", file=sys.stderr)
                 _release_lock(work)
+                outcome["reason"] = "residue"
                 return 1
 
             if residue_candidates:
@@ -760,6 +885,7 @@ def cmd_commit(work: Path, chapter: str, block: str,
                       f"修正するか house_style.toml の residue.known_terms に登録してください。",
                       file=sys.stderr)
                 _release_lock(work)
+                outcome["reason"] = "residue"
                 return 1
 
             print(f"[commit] 残渣検査: PASS（候補 0 件）")
@@ -776,6 +902,7 @@ def cmd_commit(work: Path, chapter: str, block: str,
                 _write_commit_report(snap_dir, report)
                 print(f"[commit] 中止。残渣 {len(ja_residue)} 件を修正してください。", file=sys.stderr)
                 _release_lock(work)
+                outcome["reason"] = "residue"
                 return 1
             print(f"[commit] 残渣検査: PASS")
 
@@ -817,12 +944,15 @@ def cmd_commit(work: Path, chapter: str, block: str,
 
         _write_commit_report(snap_dir, report)
         _release_lock(work)
+        outcome["reason"] = "success"
+        outcome["commit_id"] = commit_id
         return 0
 
     except Exception as e:
         print(f"[commit] エラー: {e}", file=sys.stderr)
         _write_commit_report(snap_dir, report)
         _release_lock(work)
+        outcome["reason"] = "exception"
         return 1
     except BaseException:
         _release_lock(work)
@@ -1054,6 +1184,15 @@ def _read_dst_output(work: Path, cid: str, bid: str) -> str | None:
 def cmd_review(work: Path, wave: int = 1, sample_ratio: float = 0.1,
                json_output: bool = False) -> int:
     """検収用の検収リストを生成。"""
+    started = time.time()
+    rc = _cmd_review_impl(work, wave, sample_ratio, json_output)
+    _record_stage(work, "review", None, None, started, rc,
+                  reason="success" if rc == 0 else "other")
+    return rc
+
+
+def _cmd_review_impl(work: Path, wave: int = 1, sample_ratio: float = 0.1,
+                     json_output: bool = False) -> int:
     if not work.is_dir():
         print(f"[review] エラー: ディレクトリが見つかりません: {work}", file=sys.stderr)
         return 1

@@ -752,8 +752,13 @@ def make_blocks(paras: list[str], target_chars: int) -> list[tuple[int, int]]:
 
 def record_timeline(work, stage: str, chapter=None, block=None,
                     started=None, ended=None, exit_code: int = 0,
-                    retries: int = 0, commit_id=None) -> None:
-    """logs/timeline.jsonl に1行追記。失敗は握りつぶす。"""
+                    retries: int = 0, commit_id=None, reason=None,
+                    mode=None) -> None:
+    """logs/timeline.jsonl に1行追記。失敗は握りつぶす。
+
+    reason: commit 等の失敗理由の分類（成功時は "success"）。None なら欄を出さない。
+    mode: prepare のモード（translation / analysis 等）。None なら欄を出さない。
+    """
     try:
         log_dir = Path(work) / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -779,6 +784,10 @@ def record_timeline(work, stage: str, chapter=None, block=None,
             entry["retries"] = retries
         if commit_id is not None:
             entry["commit_id"] = commit_id
+        if reason is not None:
+            entry["reason"] = reason
+        if mode is not None:
+            entry["mode"] = mode
         with open(log_dir / "timeline.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except OSError:
@@ -786,8 +795,12 @@ def record_timeline(work, stage: str, chapter=None, block=None,
 
 
 @contextmanager
-def timed_stage(work, stage, chapter=None, block=None):
-    """main() を囲むコンテキストマネージャ。開始・終了を記録し、exit_code を決定する。"""
+def timed_stage(work, stage, chapter=None, block=None, reason=None, mode=None):
+    """main() を囲むコンテキストマネージャ。開始・終了を記録し、exit_code を決定する。
+
+    reason / mode は簡易記録用（成功時は reason="success" を明示したい場合のみ渡す）。
+    commit のように失敗理由を動的に分類する工程は record_timeline 直呼びを使う。
+    """
     started = datetime.now(timezone.utc)
     code = 0
     try:
@@ -801,4 +814,4 @@ def timed_stage(work, stage, chapter=None, block=None):
     finally:
         record_timeline(work, stage, chapter=chapter, block=block,
                         started=started, ended=datetime.now(timezone.utc),
-                        exit_code=code)
+                        exit_code=code, reason=reason, mode=mode)
