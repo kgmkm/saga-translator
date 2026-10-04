@@ -77,7 +77,7 @@ skill_md = "§3 分析（ローリング）の直後"
 marker = "titles.toml"
 requires = ["analysis"]
 ensures = ["titles.toml 生成（章題の訳題の正本）"]
-status = "missing"
+status = "documented"
 stage = 6
 note = "レビュー #2。分析1周後に章題を確定して titles.toml を作る手順。assemble の題ゲートの前提。"
 

@@ -85,6 +85,8 @@ saga.py prepare <workdir> --mode analysis
 saga.py analyze-commit <workdir> --delta <差分TOML>
 ```
 
+1周し終わったら `analysis/titles.toml` を作って章題と作品題を確定する（`title_src`/`title_ja` と `[[chapters]]` の `id`/`src`/`ja`）。assemble はこれが無いと止まる（原題のまま出す場合は `--allow-src-title`）。
+
 ### 4. 翻訳
 
 ```

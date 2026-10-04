@@ -475,6 +475,9 @@ class TestAssemble(unittest.TestCase):
             {"id": "ch001", "title": "", "status": "emitted", "blocks": [
                 {"id": "b1", "paras": [1, 2], "status": "emitted"}]}]})
         save_paras(self.tmp, "ch001", {"paras": [{"n": 1, "text": "原一。"}, {"n": 2, "text": "原二。"}]})
+        (self.tmp / "analysis" / "titles.toml").write_text(
+            'title_src = "x"\ntitle_ja = "x（改題）"\n\n'
+            '[[chapters]]\nid = "ch001"\nsrc = "第一章"\nja = "第一章　始まり"\n', encoding="utf-8")
         (self.tmp / "output" / "ch001" / "b1_ja.md").write_text("訳一。\n\n訳二。\n", encoding="utf-8")
         (self.tmp / "output" / "ch001" / "b1_parallel.md").write_text(
             "> [P001] 原一。\n\n訳一。\n\n> [P002] 原二。\n\n訳二。\n", encoding="utf-8")

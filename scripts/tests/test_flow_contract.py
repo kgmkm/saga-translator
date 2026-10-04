@@ -267,7 +267,13 @@ class TestFlowScenarioNormal(_ScenarioBase):
         p = _saga("review", str(self.fx.work))
         self.assertEqual(p.returncode, 0, p.stderr)
 
-        # 結合
+        # 結合（章題は分析で確定済みの前提——titles.toml を置く）
+        tdir = self.fx.work / "analysis"
+        tdir.mkdir(exist_ok=True)
+        (tdir / "titles.toml").write_text(
+            'title_src = "合成作品"\ntitle_ja = "合成作品（改題）"\n\n'
+            '[[chapters]]\nid = "ch001"\nsrc = "第一章"\nja = "第一章　始まり"\n\n'
+            '[[chapters]]\nid = "ch002"\nsrc = "第二章"\nja = "第二章　続き"\n', encoding="utf-8")
         p = _run(str(SCRIPTS / "assemble.py"), str(self.fx.work))
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertTrue((self.fx.work / "output" / "全文_訳文.md").exists())
@@ -366,6 +372,12 @@ class TestFlowScenarioIntegrity(_ScenarioBase):
         out = self.fx.work / "output" / "ch001" / "b1_ja.md"
         out.write_text(out.read_text(encoding="utf-8") + "\n![img](../images/missing-9999.png)\n",
                        encoding="utf-8")
+        # 章題は確定済みにしておく（画像欠落だけを見る）
+        tdir = self.fx.work / "analysis"
+        tdir.mkdir(exist_ok=True)
+        (tdir / "titles.toml").write_text(
+            'title_src = "合成作品"\ntitle_ja = "合成作品（改題）"\n\n'
+            '[[chapters]]\nid = "ch001"\nsrc = "第一章"\nja = "第一章　始まり"\n', encoding="utf-8")
         p = _run(str(SCRIPTS / "assemble.py"), str(self.fx.work))
         self.assertNotEqual(p.returncode, 0, f"画像欠落なのに assemble が通った:\n{p.stdout}")
 
@@ -478,11 +490,11 @@ class TestFlowScenarioMissingSteps(_ScenarioBase):
             body = (work / "output" / cid / "b1_ja.md").read_text(encoding="utf-8")
             self.assertNotIn("插图一.png", body, f"{cid}: 参照が更新されていない")
 
-    @unittest.expectedFailure
     def test_titles_gate_before_assemble(self):
         """S9: titles.toml が無ければ assemble は止まる（原題のまま黙って出さない）。
 
-        # scenario: titles / stage6（P0-1）実装で通常テストへ
+        # scenario: titles / stage5 で titles ゲート実装済み（通常テスト）。
+        #   SKILL.md への手順復活と flow-contract の documented 化も同時に行う
         """
         self.fx.ingest()
         self.fx.split()

@@ -47,6 +47,9 @@ def _make_completed_work(base: Path) -> Path:
         ]}]})
     _lib.save_paras(work, "ch001", {"paras": [
         {"n": 1, "text": "原文一。"}, {"n": 2, "text": "原文二。"}]})
+    _write(work / "analysis" / "titles.toml",
+           'title_src = "合成作品"\ntitle_ja = "合成作品（改題）"\n\n'
+           '[[chapters]]\nid = "ch001"\nsrc = "第一章"\nja = "第一章　始まり"\n')
     _write(work / "originals" / "source.md", "原文一。\n\n原文二。\n")
     # 確定出力と対訳（assemble が読むブロック出力）
     _write(work / "output" / "ch001" / "b1_ja.md", "訳一。\n\n訳二。\n")
@@ -86,6 +89,9 @@ def _make_partial_work(base: Path) -> Path:
         {"n": 1, "text": "原文一。"}, {"n": 2, "text": "原文二。"},
         {"n": 3, "text": "原文三。"}, {"n": 4, "text": "原文四。"}]})
     _write(work / "output" / "ch001" / "b1_ja.md", "訳一。\n\n訳二。\n")
+    _write(work / "analysis" / "titles.toml",
+           'title_src = "合成作品"\ntitle_ja = "合成作品（改題）"\n\n'
+           '[[chapters]]\nid = "ch001"\nsrc = "第一章"\nja = "第一章　始まり"\n')
     return work
 
 
