@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import argparse
-import filecmp
 import sys
 from pathlib import Path
 
@@ -68,7 +67,11 @@ def files_equal(a: Path, b: Path) -> bool:
         return False
     if _is_text(a) and _is_text(b):
         return _normalized_lines(a) == _normalized_lines(b)
-    return filecmp.cmp(str(a), str(b), shallow=False)
+    # filecmp.cmp は stat 署名キーの _cache を持ち、mtime 粒度の粗い環境で
+    # 別ファイルを同一と誤判定する（順序依存フレークの実例あり）。キャッシュを使わない。
+    if a.stat().st_size != b.stat().st_size:
+        return False
+    return a.read_bytes() == b.read_bytes()
 
 
 def iter_source_files(source: Path):
