@@ -16,10 +16,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from _lib import (  # noqa: E402
     VOICE_STATUSES, acquire_lock, atomic_write_text, block_meta, block_paras, block_src_hash,
-    direction, dump_toml, load_chapters_meta, load_characters, load_paras, load_plot,
-    load_structured, load_terms, load_toml, read_skill_version, record_timeline,
-    release_lock, save_chapters_meta, save_toml, sha12, target_suffix, timed_stage, utf8,
-    voice_description_present,
+    character_aliases, direction, dump_toml, load_chapters_meta, load_characters, load_paras,
+    load_plot, load_structured, load_terms, load_toml, merge_speaker_candidate,
+    merge_variant_candidates, normalize_variant_candidates, read_skill_version, record_timeline,
+    release_lock, save_chapters_meta, save_toml, sha12, speaker_candidate_blocks, target_suffix,
+    timed_stage, utf8, variant_candidates_of, voice_description_present, voice_status_of,
 )
 
 PLOT_RE = re.compile(r'^block = "([^"]+)"', re.M)
@@ -130,6 +131,71 @@ def _assembled_state(work: Path) -> tuple[str | None, list[str]]:
         [str(x) for x in outs if x] if isinstance(outs, list) else [])
 
 
+def _cap_list(items: list[str], cap: int = 8) -> str:
+    """一覧の表示（cap 件まで。超過分は …他N件）。"""
+    shown = ", ".join(items[:cap])
+    if len(items) > cap:
+        shown += f" …他{len(items) - cap}件"
+    return shown
+
+
+def _status_pending_analysis(work: Path) -> list[str]:
+    """status の「分析の確認待ち」節（P0-4・#7）。
+
+    未確定の声（unconfirmed / insufficient_evidence）と、未解決の話者/異表記の
+    確認候補を列挙する。検収済みの「未確定」は許容する（推測で埋めない方針の明示）。
+    """
+    from build_context import VOICE_STATUS_LABELS
+    try:
+        chars_data = load_characters(work)
+    except Exception as e:
+        return [f"[status] 分析の確認待ち: （人物表を読めません: {e}）"]
+    chars = [c for c in (chars_data.get("characters") or []) if isinstance(c, dict)]
+
+    voice_wait: list[str] = []
+    speaker_wait: list[str] = []
+    variant_wait: list[str] = []
+    seen_pairs: set[tuple[str, str]] = set()
+
+    def _variant_line(name_src: str, similar_to: str, block: str, suffix: str = "") -> str:
+        pair = "⇔".join(sorted((name_src, similar_to))) if similar_to else name_src
+        return f"{pair} ({block}){suffix}" if block else f"{pair}{suffix}"
+
+    for c in chars:
+        name = c.get("name_ja") or c.get("name_src") or "(無名)"
+        status = voice_status_of(c)
+        if status in ("unconfirmed", "insufficient_evidence"):
+            voice_wait.append(f"{name} ({VOICE_STATUS_LABELS.get(status, status)})")
+        blocks = speaker_candidate_blocks(c)
+        if blocks:
+            speaker_wait.append(f"{name} ({', '.join(blocks)})")
+        for cand in variant_candidates_of(c):
+            pair = tuple(sorted((cand["name_src"], cand["similar_to_src"])))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            variant_wait.append(_variant_line(cand["name_src"], cand["similar_to_src"], cand["block"]))
+    for cand in normalize_variant_candidates(chars_data.get("variant_candidates")):
+        pair = tuple(sorted((cand["name_src"], cand["similar_to_src"])))
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        variant_wait.append(
+            _variant_line(cand["name_src"], cand["similar_to_src"], cand["block"], "（該当キャラなし）"))
+
+    if not voice_wait and not speaker_wait and not variant_wait:
+        return ["[status] 分析の確認待ち: なし"]
+    out = ["[status] 分析の確認待ち:"]
+    if voice_wait:
+        out.append("[status]   声の状態(未確認/根拠不足): " + _cap_list(voice_wait))
+    if speaker_wait:
+        out.append("[status]   話者の確認候補: " + _cap_list(speaker_wait))
+    if variant_wait:
+        out.append("[status]   異表記候補: " + _cap_list(variant_wait))
+    out.append("[status]   （検収済みの「未確定」は許容。推測で埋めず、埋め直しは1周後に delta で1回）")
+    return out
+
+
 def cmd_status(work: Path) -> int:
     started = time.time()
     rc = _cmd_status_impl(work)
@@ -208,6 +274,10 @@ def _cmd_status_impl(work: Path) -> int:
             print(f"[status]   {w}")
     else:
         print("[status] 警告: なし")
+
+    # 分析の確認待ち（未確定の声と未解決の候補。P0-4・#7）
+    for line in _status_pending_analysis(work):
+        print(line)
 
     return 0
 
@@ -834,6 +904,8 @@ def _cmd_analyze_commit_impl(work: Path, delta_path: Path,
         check_active = _analysis_phase_active(work)
         payloads: list[tuple[Path, dict]] | None = None
         logs: list[str] = []
+        candidate_logs: list[str] = []
+        candidates_changed = False
         if has_changes or check_active:
             payloads, logs, errors = _build_analysis_payloads(work, delta)
             if payloads is None:
@@ -841,6 +913,10 @@ def _cmd_analyze_commit_impl(work: Path, delta_path: Path,
                     print(f"[analyze-commit] エラー: {e}", file=sys.stderr)
                 print("[analyze-commit] エラー: マージ検証失敗、何も書きませんでした", file=sys.stderr)
                 return 1
+            # 確認の候補（話者・異表記）: 差分適用後のデータと対象ブロックの
+            # 原文から抽出して記録する（確定はしない。P0-4・#7）
+            candidate_logs, candidates_changed = _record_voice_candidates(
+                work, block, meta, payloads)
 
         forced_residue = False
         if check_active and payloads is not None:
@@ -869,7 +945,7 @@ def _cmd_analyze_commit_impl(work: Path, delta_path: Path,
                     file=sys.stderr,
                 )
 
-        if has_changes:
+        if has_changes or candidates_changed:
             write_errors = _commit_analysis_payloads(payloads, work)
             if write_errors:
                 print("[analyze-commit] エラー: マージ検証失敗、何も書きませんでした", file=sys.stderr)
@@ -908,9 +984,213 @@ def _cmd_analyze_commit_impl(work: Path, delta_path: Path,
             print(f"[analyze-commit] 完了: {n} 件マージ（{len([l for l in logs if '→proposed' in l])} 件は proposed に退避）")
         else:
             print("[analyze-commit] 完了: 差分なし（analysis_no_changes = true を記録）")
+        for l in candidate_logs:
+            print(f"[analyze-commit] {l}")
         return 0
     finally:
         _release_lock(work)
+
+
+# ---------------------------------------------------------------------------
+# 確認の候補（analyze-commit。話者・異表記の抽出。P0-4・#7）
+# ---------------------------------------------------------------------------
+
+# 話者候補: 名前が引用符の近くに出る回数の窓と閾値（実装で決定・テストで固定）
+SPEAKER_QUOTE_WINDOW = 20      # 引用符からこの字数以内を「近く」とする
+SPEAKER_MIN_NEAR_QUOTES = 2    # 引用符の近くに出る回数がこれ以上で候補
+# 引用符・括りの集合（原文側。「」『』“”‘’" ' ［］[]。align_check の QUOTE_HEADS に準拠）
+_QUOTE_MARKS = frozenset("「」『』“”‘’\"'［］[]")
+# 異表記候補: 名前の最短長と、原文側だけに出る揺れ表記の採用閾値（実装で決定）
+VARIANT_MIN_NAME_LEN = 2
+VARIANT_TEXT_MIN_OCCURRENCES = 2
+
+
+def _name_forms(entry: dict) -> list[str]:
+    """キャラの名前表記（name_src / name_ja / ruby / aliases）を列挙（空・重複除去）。"""
+    forms: list[str] = []
+    for key in ("name_src", "name_ja", "ruby"):
+        v = str(entry.get(key) or "").strip()
+        if v and v not in forms:
+            forms.append(v)
+    for a in character_aliases(entry):
+        if a not in forms:
+            forms.append(a)
+    return forms
+
+
+def _similar_names(a: str, b: str) -> bool:
+    """近い表記の名前か（異表記候補の判定。実装で決定・テストで固定）。
+
+    - 大小文字違いだけ: 同じ扱い
+    - 同じ長さ: 1文字だけ違う（繁体/簡体・誤記・表記ゆれの候補）
+    - 長さ違い: 短い方が長い方に含まれ、長さの差が1以内（付加された別表記）
+    """
+    a, b = a.strip(), b.strip()
+    if not a or not b or a == b:
+        return False
+    if len(a) < VARIANT_MIN_NAME_LEN or len(b) < VARIANT_MIN_NAME_LEN:
+        return False
+    if a.casefold() == b.casefold():
+        return True
+    if len(a) == len(b):
+        return sum(1 for x, y in zip(a, b) if x != y) <= 1
+    short, longer = (a, b) if len(a) < len(b) else (b, a)
+    return len(longer) - len(short) <= 1 and short in longer
+
+
+def _near_quote_hits(text: str, name: str) -> int:
+    """text 中の name の出現のうち、引用符の近く（窓内）にある回数。"""
+    hits = 0
+    start = 0
+    while True:
+        i = text.find(name, start)
+        if i < 0:
+            break
+        lo = max(0, i - SPEAKER_QUOTE_WINDOW)
+        hi = min(len(text), i + len(name) + SPEAKER_QUOTE_WINDOW)
+        if any(ch in _QUOTE_MARKS for ch in text[lo:hi]):
+            hits += 1
+        start = i + len(name)
+    return hits
+
+
+def _record_voice_candidates(work: Path, block_key: str, meta: dict,
+                             payloads: list[tuple[Path, dict]]) -> tuple[list[str], bool]:
+    """差分適用後に対象ブロックの原文を走査し、確認の候補を記録する（P0-4・#7）。
+
+    - 話者の確認候補: 名前が引用符の近くに閾値回数以上出る人物。
+      「名前が近くにあるだけでは話者と確定できない」のでセリフありとは扱わず、
+      `speaker_candidate`（ブロックキーのリスト）として記録するだけにする。
+    - 異表記候補: 近い表記の名前が原文で併存しているもの。`variant_candidates`
+      として記録し、aliases に入るまで残す（解決済みは自動で落とす）。該当
+      キャラが無い候補は work レベル（characters TOML トップ）に置く。
+
+    確定はしない（推測で埋めない）。戻り値: (表示ログ, データを変更したか)。
+    """
+    chars_data = next((d for p, d in payloads if p.name.startswith("characters")), None)
+    if not isinstance(chars_data, dict):
+        return [], False
+    text = _block_src_text(work, block_key, meta)
+    chars = chars_data.get("characters")
+    if not isinstance(chars, list) or not text.strip():
+        return [], False
+
+    log: list[str] = []
+    changed = False
+    entries = [(c, _name_forms(c)) for c in chars if isinstance(c, dict)]
+    known: set[str] = {f for _c, forms in entries for f in forms}
+    owners: dict[str, dict] = {}
+    for c, forms in entries:
+        for f in forms:
+            owners.setdefault(f, c)
+
+    # 解決済みの異表記候補を先に落とす（aliases へ移った・相手の別名になった）
+    for c, _forms in entries:
+        raw = c.get("variant_candidates")
+        kept = []
+        for cand in variant_candidates_of(c):
+            other, own = cand["name_src"], cand["similar_to_src"]
+            if other in character_aliases(c):
+                continue
+            owner = owners.get(other)
+            if owner is not None and own and own in character_aliases(owner):
+                continue
+            kept.append(cand)
+        if isinstance(raw, list) and len(kept) != len(variant_candidates_of(c)):
+            if kept:
+                c["variant_candidates"] = kept
+            else:
+                c.pop("variant_candidates", None)
+            changed = True
+
+    # ① 話者の確認候補（名前が引用符の近くに出る。セリフありとは扱わない）
+    for c, forms in entries:
+        name = c.get("name_ja") or c.get("name_src") or "(無名)"
+        if voice_status_of(c) == "confirmed":
+            # 声が確定した人物の候補は役目を終える
+            if speaker_candidate_blocks(c):
+                c.pop("speaker_candidate", None)
+                changed = True
+            continue
+        hits = sum(_near_quote_hits(text, f) for f in forms)
+        if hits < SPEAKER_MIN_NEAR_QUOTES:
+            continue
+        existing = speaker_candidate_blocks(c)
+        merged = merge_speaker_candidate(existing, [block_key])
+        if merged != existing:
+            c["speaker_candidate"] = merged
+            changed = True
+            log.append(
+                f"話者の確認候補: {name} ({block_key})（引用符の近くに"
+                f"{SPEAKER_MIN_NEAR_QUOTES}回以上。名前があるだけで話者とは確定しない）")
+
+    # ② 異表記候補（キャラ同士。近い表記が原文に併存しているもの）
+    for i, (ca, forms_a) in enumerate(entries):
+        for cb, forms_b in entries[i + 1:]:
+            for a in forms_a:
+                if a not in text:
+                    continue
+                for b in forms_b:
+                    if b not in text or not _similar_names(a, b):
+                        continue
+                    if b in character_aliases(ca) or a in character_aliases(cb):
+                        continue  # 既に aliases で結ばれている＝解決済み
+                    ea = variant_candidates_of(ca)
+                    eb = variant_candidates_of(cb)
+                    ma = merge_variant_candidates(
+                        ea, [{"name_src": b, "similar_to_src": a, "block": block_key}])
+                    mb = merge_variant_candidates(
+                        eb, [{"name_src": a, "similar_to_src": b, "block": block_key}])
+                    if ma != ea:
+                        ca["variant_candidates"] = ma
+                        changed = True
+                    if mb != eb:
+                        cb["variant_candidates"] = mb
+                        changed = True
+                    if ma != ea or mb != eb:
+                        log.append(
+                            f"異表記候補: {'⇔'.join(sorted((a, b)))} ({block_key})"
+                            f"（同一人物の異表記の可能性。aliases に入れるか別人と記録するまで残す）")
+
+    # ③ 異表記候補（原文側だけに近い表記がある。該当キャラが無い → work レベル）
+    raw_work = chars_data.get("variant_candidates")
+    work_cands = normalize_variant_candidates(raw_work)
+    kept_work = [x for x in work_cands if x["name_src"] not in known]
+    if isinstance(raw_work, list) and len(kept_work) != len(work_cands):
+        changed = True
+    work_cands = kept_work
+    for _c, forms in entries:
+        for n in forms:
+            if len(n) < VARIANT_MIN_NAME_LEN or n not in text:
+                continue
+            length = len(n)
+            seen_t: set[str] = set()
+            for i in range(0, len(text) - length + 1):
+                t = text[i:i + length]
+                if t == n or t in seen_t or t in known or not t.isalnum():
+                    continue
+                if not _similar_names(n, t):
+                    continue
+                seen_t.add(t)
+                if text.count(t) < VARIANT_TEXT_MIN_OCCURRENCES:
+                    continue
+                merged = merge_variant_candidates(
+                    work_cands, [{"name_src": t, "similar_to_src": n, "block": block_key}])
+                if merged != work_cands:
+                    work_cands = merged
+                    changed = True
+                    log.append(
+                        f"異表記候補: {'⇔'.join(sorted((t, n)))} ({block_key})"
+                        f"（原文に近い表記が併存。該当キャラなし。"
+                        f"aliases に入れるか別人と記録するまで残す）")
+    if work_cands:
+        if chars_data.get("variant_candidates") != work_cands:
+            chars_data["variant_candidates"] = work_cands
+            changed = True
+    elif isinstance(raw_work, list) and raw_work:
+        chars_data.pop("variant_candidates", None)
+        changed = True
+    return log, changed
 
 
 # ---------------------------------------------------------------------------

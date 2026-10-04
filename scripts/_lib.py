@@ -470,6 +470,89 @@ def voice_description_present(entry: dict) -> bool:
     return False
 
 
+# ── 確認の候補（speaker_candidate / variant_candidates。P0-4・#7） ──────────
+# analyze-commit が対象ブロックの原文から抽出する「確認待ち」の記録。確定では
+# なく候補（推測で埋めない）。人物表の各キャラに置くほか、該当キャラが無い
+# 異表記候補は characters TOML の work レベル（トップの variant_candidates）に置く。
+#
+# variant_candidates の各要素は原文表記の名前を *_src の欄に持つ。翻訳先の欄を
+# 検査する残渣チェック（detect.zh2ja.find_cn_residue_fields）は *_src の値を
+# 原文側として除外するため、候補の原文表記が残渣と誤検出されない。
+
+def speaker_candidate_blocks(entry: dict) -> list[str]:
+    """`speaker_candidate`（話者の確認候補。ブロックキーのリスト）を返す。無ければ空。"""
+    v = entry.get("speaker_candidate")
+    if not isinstance(v, list):
+        return []
+    return [x.strip() for x in v if isinstance(x, str) and x.strip()]
+
+
+def normalize_variant_candidates(raw) -> list[dict]:
+    """`variant_candidates` の生リストを正規化して返す（壊れた要素は落とす）。
+
+    各要素は `{name_src, similar_to_src, block}`。name_src が無い要素は無効。
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for x in raw:
+        if not isinstance(x, dict):
+            continue
+        name = str(x.get("name_src") or "").strip()
+        if not name:
+            continue
+        out.append({
+            "name_src": name,
+            "similar_to_src": str(x.get("similar_to_src") or "").strip(),
+            "block": str(x.get("block") or "").strip(),
+        })
+    return out
+
+
+def variant_candidates_of(entry: dict) -> list[dict]:
+    """キャラの `variant_candidates`（異表記の確認候補）を正規化して返す。無ければ空。"""
+    return normalize_variant_candidates(entry.get("variant_candidates"))
+
+
+def merge_speaker_candidate(existing, blocks) -> list[str]:
+    """speaker_candidate へブロックを追記する（既存順維持・重複排除・空は無視）。"""
+    out: list[str] = []
+    seen: set[str] = set()
+    for v in (existing if isinstance(existing, list) else []):
+        s = v.strip() if isinstance(v, str) else ""
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    for v in (blocks if isinstance(blocks, list) else [blocks]):
+        s = v.strip() if isinstance(v, str) else ""
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+def merge_variant_candidates(existing, entries) -> list[dict]:
+    """variant_candidates へ候補を追記する。
+
+    重複判定は (name_src, similar_to_src)。既存の順・値を保ち、無いものだけ足す。
+    """
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for v in (existing if isinstance(existing, list) else []):
+        for n in normalize_variant_candidates([v]):
+            key = (n["name_src"], n["similar_to_src"])
+            if key not in seen:
+                seen.add(key)
+                out.append(n)
+    for v in (entries if isinstance(entries, list) else [entries]):
+        for n in normalize_variant_candidates([v]):
+            key = (n["name_src"], n["similar_to_src"])
+            if key not in seen:
+                seen.add(key)
+                out.append(n)
+    return out
+
+
 def _under_work(work: Path, path: Path) -> Path:
     work_r = Path(work).resolve()
     p = Path(path).resolve()

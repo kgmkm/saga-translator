@@ -187,6 +187,156 @@ def _parse_at_block(at_block: str) -> tuple[int, int] | None:
     return None
 
 
+# arcs が持ちうる声の欄（時点解決の対象。表示はこの順。人物ごとに独立）。
+# fmt_arcs と同じ欄＋address（呼び方）。tone は旧欄（speech_style が無いときだけ出す）。
+VOICE_ARC_FIELDS = ("first_person", "second_person", "address", "speech_style",
+                    "vocab", "catchphrase", "tone")
+
+_ARC_FIELD_LABELS = {
+    "first_person": "一人称",
+    "second_person": "二人称",
+    "address": "呼び方",
+    "speech_style": "口調",
+    "vocab": "語彙",
+    "catchphrase": "口癖",
+    "tone": "語調(旧)",
+}
+
+# 対象ブロックの途中で起きた変化の注記（#7b。文言は仕様で固定）
+MID_BLOCK_NOTE = "（このブロックの途中で変化）"
+
+
+def _arc_field_value(arc: dict, field: str):
+    """arc の声の欄の値。空（空文字・空リスト・空テーブル）は None 扱い。"""
+    v = arc.get(field)
+    if isinstance(v, str):
+        return v if v.strip() else None
+    if v is None:
+        return None
+    if isinstance(v, (list, dict)):
+        return v if v else None
+    return v
+
+
+def _compact_arcs(
+    chars: dict,
+    cid: str, bid: str,
+    include_target: bool = False,
+) -> tuple[dict, list[str]]:
+    """compact モード: 対象ブロック時点で有効な声の変化を、欄ごとに累積して出す。
+
+    `at_block <= 対象`（include_target=False では `< 対象`）の各 arc を走査し、
+    声の欄ごとに最新の値を採る。全体の最新1件に潰さない（b1 で一人称、b2 で
+    口調が変われば、b3 には両方が効く。#7b）。対象ブロックの途中で起きた変化
+    （at_block == 対象）も適用し、その欄に `（このブロックの途中で変化）` を付ける。
+
+    戻り値は `{名前: [累積した1件の arc]}` と警告行。arc には声の欄のほか、
+    欄ごとの出所 `field_sources`、途中変化の欄 `mid_block_fields`、注記
+    `arc_notes` を持つ。include_target の既定 False は後方互換（対象より前だけ）。
+    コンテキスト生成（_stage_impl）は True で呼び、対象ブロックの途中の変化も
+    そのブロックに反映する。
+    """
+    target = _block_address(cid, bid)
+    warn_lines: list[str] = []
+    result: dict[str, list[dict]] = {}
+    for c in chars.get("characters", []):
+        if not isinstance(c, dict):
+            continue
+        arcs = c.get("arcs") or []
+        if not isinstance(arcs, list):
+            continue
+        name = c.get("name_ja") or c.get("name_src") or ""
+        applicable: list[tuple[tuple[int, int], str, dict]] = []
+        for a in arcs:
+            if not isinstance(a, dict):
+                continue
+            at_block = a.get("at_block", "")
+            if not at_block:
+                continue
+            parsed = _parse_at_block(at_block)
+            if parsed is None:
+                warn_lines.append(
+                    f"# WARNING: 不正な at_block '{at_block}' "
+                    f"(arc: {a.get('note', '')}) をスキップしました"
+                )
+                continue
+            if parsed < target or (include_target and parsed == target):
+                applicable.append((parsed, at_block, a))
+        if not applicable:
+            continue
+        # 古い順に畳む。同じ欄は後の値で上書きされ、欄ごとの最新値だけが残る。
+        applicable.sort(key=lambda x: x[0])
+        merged: dict = {}
+        sources: dict[str, str] = {}
+        mid_fields: list[str] = []
+        notes: list[tuple[str, str]] = []
+        for parsed, at_block, a in applicable:
+            for field in VOICE_ARC_FIELDS:
+                v = _arc_field_value(a, field)
+                if v is None:
+                    continue
+                merged[field] = v
+                sources[field] = at_block
+                if field in mid_fields:
+                    mid_fields.remove(field)
+                if include_target and parsed == target:
+                    mid_fields.append(field)
+            note = str(a.get("note") or "").strip()
+            if note and (at_block, note) not in notes:
+                notes.append((at_block, note))
+        merged["field_sources"] = sources
+        merged["mid_block_fields"] = mid_fields
+        merged["arc_notes"] = notes
+        result[name] = [merged]
+    return result, warn_lines
+
+
+def _fmt_arc_value(field: str, value) -> str:
+    """累積 arc の欄の値を表示用の文字列にする（address は target→form を連結）。"""
+    if field == "address" and isinstance(value, list):
+        bits = []
+        for a in value:
+            if isinstance(a, dict):
+                tgt = a.get("target_ja") or a.get("target_src") or "?"
+                bits.append(f"{tgt}→{a.get('form', '')}")
+        return " / ".join(bits)
+    return str(value)
+
+
+def fmt_arcs_resolved(resolved: dict) -> str:
+    """時点解決済みの声の変化（_compact_arcs の累積結果）を整形する（#7b）。
+
+    - 欄ごとの最新値だけを出す（全体の最新1件に潰さない）
+    - 出所のブロックを（chNNN/bM〜）で添える
+    - 対象ブロックの途中で変わった欄には（このブロックの途中で変化）を付ける
+    - arc の note は「注記」行にまとめる
+    """
+    blocks_out: list[str] = []
+    for name, arcs in resolved.items():
+        merged = arcs[0] if arcs else {}
+        lines = [f"### {name}"]
+        for field in VOICE_ARC_FIELDS:
+            if field == "tone" and "speech_style" in merged:
+                continue  # 旧 tone は speech_style が無いときだけ（fmt_arcs と同じ）
+            if field not in merged:
+                continue
+            val = _fmt_arc_value(field, merged[field])
+            if not val:
+                continue
+            label = _ARC_FIELD_LABELS.get(field, field)
+            if field in (merged.get("mid_block_fields") or []):
+                lines.append(f"- {label}: {val}{MID_BLOCK_NOTE}")
+            else:
+                src = (merged.get("field_sources") or {}).get(field, "")
+                lines.append(f"- {label}: {val}（{src}〜）")
+        notes = merged.get("arc_notes") or []
+        if notes:
+            lines.append("- 注記: " + " / ".join(f"{b} {n}" for b, n in notes))
+        if len(lines) > 1:
+            blocks_out.append("\n".join(lines))
+    return "\n\n".join(blocks_out) if blocks_out else "(なし)"
+
+
 def _compact_characters(
     chars: dict,
     body_texts: list[str],
@@ -256,37 +406,6 @@ def _compact_terms(
                 seen.add(tid)
                 result.append(t)
     return result
-
-
-def _compact_arcs(
-    chars: dict,
-    cid: str, bid: str,
-) -> tuple[dict, list[str]]:
-    """compact モード: 対象ブロックより前に開始した最新 arc だけを人物ごとに出す。"""
-    target = _block_address(cid, bid)
-    warn_lines: list[str] = []
-    result: dict[str, list[dict]] = {}
-    for c in chars.get("characters", []):
-        arcs = c.get("arcs") or []
-        name = c.get("name_ja") or c.get("name_src") or ""
-        before = []
-        for a in arcs:
-            at_block = a.get("at_block", "")
-            if not at_block:
-                continue
-            parsed = _parse_at_block(at_block)
-            if parsed is None:
-                warn_lines.append(
-                    f"# WARNING: 不正な at_block '{at_block}' "
-                    f"(arc: {a.get('note', '')}) をスキップしました"
-                )
-                continue
-            if parsed < target:
-                before.append(a)
-        if before:
-            before.sort(key=lambda x: _parse_at_block(x.get("at_block", "") or (0, 0)), reverse=True)
-            result[name] = [before[0]]
-    return result, warn_lines
 
 
 def _compact_plot(
@@ -522,13 +641,10 @@ def _stage_impl(
                 "",
             ]
 
-        # arcs 時点解決 (D)
-        compact_arcs_data, arc_warns = _compact_arcs(chars, cid, bid)
+        # arcs 時点解決 (D): 欄ごとに累積し、対象ブロックの途中の変化も反映する（#7b）
+        compact_arcs_data, arc_warns = _compact_arcs(chars, cid, bid, include_target=True)
         arc_count = sum(len(v) for v in compact_arcs_data.values())
-        arcs_display = fmt_arcs({"characters": [
-            {"name_ja": name, "name_src": name, "arcs": arcs}
-            for name, arcs in compact_arcs_data.items()
-        ]})
+        arcs_display = fmt_arcs_resolved(compact_arcs_data)
         if arc_warns:
             lines += arc_warns + [""]
         lines += [
