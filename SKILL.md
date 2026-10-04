@@ -11,7 +11,7 @@ tags: [translation, novel, japanese, pipeline]
 
 小説ファイル（TXT/MD/EPUB）を登場人物ごとの訳語・声を固定し日本語/簡体中国語へ翻訳する（zh→ja / ja→zh）。
 
-- LLM の処理はエージェントのモデル、機械処理は `scripts/`（標準ライブラリのみ）が担う。
+- LLM の処理はエージェントのモデル、機械処理は `scripts/` が担う。標準ライブラリのみで動作し、opencc があると字形変換が自動化される（任意依存。無い環境でも手当て表で動き、テストはスキップを明示する）。
 - 入力言語は ingest が `manifest.lang` に、訳文言語は `manifest.dst` に設定。言語固有の tips は `references/lang_<src>2<dst>.md`。
 - データ構造は `references/data-schema.md`、プロンプト全文は `references/prompt-design.md`。
 - 同一シリーズ複数作品の合本は `references/saga-series.md`（scripts: `build_series_edition.py`）。
@@ -30,6 +30,7 @@ tags: [translation, novel, japanese, pipeline]
 | references/lang_<src>2<dst>.md | — | 言語固有 tips（実在時のみ） |
 | templates/brief_analyze.md | — | 分析委譲ブリーフ |
 | templates/brief_translate.md | — | 翻訳委譲ブリーフ |
+| opencc (opencc-python-reimplemented) | 任意 | 字形変換の自動化。無くても動作 |
 | saga-translator-spicy | 外部 | 成人向け拡張（ユーザー指示時のみ） |
 
 ## 利用条件
@@ -50,7 +51,7 @@ Hermes（Windows の git-bash を含む）で動かす場合はまず `reference
 python3 scripts/ingest.py "入力ファイル"   # --dst ja / --dst zh
 ```
 
-`<入力フォルダ>/_saga/<作品ID>/` 生成。TXT/MD/EPUB 対応。
+`<入力フォルダ>/_saga/<作品ID>/` 生成。TXT/MD/EPUB 対応。manifest にスキル版・コミットを記録する。
 
 ### 2. 章分割・段落採番
 
@@ -125,6 +126,7 @@ python3 scripts/assemble.py <workdir>
 4. **訳語は登場人物表に従う。** 並列翻訳中の新訳語は sidecar へ。親が merge して `rename_terms.py` で伝播。
 5. **ネタバレのあるファイルは `[ネタバレあり]` を名前に含める。** プロット・登場人物表が対象。
 6. **言語 pack を優先。** `references/lang_<src>2<dst>.md` があれば汎用より優先。
+7. **スキルの正本はリポジトリ。** 修正はリポジトリのブランチで行い、実行環境へは `python3 scripts/tools/sync_skill.py --dest <配布先>` で配布する（`--check` で差分検査）。翻訳作業中のエージェントはスキルのファイルを直接修正しない。修正が要るときはバグ報告を出して止まる。作業ディレクトリの manifest には作成時のスキル版とコミットが記録され、版が変わると prepare が警告する。
 
 ## 後からの修正
 
