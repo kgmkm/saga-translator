@@ -348,7 +348,7 @@ def _iter_positions(text: str, needle: str):
 def _in_dst_span(pos: int, length: int, spans) -> bool:
     """出現 [pos, pos+length) が規定訳 dst の出現範囲に完全に含まれるか。
 
-    dst が原語形を含む語（例: 原語「霊環」→ 規定訳「霊環晶」）でも、正しい
+    dst が原語形を含む語（例: 原語「合成語B」→ 規定訳「合成訳B」）でも、正しい
     訳語の内部を「原語形が残っている」と誤検知しないための判定。
     """
     return any(s <= pos and pos + length <= e for s, e in spans)

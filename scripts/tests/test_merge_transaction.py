@@ -107,8 +107,8 @@ class TestMergeDeltaAllOrNothing(unittest.TestCase):
             "block": block,
             "characters_delta": [{"match_key": "name_src", "match_value": "张三",
                                    "name_ja": "チョウサン", "role": "主人公"}],
-            "terms_delta": [{"match_key": "term_src", "match_value": "太清宗",
-                             "term_ja": "太清宗"}],
+            "terms_delta": [{"match_key": "term_src", "match_value": "合成門派A",
+                             "term_ja": "合成門派A"}],
             "plot_delta": [{"block": block, "text": "要点。"}],
         }
 
@@ -120,7 +120,7 @@ class TestMergeDeltaAllOrNothing(unittest.TestCase):
         chars = _lib.load_characters(self.work)
         self.assertTrue(any(c.get("name_src") == "张三" for c in chars["characters"]))
         terms = _lib.load_terms(self.work)
-        self.assertTrue(any(t.get("term_src") == "太清宗" for t in terms["terms"]))
+        self.assertTrue(any(t.get("term_src") == "合成門派A" for t in terms["terms"]))
         plot = _lib.load_plot(self.work)
         self.assertTrue(any(e.get("block") == "ch001/b1" for e in plot["entries"]))
 
@@ -157,8 +157,8 @@ class TestMergeDeltaAllOrNothing(unittest.TestCase):
         _write_delta(d, "ch001/b1",
                      chars=[{"match_key": "name_src", "match_value": "张三",
                              "name_ja": "チョウサン"}],
-                     terms=[{"match_key": "term_src", "match_value": "太清宗",
-                             "term_ja": "太清宗"}],
+                     terms=[{"match_key": "term_src", "match_value": "合成門派A",
+                             "term_ja": "合成門派A"}],
                      plot=[{"block": "ch001/b1", "text": "要点。"}])
         before = _snapshot(self.work)
         meta_before = (self.work / "chapters_meta.toml").read_bytes()

@@ -50,15 +50,15 @@ blocks = [{id="b1", paras=[1,3]}]
     _write(work / "chapters" / "ch001.paras.toml", """\
 [[paras]]
 n = 1
-text = "霊環闪着光。"
+text = "合成語B闪着光。"
 
 [[paras]]
 n = 2
-text = "魅鏡发光。"
+text = "合成語C发光。"
 
 [[paras]]
 n = 3
-text = "触蔓伸长。"
+text = "合成語D伸长。"
 """)
     return work
 
@@ -76,19 +76,19 @@ _VOCAB_TOML = """\
 version = "1"
 
 [[vocab]]
-src = "霊環"
-dst = "霊環晶"
+src = "合成語B"
+dst = "合成訳B"
 kind = "fixed"
 
 [[vocab]]
-src = "魅鏡"
+src = "合成語C"
 src_variants = ["魅镜"]
-dst = "妖鏡"
+dst = "合成訳C"
 kind = "candidates"
 
 [[vocab]]
-src = "触蔓"
-dst = "触蔓"
+src = "合成語D"
+dst = "合成語D"
 kind = "ja_ok"
 
 [[vocab]]
@@ -142,26 +142,26 @@ class TestPriority(_TempBase):
         house = work / "_house" / "house_style.toml"
         terms = work / "analysis" / "terms.toml"
         with _vocab_env(ext):
-            _write(terms, '[[terms]]\nterm_src = "霊環"\nterm_ja = "霊環玉"\n')
+            _write(terms, '[[terms]]\nterm_src = "合成語B"\nterm_ja = "合成語B玉"\n')
             _write(house, _house_style([
                 {"id": "g1", "kind": "goi", "scope": "global",
-                 "pattern": "霊環", "replacement": "霊環石", "status": "approved"},
+                 "pattern": "合成語B", "replacement": "合成語B石", "status": "approved"},
             ]))
             v = vocab.load_vocab(work)
-            e = v.lookup("霊環")
-            self.assertEqual(e.dst, "霊環玉")  # 作品 terms が最上位
+            e = v.lookup("合成語B")
+            self.assertEqual(e.dst, "合成語B玉")  # 作品 terms が最上位
             self.assertEqual(e.origin, "terms")
 
             terms.unlink()
             v = vocab.load_vocab(work)
-            e = v.lookup("霊環")
-            self.assertEqual(e.dst, "霊環石")  # 次に house_style
+            e = v.lookup("合成語B")
+            self.assertEqual(e.dst, "合成語B石")  # 次に house_style
             self.assertEqual(e.origin, "house_style")
 
             house.unlink()
             v = vocab.load_vocab(work)
-            e = v.lookup("霊環")
-            self.assertEqual(e.dst, "霊環晶")  # 最後に拡張
+            e = v.lookup("合成語B")
+            self.assertEqual(e.dst, "合成訳B")  # 最後に拡張
             self.assertEqual(e.origin, "vocab")
 
     def test_house_style_scope_filter(self) -> None:
@@ -169,21 +169,21 @@ class TestPriority(_TempBase):
         work = _make_work(self.td)
         _write(work / "_house" / "house_style.toml", _house_style([
             {"id": "g1", "kind": "goi", "scope": "global",
-             "pattern": "霊環", "replacement": "霊環石", "status": "approved"},
+             "pattern": "合成語B", "replacement": "合成語B石", "status": "approved"},
             {"id": "w1", "kind": "goi", "scope": "work", "target": work.name,
-             "pattern": "魅鏡", "replacement": "妖鏡", "status": "locked"},
+             "pattern": "合成語C", "replacement": "合成訳C", "status": "locked"},
             {"id": "w2", "kind": "goi", "scope": "work", "target": "別作品",
              "pattern": "幽鏡", "replacement": "蒼鏡", "status": "approved"},
             {"id": "c1", "kind": "goi", "scope": "character", "target": "誰か",
-             "pattern": "触蔓", "replacement": "触蔓", "status": "approved"},
+             "pattern": "合成語D", "replacement": "合成語D", "status": "approved"},
             {"id": "g2", "kind": "goi", "scope": "global",
              "pattern": "消えた語", "replacement": "消えた訳", "status": "candidate"},
         ]))
         v = vocab.load_vocab(work)
-        self.assertEqual(v.lookup("霊環").dst, "霊環石")
-        self.assertEqual(v.lookup("魅鏡").dst, "妖鏡")
+        self.assertEqual(v.lookup("合成語B").dst, "合成語B石")
+        self.assertEqual(v.lookup("合成語C").dst, "合成訳C")
         self.assertIsNone(v.lookup("幽鏡"))    # 別作品の scope=work は対象外
-        self.assertIsNone(v.lookup("触蔓"))    # character は対象外（既存の表示と同じ）
+        self.assertIsNone(v.lookup("合成語D"))    # character は対象外（既存の表示と同じ）
         self.assertIsNone(v.lookup("消えた語"))  # candidate は未承認
 
 
@@ -198,10 +198,10 @@ class TestOriginalGlyphIndex(_TempBase):
         ext = _ext_dir(self.td)
         with _vocab_env(ext):
             v = vocab.load_vocab(work)
-            by_variant = v.lookup("魅镜")   # 別字形（見出しは 魅鏡）
-            by_src = v.lookup("魅鏡")
+            by_variant = v.lookup("魅镜")   # 別字形（見出しは 合成語C）
+            by_src = v.lookup("合成語C")
             self.assertIsNotNone(by_variant)
-            self.assertEqual(by_variant.src, "魅鏡")
+            self.assertEqual(by_variant.src, "合成語C")
             self.assertIs(by_variant, by_src)
             self.assertIsNone(v.lookup("存在しない語"))
 
@@ -212,7 +212,7 @@ class TestOriginalGlyphIndex(_TempBase):
         with _vocab_env(ext):
             v = vocab.load_vocab(work)
             selected = v.select_by_source(["ここに魅镜が出る。"])
-            self.assertEqual([e.src for e in selected], ["魅鏡"])
+            self.assertEqual([e.src for e in selected], ["合成語C"])
 
 
 # ── 辞書版 ──────────────────────────────────────────────────────────────
@@ -257,7 +257,7 @@ class TestHouseStylePaths(_TempBase):
         ]))
         _write(p_house, _house_style([
             {"id": "r_parent", "kind": "goi", "scope": "work", "target": work.name,
-             "pattern": "魅鏡", "replacement": "妖鏡", "status": "approved"},
+             "pattern": "合成語C", "replacement": "合成訳C", "status": "approved"},
             # 同じ src は work 側が勝つ
             {"id": "r_parent2", "kind": "goi", "scope": "global",
              "pattern": "幽鏡", "replacement": "別鏡", "status": "approved"},
@@ -266,7 +266,7 @@ class TestHouseStylePaths(_TempBase):
 
         v = vocab.load_vocab(work)
         self.assertEqual(v.lookup("幽鏡").dst, "蒼鏡")  # work 側が優先
-        self.assertEqual(v.lookup("魅鏡").dst, "妖鏡")  # 親側も読める
+        self.assertEqual(v.lookup("合成語C").dst, "合成訳C")  # 親側も読める
 
         # prepare 側（build_context）も同じ関数で2探索先を読む
         from build_context import _load_house_style_rules
@@ -320,9 +320,9 @@ class TestPrepareInsertion(_TempBase):
         ext = _ext_dir(self.td)
         with _vocab_env(ext):
             sec = self._section(self._context(work))
-        self.assertIn("霊環 → 霊環晶 [fixed]", sec)
-        self.assertIn("魅鏡（魅镜） → 妖鏡 [candidates]", sec)
-        self.assertIn("触蔓 → 触蔓 [ja_ok]", sec)
+        self.assertIn("合成語B → 合成訳B [fixed]", sec)
+        self.assertIn("合成語C（魅镜） → 合成訳C [candidates]", sec)
+        self.assertIn("合成語D → 合成語D [ja_ok]", sec)
         self.assertNotIn("幽鏡", sec)  # 原文に出ない語は差し込まない
 
     def test_variant_in_source_is_selected(self) -> None:
@@ -331,7 +331,7 @@ class TestPrepareInsertion(_TempBase):
         _write(work / "chapters" / "ch001.paras.toml", """\
 [[paras]]
 n = 1
-text = "霊環闪着光。"
+text = "合成語B闪着光。"
 
 [[paras]]
 n = 2
@@ -339,24 +339,24 @@ text = "魅镜发光。"
 
 [[paras]]
 n = 3
-text = "触蔓伸长。"
+text = "合成語D伸长。"
 """)
         ext = _ext_dir(self.td)
         with _vocab_env(ext):
             sec = self._section(self._context(work))
-        self.assertIn("魅鏡（魅镜） → 妖鏡 [candidates]", sec)
+        self.assertIn("合成語C（魅镜） → 合成訳C [candidates]", sec)
 
     def test_terms_are_not_duplicated(self) -> None:
         """作品 terms は既存の用語集が扱う（訳語セクションには重複して出さない）。"""
         work = _make_work(self.td)
         _write(work / "analysis" / "terms.toml",
-               '[[terms]]\nterm_src = "魅鏡"\nterm_ja = "妖鏡"\n')
+               '[[terms]]\nterm_src = "合成語C"\nterm_ja = "合成訳C"\n')
         ext = _ext_dir(self.td)
         with _vocab_env(ext):
             ctx = self._context(work)
-        self.assertIn("魅鏡", ctx)          # 用語集には出る
+        self.assertIn("合成語C", ctx)          # 用語集には出る
         sec = self._section(ctx)
-        self.assertNotIn("魅鏡", sec)       # 訳語セクションには出さない
+        self.assertNotIn("合成語C", sec)       # 訳語セクションには出さない
 
     def test_no_vocab_no_section(self) -> None:
         """差し込む語が無ければ何もしない（従来どおり）。"""
@@ -401,7 +401,7 @@ class TestCommitVocab(_TempBase):
         meta = load_chapters_meta(self.work)
         add_ruling(
             self.work, work_id=self.work.name, chapter="ch001", block="b1",
-            paragraph=paragraph, rule_id="vocab:魅鏡",
+            paragraph=paragraph, rule_id="vocab:合成語C",
             src_hash=_analysis_src_hash(self.work, "ch001/b1", meta),
             draft_hash=draft_hash,
             dict_version=vocab.load_vocab(self.work).dict_version(),
@@ -410,27 +410,27 @@ class TestCommitVocab(_TempBase):
 
     def test_fixed_residue_stops(self) -> None:
         """fixed: 原語形が訳文に残る → commit 停止（語と規定訳を出す）。"""
-        _make_draft(self.work, [(1, "霊環が光る。"), (2, "妖鏡を拭く。"), (3, "触蔓が伸びる。")])
+        _make_draft(self.work, [(1, "合成語Bが光る。"), (2, "合成訳Cを拭く。"), (3, "合成語Dが伸びる。")])
         with _vocab_env(self.ext):
             rc, text = self._commit_capture()
         self.assertEqual(rc, 1)
         self.assertIn("残渣(fixed)", text)
-        self.assertIn("霊環", text)
-        self.assertIn("霊環晶", text)
+        self.assertIn("合成語B", text)
+        self.assertIn("合成訳B", text)
         self.assertFalse(self._emitted().exists())
 
     def test_fixed_missing_dst_stops(self) -> None:
         """fixed: 原文に語が出ているのに規定訳が訳文に無い → commit 停止。"""
-        _make_draft(self.work, [(1, "光る石がある。"), (2, "妖鏡を拭く。"), (3, "触蔓が伸びる。")])
+        _make_draft(self.work, [(1, "光る石がある。"), (2, "合成訳Cを拭く。"), (3, "合成語Dが伸びる。")])
         with _vocab_env(self.ext):
             rc, text = self._commit_capture()
         self.assertEqual(rc, 1)
         self.assertIn("残渣(fixed)", text)
-        self.assertIn("霊環晶", text)
+        self.assertIn("合成訳B", text)
         self.assertFalse(self._emitted().exists())
 
     def test_fixed_with_dst_passes(self) -> None:
-        _make_draft(self.work, [(1, "霊環晶が光る。"), (2, "妖鏡を拭く。"), (3, "触蔓が伸びる。")])
+        _make_draft(self.work, [(1, "合成訳Bが光る。"), (2, "合成訳Cを拭く。"), (3, "合成語Dが伸びる。")])
         with _vocab_env(self.ext):
             rc = self._commit()
         self.assertEqual(rc, 0)
@@ -438,13 +438,13 @@ class TestCommitVocab(_TempBase):
 
     def test_candidates_residue_stops(self) -> None:
         """candidates: 原語相当の語が残る → commit 停止。"""
-        _make_draft(self.work, [(1, "霊環晶が光る。"), (2, "魅鏡を拭く。"), (3, "触蔓が伸びる。")])
+        _make_draft(self.work, [(1, "合成訳Bが光る。"), (2, "合成語Cを拭く。"), (3, "合成語Dが伸びる。")])
         with _vocab_env(self.ext):
             rc, text = self._commit_capture()
         self.assertEqual(rc, 1)
         self.assertIn("残渣(candidates)", text)
-        self.assertIn("魅鏡", text)
-        self.assertIn("妖鏡", text)
+        self.assertIn("合成語C", text)
+        self.assertIn("合成訳C", text)
         self.assertFalse(self._emitted().exists())
         # report.json にも辞書の検査結果が残る
         snap_dirs = sorted((self.work / "output" / "_work" / "commit").iterdir())
@@ -454,7 +454,7 @@ class TestCommitVocab(_TempBase):
 
     def test_ja_ok_excluded(self) -> None:
         """ja_ok: 日本語としても正当な語は検査から除外。"""
-        _make_draft(self.work, [(1, "霊環晶が光る。"), (2, "妖鏡を拭く。"), (3, "触蔓が伸びる。")])
+        _make_draft(self.work, [(1, "合成訳Bが光る。"), (2, "合成訳Cを拭く。"), (3, "合成語Dが伸びる。")])
         with _vocab_env(self.ext):
             rc = self._commit()
         self.assertEqual(rc, 0)
@@ -462,7 +462,7 @@ class TestCommitVocab(_TempBase):
 
     def test_candidates_ruling_passes(self) -> None:
         """candidates は全キー一致の裁定記録（rule_id=vocab:<src>）で通過する。"""
-        _make_draft(self.work, [(1, "霊環晶が光る。"), (2, "魅鏡を拭く。"), (3, "触蔓が伸びる。")])
+        _make_draft(self.work, [(1, "合成訳Bが光る。"), (2, "合成語Cを拭く。"), (3, "合成語Dが伸びる。")])
         with _vocab_env(self.ext):
             rc1 = self._commit()
             self.assertEqual(rc1, 1)
@@ -473,7 +473,7 @@ class TestCommitVocab(_TempBase):
 
     def test_candidates_ruling_other_draft_hash_invalid(self) -> None:
         """裁定記録は全キー一致のみ有効（draft_hash が違えば通らない）。"""
-        _make_draft(self.work, [(1, "霊環晶が光る。"), (2, "魅鏡を拭く。"), (3, "触蔓が伸びる。")])
+        _make_draft(self.work, [(1, "合成訳Bが光る。"), (2, "合成語Cを拭く。"), (3, "合成語Dが伸びる。")])
         with _vocab_env(self.ext):
             self.assertEqual(self._commit(), 1)
             self._add_ruling(paragraph=2, draft_hash="000000000000")
@@ -484,8 +484,8 @@ class TestCommitVocab(_TempBase):
     def test_known_terms_waives_candidates(self) -> None:
         """known_terms（作品全体で残す語）に登録すると検査から外れる。"""
         _write(self.work / "_house" / "house_style.toml",
-               _house_style([], residue={"known_terms": ["魅鏡"]}))
-        _make_draft(self.work, [(1, "霊環晶が光る。"), (2, "魅鏡を拭く。"), (3, "触蔓が伸びる。")])
+               _house_style([], residue={"known_terms": ["合成語C"]}))
+        _make_draft(self.work, [(1, "合成訳Bが光る。"), (2, "合成語Cを拭く。"), (3, "合成語Dが伸びる。")])
         with _vocab_env(self.ext):
             rc = self._commit()
         self.assertEqual(rc, 0)
@@ -493,7 +493,7 @@ class TestCommitVocab(_TempBase):
     def test_timeline_reason_stays_residue(self) -> None:
         """辞書だけが止めた場合も timeline の失敗理由は residue のまま。"""
         import json
-        _make_draft(self.work, [(1, "霊環晶が光る。"), (2, "魅鏡を拭く。"), (3, "触蔓が伸びる。")])
+        _make_draft(self.work, [(1, "合成訳Bが光る。"), (2, "合成語Cを拭く。"), (3, "合成語Dが伸びる。")])
         with _vocab_env(self.ext):
             rc = self._commit()
         self.assertEqual(rc, 1)
@@ -523,20 +523,20 @@ class TestAliasAfterPriorityOverride(unittest.TestCase):
         (work / "analysis").mkdir(parents=True)
         # 作品 terms（上位）が拡張の src を上書き
         (work / "analysis" / "terms.toml").write_text(
-            'terms = [{ term_src = "胶液", term_ja = "作品規定訳" }]\n', encoding="utf-8")
+            'terms = [{ term_src = "合成語A", term_ja = "作品規定訳" }]\n', encoding="utf-8")
         ext = td / "ext" / "references"
         ext.mkdir(parents=True)
         (ext / "vocab.toml").write_text(
-            'version = "7"\n\n[[vocab]]\nsrc = "胶液"\nsrc_variants = ["膠液"]\n'
+            'version = "7"\n\n[[vocab]]\nsrc = "合成語A"\nsrc_variants = ["合成語A"]\n'
             'dst = "拡張訳"\nkind = "fixed"\n', encoding="utf-8")
         with mock.patch.dict(os.environ, {"SAGA_VOCAB_PATH": str(ext / "vocab.toml")}):
             v = vocab_mod.load_vocab(work)
-        hit = v.lookup("胶液")
+        hit = v.lookup("合成語A")
         self.assertIsNotNone(hit)
         self.assertEqual(hit.dst, "作品規定訳")      # 上位が勝つ
-        alias = v.lookup("膠液")                      # 別字形の索引は残る
+        alias = v.lookup("合成語A")                      # 別字形の索引は残る
         self.assertIsNotNone(alias, "別字形の索引が上書きで消えた")
-        self.assertEqual(alias.src, "胶液")
+        self.assertEqual(alias.src, "合成語A")
 
 
 if __name__ == "__main__":

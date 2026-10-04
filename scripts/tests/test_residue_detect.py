@@ -166,13 +166,13 @@ class TestFindTermSrcLeftover(unittest.TestCase):
         _write(p, text)
 
     def test_detect_leftover(self):
-        self._write_terms(["心灵共感", "魔力放出"])
-        self._write_output("ch001/chapter_01.md", "彼は心灵共感を使った。\n魔力放出が炸裂する。")
+        self._write_terms(["心灵共感", "技能A"])
+        self._write_output("ch001/chapter_01.md", "彼は心灵共感を使った。\n技能Aが炸裂する。")
         findings = find_term_src_leftover(self.work)
         self.assertGreaterEqual(len(findings), 2)
         values = {f.value for f in findings}
         self.assertIn("心灵共感", values)
-        self.assertIn("魔力放出", values)
+        self.assertIn("技能A", values)
 
     def test_no_leftover(self):
         self._write_terms(["心灵共感"])

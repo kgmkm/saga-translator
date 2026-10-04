@@ -235,14 +235,14 @@ class TestSagaAnalyzeCommit(unittest.TestCase):
         _make_delta_file(d, "ch001/b1",
                          chars=[{"match_key": "name_src", "match_value": "张三",
                                  "name_ja": "チョウサン", "role": "主人公"}],
-                         terms=[{"match_key": "term_src", "match_value": "太清宗",
-                                 "term_ja": "太清宗"}],
+                         terms=[{"match_key": "term_src", "match_value": "合成門派A",
+                                 "term_ja": "合成門派A"}],
                          plot=[{"block": "ch001/b1", "text": "张三登場。"}])
         code, out = self._run_ac(d)
         self.assertEqual(code, 0)
         self.assertIn("3 件マージ", out)
         self._assert_analysis_field("role", "张三", "主人公")
-        self._assert_terms_field("term_ja", "太清宗", "太清宗")
+        self._assert_terms_field("term_ja", "合成門派A", "合成門派A")
         self.assertTrue(self._assert_plot_block("ch001/b1"))
 
     def test_ac_existing_ja_goes_to_proposed(self):
@@ -339,8 +339,8 @@ class TestSagaAnalyzeCommit(unittest.TestCase):
         _make_delta_file(d, "ch001/b1",
                          chars=[{"match_key": "name_src", "match_value": "张三",
                                  "name_ja": "チョウサン", "role": "主人公"}],
-                         terms=[{"match_key": "term_src", "match_value": "太清宗",
-                                 "term_ja": "太清宗"}],
+                         terms=[{"match_key": "term_src", "match_value": "合成門派A",
+                                 "term_ja": "合成門派A"}],
                          plot=[{"block": "ch001/b1", "text": "张三登場。"}])
         code1, _ = self._run_ac(d)
         self.assertEqual(code1, 0)
@@ -349,7 +349,7 @@ class TestSagaAnalyzeCommit(unittest.TestCase):
         _make_delta_file(d2, "ch001/b2",
                          chars=[{"match_key": "name_src", "match_value": "张三",
                                  "name_ja": "ジョウサン"}],
-                         terms=[{"match_key": "term_src", "match_value": "合欢宗",
+                         terms=[{"match_key": "term_src", "match_value": "合成門派B",
                                  "term_ja": "合歓宗"}],
                          plot=[{"block": "ch001/b2", "text": "新展開。"}])
         code2, out2 = self._run_ac(d2)
@@ -361,7 +361,7 @@ class TestSagaAnalyzeCommit(unittest.TestCase):
                 self.assertEqual(c.get("name_ja", ""), "チョウサン")  # 変わらない
                 self.assertIn("proposed", c)
         # terms は新規追加
-        self._assert_terms_field("term_ja", "合欢宗", "合歓宗")
+        self._assert_terms_field("term_ja", "合成門派B", "合歓宗")
 
     def test_idempotent_plot(self):
         """同じ plot delta を2回実行 → 重複しない。"""
