@@ -6,16 +6,44 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _lib import (  # noqa: E402
     all_blocks_emitted, atomic_write_text, chapter_title, direction, load_chapters_meta, load_structured,
-    load_titles, purge_source, save_chapters_meta, target_suffix, target_title, utf8,
+    load_titles, purge_source, save_chapters_meta, save_structured, target_suffix, target_title, utf8,
 )
 from ingest import missing_image_notice, relink_markdown_files, retarget_md_images  # noqa: E402
 
 AGE_REPORT = "age_policy_report-[ネタバレあり].md"
+
+
+def _is_toml_table(v) -> bool:
+    """dump_toml がテーブル([key]/[[key]])として書く値かどうか。"""
+    return isinstance(v, dict) or (
+        isinstance(v, list) and bool(v) and all(isinstance(x, dict) for x in v))
+
+
+def _record_assembled(work: Path, outputs: list[str]) -> None:
+    """完成状態（assembled_at と出力成果物の一覧）を manifest に記録する（#20）。
+
+    status / prepare / review はこの記録で「完成・中間物削除済み」を判定する。
+    既存キー（skill_version 等）はそのまま残す。dump_toml はテーブル以降の
+    スカラーを再読込時にテーブル内へ取り込むため、テーブル化される値は末尾へ
+    回してから追記する（ingest と同じ注意）。
+    """
+    try:
+        man = load_structured(work / "manifest")
+    except (FileNotFoundError, OSError):
+        man = {}
+    scalars = {k: v for k, v in man.items() if not _is_toml_table(v)}
+    tables = {k: v for k, v in man.items() if _is_toml_table(v)}
+    scalars["assembled_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    scalars["assembled_outputs"] = list(outputs)
+    save_structured(work / "manifest", {**scalars, **tables})
+    print(f"[assemble] 完成を記録: assembled_at={scalars['assembled_at']}"
+          f"（出力成果物 {len(outputs)} 件）")
 
 
 def main() -> None:
@@ -46,6 +74,7 @@ def _stage_impl(args: argparse.Namespace) -> None:
     full_tr: list[str] = []
     full_par: list[str] = []
     done_any = False
+    outputs: list[str] = []  # 完成記録に残す出力成果物（work 相対）
 
     for c in meta["chapters"]:
         cid = c["id"]
@@ -79,10 +108,12 @@ def _stage_impl(args: argparse.Namespace) -> None:
         if ch_tr:
             body = "\n\n".join(ch_tr) + "\n"
             atomic_write_text(out / f"{cid}{suf}.md", retarget_md_images(body))
+            outputs.append(f"output/{cid}{suf}.md")
             title = chapter_title(ch_titles.get(cid) or {}, dst, c.get("title") or cid)
             if make_parallel and ch_par:
                 atomic_write_text(out / f"{cid}_parallel.md",
                                   retarget_md_images("\n\n".join(ch_par) + "\n"))
+                outputs.append(f"output/{cid}_parallel.md")
                 toc.append(f"- [{title}]({cid}{suf}.md)（対訳: [{cid}_parallel.md]({cid}_parallel.md)）")
                 full_par.append(f"<!-- {cid} -->\n" + "\n\n".join(ch_par))
             else:
@@ -92,13 +123,16 @@ def _stage_impl(args: argparse.Namespace) -> None:
 
     if done_any:
         atomic_write_text(out / "目次.md", "\n".join(toc) + "\n")
+        outputs.append("output/目次.md")
         full_body = "\n\n".join(full_tr) + "\n"
         if tr_title:
             full_body = f"# {tr_title}\n\n" + full_body
         atomic_write_text(out / "全文_訳文.md", retarget_md_images(full_body))
+        outputs.append("output/全文_訳文.md")
         print(f"[assemble] 目次/全文を出力: {out / '目次.md'}")
         if make_parallel and full_par:
             atomic_write_text(out / "全文_対訳.md", retarget_md_images("\n\n".join(full_par) + "\n"))
+            outputs.append("output/全文_対訳.md")
             why = "--parallel" if args.parallel else f"年齢正規化の記録({AGE_REPORT})"
             print(f"[assemble] 対訳を出力: {out / '全文_対訳.md'} ({why})")
     else:
@@ -121,6 +155,9 @@ def _stage_impl(args: argparse.Namespace) -> None:
     if all_blocks_emitted(work, meta) and not args.keep_source:
         removed = purge_source(work, keep_parallel=make_parallel)
         print(f"[assemble] 原文・中間物を削除 ({len(removed)}): " + ", ".join(removed[:12]) + ("…" if len(removed) > 12 else ""))
+        # 全ブロック確定の assemble が通った = 「完成・中間物削除済み」。
+        # status / prepare / review の誤認防止のため manifest に記録する（#20）。
+        _record_assembled(work, outputs)
     elif args.keep_source:
         print("[assemble] --keep-source: 原文を残した")
 

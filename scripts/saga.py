@@ -113,6 +113,22 @@ def _next_work(chapters: list[dict]) -> str | None:
     return None
 
 
+def _assembled_state(work: Path) -> tuple[str | None, list[str]]:
+    """manifest の assemble 完成記録を読む: (assembled_at, 出力成果物の一覧)。
+
+    assemble が「完成・中間物削除済み」に達した work だけが記録を持つ（#20）。
+    記録が無い・読めない work では (None, []) を返し、既存の進捗判定を使う。
+    """
+    try:
+        man = load_structured(work / "manifest")
+    except Exception:
+        return None, []
+    at = man.get("assembled_at")
+    outs = man.get("assembled_outputs")
+    return (str(at) if at else None), (
+        [str(x) for x in outs if x] if isinstance(outs, list) else [])
+
+
 def cmd_status(work: Path) -> int:
     started = time.time()
     rc = _cmd_status_impl(work)
@@ -137,6 +153,19 @@ def _cmd_status_impl(work: Path) -> int:
     if not chapters:
         print(f"[status] エラー: chapters が空です", file=sys.stderr)
         return 1
+
+    assembled_at, assembled_outputs = _assembled_state(work)
+    if assembled_at:
+        # assemble 済み: 中間物は削除済みで、ブロック別出力による進捗数は
+        # 未完了に見えてしまう。完成状態を明示して誤認を防ぐ（#20）。
+        print(f"[status] work={work.name}: 完成（assemble 済み・中間物削除済み）")
+        print(f"[status] assembled_at: {assembled_at}")
+        if assembled_outputs:
+            shown = ", ".join(assembled_outputs[:8]) + ("…" if len(assembled_outputs) > 8 else "")
+            print(f"[status] 出力成果物 ({len(assembled_outputs)}): {shown}")
+        print("[status] 次の作業: なし（完成済み。改訂するには対象ブロックを"
+              " commit --revise で確定し直して再 assemble）")
+        return 0
 
     a_done, a_total, a_warns = _status_analysis(work, chapters)
     t_done, t_total, t_warns = _status_translation(work, chapters)
@@ -775,6 +804,17 @@ def _cmd_prepare_locked(work: Path, chapter: str | None, block: str | None,
         man = load_structured(work / "manifest")
     except (FileNotFoundError, OSError):
         man = {}
+
+    # assemble 済み（完成・中間物削除済み）の work は、未確定ブロックが残って
+    # いるように見えても黙って続行しない。案内を出して非ゼロで停止する（#20）。
+    assembled_at = str(man.get("assembled_at") or "")
+    if assembled_at:
+        print(f"[prepare] エラー: この work は assemble 済みです（assembled_at: {assembled_at}）。"
+              f"完成・中間物削除済みのため、未完了として続行しません", file=sys.stderr)
+        print("[prepare] 改訂するには、対象ブロックのドラフトを output/_work/ に置いて"
+              " commit --revise で確定し直し、再 assemble してください", file=sys.stderr)
+        return 1
+
     recorded = man.get("skill_version")
     running = read_skill_version(SKILL_ROOT)
     if recorded and running and str(recorded) != str(running):
@@ -1369,6 +1409,52 @@ def _list_committed_blocks(work: Path) -> list[tuple[str, str]]:
     return blocks
 
 
+def _list_audited_blocks(work: Path) -> list[tuple[str, str]]:
+    """assemble 後の work で、残した監査記録から確定ブロックを列挙する（#20）。
+
+    ブロック別出力は中間物として削除済みのため、output/_work/commit/ の
+    report.json（commit の報告）を使う。監査記録を残す前の assemble で
+    作られた work では、chapters_meta の emit 済み記録で代用する。
+    """
+    found: set[tuple[str, str]] = set()
+    commit_dir = work / "output" / "_work" / "commit"
+    if commit_dir.is_dir():
+        for entry in commit_dir.iterdir():
+            rp = entry / "report.json"
+            if not entry.is_dir() or not rp.is_file():
+                continue
+            try:
+                data = json.loads(rp.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            cid = str(data.get("chapter") or "")
+            bid = str(data.get("block") or "")
+            if cid and bid:
+                found.add((cid, bid))
+
+    try:
+        meta = load_chapters_meta(work)
+    except Exception:
+        meta = None
+    if not found and meta is not None:
+        for ch in meta.get("chapters", []):
+            for b in ch.get("blocks", []):
+                if b.get("status") == "emitted" or b.get("emitted_at"):
+                    found.add((str(ch.get("id") or ""), str(b.get("id") or "")))
+
+    if meta is not None:
+        ordered: list[tuple[str, str]] = []
+        for ch in meta.get("chapters", []):
+            cid = str(ch.get("id") or "")
+            for b in ch.get("blocks", []):
+                key = (cid, str(b.get("id") or ""))
+                if key in found:
+                    ordered.append(key)
+        if ordered:
+            return ordered
+    return sorted(found)
+
+
 def _scrape_commit_reports(work: Path, blocks: list[tuple[str, str]]) -> list[dict]:
     """各確定ブロックの report.json を _work/commit/ から収集。"""
     reports: list[dict] = []
@@ -1546,8 +1632,14 @@ def _cmd_review_impl(work: Path, wave: int = 1, sample_ratio: float = 0.1,
         print(f"[review] エラー: ディレクトリが見つかりません: {work}", file=sys.stderr)
         return 1
 
-    # 確定ブロック
+    # 確定ブロック。assemble 後はブロック別出力が purge 済みのため、
+    # 残した監査記録（commit の report.json）から復元して読む（#20）。
     blocks = _list_committed_blocks(work)
+    assembled_at, _assembled_outputs = _assembled_state(work)
+    from_audit = False
+    if not blocks and assembled_at:
+        blocks = _list_audited_blocks(work)
+        from_audit = bool(blocks)
     if not blocks:
         print(f"[review] エラー: 確定済みブロックがありません", file=sys.stderr)
         return 1
@@ -1660,6 +1752,11 @@ def _cmd_review_impl(work: Path, wave: int = 1, sample_ratio: float = 0.1,
     print(f"[review] リスク箇所: {len(risk_items)}件 ({_fmt(risk_items)})")
     print(f"[review] 抜き取り: {len(sample_items)}段落 ({_fmt(sample_items)})")
     print(f"[review] 検収対象ファイル: {rev_path}")
+    if assembled_at:
+        print(f"[review] assemble 済み（assembled_at={assembled_at}）")
+        if from_audit:
+            print(f"[review] ブロック別出力は削除済み。残した監査記録 {len(reports)} 件"
+                  f"（output/_work/commit/）から読み取りました")
 
     return 0
 

@@ -436,7 +436,8 @@ def all_blocks_emitted(work: Path, meta: dict) -> bool:
 
 def purge_source(work: Path, keep_parallel: bool = False) -> list[str]:
     """全ブロック確定後に原文と中間物を消す。入力元ファイルは触らない。
-    残す: 訳文(章/全文/目次)、analysis、manifest、output/images、chapters_meta、logs。
+    残す: 訳文(章/全文/目次)、analysis、manifest、output/images、chapters_meta、logs、
+    output/_work/done(確定ドラフト)と output/_work/commit(監査記録。#20)。
     keep_parallel=True のときは output/ 直下の対訳(全文_対訳.md・章対訳)も残す。"""
     work = Path(work).resolve()
     if not (work / "manifest.toml").exists() and not (work / "manifest.json").exists() and not (work / "chapters_meta.toml").exists() and not (work / "chapters_meta.json").exists():
@@ -454,19 +455,25 @@ def purge_source(work: Path, keep_parallel: bool = False) -> list[str]:
         removed.append(rel.replace("\\", "/"))
 
     for rel in ("originals", "translation_input", "chapters", "output/_work", "output/_done", "output/_qa"):
-        # commit が確定ドラフトを _work/done/ にアーカイブする（レビュー P3-2。
-        # emit 後の検証・時間分析・復元に使う）。done は消さずに退避して戻す。
+        # commit が確定ドラフトを _work/done/ へアーカイブし、監査記録（commit の
+        # 報告・段落対応スナップショット）を _work/commit/ に残す（レビュー P3-2・#20。
+        # emit 後の検証・時間分析・復元と、assemble 後の status/prepare/review に使う）。
+        # どちらも消さずに退避して戻す（done 退避の既存契約は維持）。
         if rel == "output/_work":
-            done_p = work / "output" / "_work" / "done"
-            if done_p.is_dir():
-                keep = work / "output" / "_work_done_keep"
+            keep_names = ("done", "commit")
+            moving = [(n, work / "output" / "_work" / n) for n in keep_names]
+            moving = [(n, p) for n, p in moving if p.is_dir()]
+            if moving:
+                keep = work / "output" / "_work_keep"
                 if keep.exists():
                     shutil.rmtree(keep)
                 keep.mkdir(parents=True)
-                shutil.move(str(done_p), str(keep / "done"))
+                for n, p in moving:
+                    shutil.move(str(p), str(keep / n))
                 rm(rel)
                 (work / "output" / "_work").mkdir(parents=True, exist_ok=True)
-                shutil.move(str(keep / "done"), str(done_p))
+                for n, _p in moving:
+                    shutil.move(str(keep / n), str(work / "output" / "_work" / n))
                 shutil.rmtree(keep, ignore_errors=True)
                 continue
         rm(rel)
