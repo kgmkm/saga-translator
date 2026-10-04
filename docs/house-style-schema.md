@@ -18,6 +18,7 @@
 | `created_at` | 文字列 | yes | ISO 8601 UTC（例: `2026-10-03T12:00:00Z`） |
 | `updated_at` | 文字列 | yes | 同上。エントリ追加時・更新時に書き換える |
 | `rules` | 配列 of テーブル | yes | ハウススタイルルールの配列 |
+| `naming_policy` | テーブル | no | 命名方針（下記 `[naming_policy]` 節を参照） |
 
 ## `[[rules]]` エントリ
 
@@ -66,6 +67,21 @@
 | `approved` | ユーザーまたはレビューで承認済み |
 | `locked` | 確定。変更には改めてレビューが必要 |
 
+## `[naming_policy]`（命名方針・任意）
+
+固有名（人名など）の扱い方の決定を記録する。`lock_prep` が「固有名の扱い（命名方針）」の一覧を出力し、扱いが混在していれば「要確認」として提示する（混在は機械には誤りと判定させない。作者が意図して付けた名前もありうる）。決めた方針をここに記録する。
+
+未訳のブロックが残っている作品では、次のブロックを確定する前に方針を決める（`saga.py status` が「命名方針: 未決定」を表示する）。続編では `carry_analysis` が前作の `[naming_policy]` を引き継ぎ、「前作の方針: …（このまま進めるか確認）」として表示する。
+
+| キー | 型 | 必須 | 説明 |
+|------|-----|------|------|
+| `style` | 文字列 | yes | `transliterate`（音訳・カタカナ）/ `sinitic`（漢語のまま）/ `mixed`（混在。意図的な併用）のいずれか |
+| `note` | 文字列 | no | 理由・言語圏の系統（例: 洋風世界観のため名も姓も音訳、言語圏を揃える） |
+| `scope` | 文字列 | yes | `work` / `series` のいずれか。人名の裁定は両作品に同時適用される前提のため `series` を推奨 |
+| `decided_at` | 文字列 | yes | 決定日時。ISO 8601 UTC（例: `2026-10-05T12:00:00Z`） |
+
+`[naming_policy]` はテーブル（`[[rules]]` ではない）。lock_prep の「要確認」は確認の候補であり、方針が記録されれば表示されなくなる。方針の記録は `house_style.py validate` の必須キー（`rules` 等）には影響しない（`[naming_policy]` は任意）。
+
 ## 設計の原則
 
 1. **自動採用しない**: `house_style.py build` は `status: candidate` の候補を列挙するだけ。既存の `house_style.toml` に書き込まない。
@@ -89,6 +105,12 @@ rationale = "VFM形式のルビで統一する"
 status = "approved"
 version = 1
 evidence = ["ch001/b1", "ch001/b3"]
+
+[naming_policy]
+style = "transliterate"
+note = "洋風世界観のため名も姓も音訳。言語圏の系統を揃える"
+scope = "series"
+decided_at = "2026-10-05T12:00:00Z"
 ```
 
 ## 非互換変更のルール

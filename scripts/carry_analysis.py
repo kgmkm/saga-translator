@@ -10,17 +10,21 @@ analysis/ に置いてから分析を始める。エージェントはこれを�
   (前作のブロック番号のままだと、現作の同じ番号のブロックで誤適用される)
 - 現作に既に同じ name_src / term_src があれば現作を優先し、空欄だけ前作で埋める
 - --replace で現作側の同種ファイルを引き継ぎ内容で作り直す
+- [naming_policy]（命名方針）も引き継ぐ（現作が未決定のときだけ。P0-5）
 """
 from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _lib import (  # noqa: E402
     VOICE_STATUS_DEFAULT,
+    atomic_write_text,
     characters_toml_path,
+    dump_toml,
     load_toml,
     save_toml,
     utf8,
@@ -127,6 +131,104 @@ def _merge_items(prev_items: list, cur_items: list, key: str, fields: tuple, not
     return [by_key[k] for k in order], added, filled
 
 
+# ── 命名方針（P0-5） ──────────────────────────────────────────────
+
+
+def _find_naming_policy(work: Path) -> tuple[dict | None, Path | None]:
+    """house_style.toml（共通探索先）から [naming_policy] を探す。
+
+    戻り値: (方針, 見つかったファイル)。無ければ (None, None)。
+    """
+    from vocab import house_style_paths
+
+    for p in house_style_paths(work):
+        try:
+            data = load_toml(p)
+        except Exception:
+            continue
+        pol = data.get("naming_policy")
+        if isinstance(pol, dict) and str(pol.get("style") or "").strip():
+            return pol, p
+    return None, None
+
+
+def _naming_target_path(work: Path) -> Path:
+    """引き継ぎ先の house_style.toml。
+
+    作品側（work/_house）が既にあればそれを使う。無ければ、スキーマ文書の
+    置き場である親側（work.parent/_house）に作る。
+    """
+    work_side = work / "_house" / "house_style.toml"
+    if work_side.is_file():
+        return work_side
+    return work.parent / "_house" / "house_style.toml"
+
+
+def _write_naming_policy(path: Path, policy: dict) -> None:
+    """house_style.toml に [naming_policy] を書く（既存の内容は保つ）。
+
+    - ファイルが無い: 最小の house_style として新規作成する
+    - [naming_policy] が無い: 末尾に追記する（既存の本文・コメントを変えない）
+    - 既にある: その欄だけを置き換える
+    """
+    if not path.is_file():
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        atomic_write_text(path, dump_toml({
+            "version": 1,
+            "created_at": now,
+            "updated_at": now,
+            "rules": [],
+            "naming_policy": dict(policy),
+        }))
+        return
+    data = load_toml(path)
+    if "naming_policy" in data:
+        data["naming_policy"] = dict(policy)
+        save_toml(path, data)
+        return
+    text = path.read_text(encoding="utf-8")
+    if text and not text.endswith("\n"):
+        text += "\n"
+    block = dump_toml({"naming_policy": dict(policy)}).rstrip() + "\n"
+    atomic_write_text(path, text + "\n" + block)
+
+
+def _carry_naming_policy(work: Path, prev: Path) -> None:
+    """前作の [naming_policy] を現作へ引き継ぐ（P0-5）。
+
+    - 前作に記録が無ければ何もしない
+    - 現作で決定済みならコピーしない（現作を優先）
+    - 現作が未決定なら「前作の方針: …（このまま進めるか確認）」を表示したうえで、
+      現作の house_style にコピーする（人が確認・修正できるようにするため）
+    """
+    prev_pol, _ = _find_naming_policy(prev)
+    cur_pol, _ = _find_naming_policy(work)
+    if prev_pol is None:
+        print("[carry] 命名方針: 前作に [naming_policy] の記録はありません")
+        return
+    if cur_pol is not None:
+        print(f"[carry] 命名方針: 現作で決定済み（style={str(cur_pol.get('style') or '')}）。"
+              "前作の記録からのコピーは行いません")
+        return
+    style = str(prev_pol.get("style") or "").strip()
+    scope = str(prev_pol.get("scope") or "").strip()
+    note = str(prev_pol.get("note") or "").strip()
+    detail = ", ".join(x for x in (
+        f"scope={scope}" if scope else "",
+        f"note={note}" if note else "",
+    ) if x)
+    suffix = f"（{detail}）" if detail else ""
+    print(f"[carry] 前作の方針: {style}{suffix}（このまま進めるか確認）")
+    target = _naming_target_path(work)
+    try:
+        _write_naming_policy(target, prev_pol)
+    except Exception as e:
+        print(f"[carry] 警告: 命名方針を house_style へコピーできませんでした"
+              f"（手動で記録してください）: {e}")
+        return
+    print(f"[carry] 命名方針を現作の house_style へコピーしました: {target}")
+
+
 def main() -> None:
     utf8()
     ap = argparse.ArgumentParser(description="前作の分析を現作へ引き継ぐ")
@@ -176,6 +278,10 @@ def main() -> None:
     print(f"[carry] from={prev} title=『{title}』")
     print(f"[carry] characters: {len(merged_c)}件 (追加{added_c} / 空欄補完{filled_c}) -> {dst_c}")
     print(f"[carry] terms:      {len(merged_t)}件 (追加{added_t} / 空欄補完{filled_t}) -> {dst_t}")
+
+    # 命名方針（P0-5）: 前作の [naming_policy] を現作の house_style 候補として引き継ぐ
+    _carry_naming_policy(work, prev)
+
     print("[carry] 以降の分析は引き継いだ訳語・声を確定値として扱い、変化だけ arcs に追記すること")
 
 

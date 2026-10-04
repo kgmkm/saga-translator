@@ -141,6 +141,24 @@ def _cap_list(items: list[str], cap: int = 8) -> str:
     return shown
 
 
+def _naming_policy_of(work: Path) -> dict | None:
+    """house_style.toml（共通探索先）の [naming_policy] を読む（無ければ None）。
+
+    命名方針の未決定警告（P0-5）に使う。探索先は #19 の house_style_paths
+    （work/_house → work.parent/_house）。
+    """
+    from vocab import house_style_paths
+
+    for p in house_style_paths(work):
+        data = _load_toml_safe(p)
+        if not isinstance(data, dict):
+            continue
+        pol = data.get("naming_policy")
+        if isinstance(pol, dict) and str(pol.get("style") or "").strip():
+            return pol
+    return None
+
+
 def _status_pending_analysis(work: Path) -> list[str]:
     """status の「分析の確認待ち」節（P0-4・#7）。
 
@@ -280,6 +298,12 @@ def _cmd_status_impl(work: Path) -> int:
         print(f"[status] 次の作業: 分析（未分析ブロックあり）")
     else:
         print(f"[status] 次の作業: なし（全ブロック完了）")
+
+    # 命名方針の未決定警告（P0-5）: lock_prep 済みで方針が未記録のまま、未訳
+    # ブロックが残っている work では、次の確定の前に決めるよう促す。分析の1周を
+    # 待つと、古い訳語で続きが書かれてしまう。決定は house_style の [naming_policy]。
+    if t_done < t_total and _analysis_phase_active(work) and _naming_policy_of(work) is None:
+        print("[status] 命名方針: 未決定（未訳ブロック残。次の確定前に決めてください）")
 
     if stale_active:
         print(f"[status] 再 assemble が必要（改名により stale）: derivatives_stale_at={stale_at}")
