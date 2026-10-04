@@ -1239,3 +1239,76 @@ def release_lock(work) -> None:
         path.unlink()
     except OSError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# 改名の確定後契約の補助（stale の記録と監査記録。P0-6・#22）
+#
+# 改名（rename_terms --apply）は正本と対訳の訳文側を更新し、派生物（章訳文・
+# 全文訳文・対訳・合本）は書き換えず再生成対象として stale 化する。変更した
+# 段落を含むブロックの検査記録（draft_hash）も stale になるため、chapters_meta
+# の該当 block に印を付け、status / review は stale を「最新・検収済み」と
+# 扱わない。監査記録（_work/renames.jsonl）は purge しない。
+# ---------------------------------------------------------------------------
+
+STALE_AFTER_RENAME_KEY = "stale_after_rename"
+DERIVATIVES_STALE_AT_KEY = "derivatives_stale_at"
+
+
+def stale_after_rename_blocks(meta: dict | None) -> list[str]:
+    """chapters_meta から改名後 stale のブロックキー（`<ch>/<b>`）を列挙する。
+
+    改名が訳文を変更したブロックに `stale_after_rename = true` が付く。
+    status / review はこの印の付いたブロックを「最新・検収済み」と扱わない。
+    順序は chapters_meta の並び。
+    """
+    out: list[str] = []
+    for ch in (meta or {}).get("chapters", []) or []:
+        cid = ch.get("id")
+        for b in ch.get("blocks", []) or []:
+            if isinstance(b, dict) and b.get(STALE_AFTER_RENAME_KEY):
+                out.append(f"{cid}/{b.get('id')}")
+    return out
+
+
+def _is_toml_table_value(v) -> bool:
+    """dump_toml がテーブル([key]/[[key]])として書く値か（assemble と同じ規則）。"""
+    return isinstance(v, dict) or (
+        isinstance(v, list) and bool(v) and all(isinstance(x, dict) for x in v))
+
+
+def derivatives_stale_at(work) -> str | None:
+    """manifest の `derivatives_stale_at`（派生物の stale 記録）を返す。無ければ None。"""
+    try:
+        man = load_structured(Path(work) / "manifest")
+    except (FileNotFoundError, OSError):
+        return None
+    v = man.get(DERIVATIVES_STALE_AT_KEY)
+    return str(v) if v else None
+
+
+def mark_derivatives_stale(work, when: str | None = None) -> str:
+    """manifest に派生物の stale を記録する（`derivatives_stale_at`）。
+
+    章訳文・全文訳文・対訳・合本などの派生物は改名では書き換えず、再 assemble で
+    再生成する。既存キーはそのまま残し、テーブル化される値は末尾へ回してから
+    追記する（dump_toml の再読込規則。assemble と同じ注意）。戻り値: 記録した時刻。
+    """
+    ts = when or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        man = load_structured(Path(work) / "manifest")
+    except (FileNotFoundError, OSError):
+        man = {}
+    scalars = {k: v for k, v in man.items() if not _is_toml_table_value(v)}
+    tables = {k: v for k, v in man.items() if _is_toml_table_value(v)}
+    scalars[DERIVATIVES_STALE_AT_KEY] = ts
+    save_structured(Path(work) / "manifest", {**scalars, **tables})
+    return ts
+
+
+def append_jsonl(path: Path, obj) -> None:
+    """JSON Lines へ1行追記する（監査記録。既存行は書き換えない）。"""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")

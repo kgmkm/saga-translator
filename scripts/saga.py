@@ -16,10 +16,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from _lib import (  # noqa: E402
     VOICE_STATUSES, acquire_lock, atomic_write_text, block_meta, block_paras, block_src_hash,
-    character_aliases, direction, dump_toml, load_chapters_meta, load_characters, load_paras,
+    character_aliases, derivatives_stale_at, direction, dump_toml, load_chapters_meta,
+    load_characters, load_paras,
     load_plot, load_structured, load_terms, load_toml, merge_speaker_candidate,
     merge_variant_candidates, normalize_variant_candidates, read_skill_version, record_timeline,
-    release_lock, save_chapters_meta, save_toml, sha12, speaker_candidate_blocks, target_suffix,
+    release_lock, save_chapters_meta, save_toml, sha12, speaker_candidate_blocks,
+    stale_after_rename_blocks, target_suffix,
     timed_stage, utf8, variant_candidates_of, voice_description_present, voice_status_of,
 )
 
@@ -222,6 +224,11 @@ def _cmd_status_impl(work: Path) -> int:
         return 1
 
     assembled_at, assembled_outputs = _assembled_state(work)
+    # 改名後の stale（派生物の再生成と検査記録の再検収が必要。P0-6・#22）。
+    # 再 assemble の記録が stale より新しければ解消済みとして扱う。
+    stale_at = derivatives_stale_at(work)
+    stale_active = bool(stale_at) and not (assembled_at and assembled_at > stale_at)
+    stale_blocks = stale_after_rename_blocks(meta) if stale_active else []
     if assembled_at:
         # assemble 済み: 中間物は削除済みで、ブロック別出力による進捗数は
         # 未完了に見えてしまう。完成状態を明示して誤認を防ぐ（#20）。
@@ -230,8 +237,14 @@ def _cmd_status_impl(work: Path) -> int:
         if assembled_outputs:
             shown = ", ".join(assembled_outputs[:8]) + ("…" if len(assembled_outputs) > 8 else "")
             print(f"[status] 出力成果物 ({len(assembled_outputs)}): {shown}")
-        print("[status] 次の作業: なし（完成済み。改訂するには対象ブロックを"
-              " commit --revise で確定し直して再 assemble）")
+        if stale_active:
+            print(f"[status] 再 assemble が必要（改名により stale）: derivatives_stale_at={stale_at}")
+            if stale_blocks:
+                print(f"[status]   改名 stale ブロック: {_cap_list(stale_blocks)}")
+            print("[status] 次の作業: 再 assemble（改名により stale）")
+        else:
+            print("[status] 次の作業: なし（完成済み。改訂するには対象ブロックを"
+                  " commit --revise で確定し直して再 assemble）")
         return 0
 
     a_done, a_total, a_warns = _status_analysis(work, chapters)
@@ -267,6 +280,11 @@ def _cmd_status_impl(work: Path) -> int:
         print(f"[status] 次の作業: 分析（未分析ブロックあり）")
     else:
         print(f"[status] 次の作業: なし（全ブロック完了）")
+
+    if stale_active:
+        print(f"[status] 再 assemble が必要（改名により stale）: derivatives_stale_at={stale_at}")
+        if stale_blocks:
+            print(f"[status]   改名 stale ブロック: {_cap_list(stale_blocks)}")
 
     if all_warns:
         print("[status] 警告:")
@@ -2320,6 +2338,14 @@ def _cmd_review_impl(work: Path, wave: int = 1, sample_ratio: float = 0.1,
         print(f"[review] エラー: 確定済みブロックがありません", file=sys.stderr)
         return 1
 
+    # 改名 stale（再検収が必要なブロック）。status / review は stale を
+    # 「最新・検収済み」と扱わない（P0-6・#22）。
+    try:
+        _meta = load_chapters_meta(work)
+    except Exception:
+        _meta = None
+    stale_blocks = stale_after_rename_blocks(_meta) if _meta else []
+
     # 1) 機械の指摘
     reports = _scrape_commit_reports(work, blocks)
     findings = _extract_machine_findings(reports)
@@ -2354,6 +2380,15 @@ def _cmd_review_impl(work: Path, wave: int = 1, sample_ratio: float = 0.1,
         f"生成: {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
         "",
     ]
+
+    # 改名 stale（再 assemble と再検収が必要。検収済みとして扱わない）
+    rev_lines.append(f"## 0. 改名により stale（再検収が必要）（{len(stale_blocks)}件）")
+    if stale_blocks:
+        for b in stale_blocks:
+            rev_lines.append(f"- {b}: 改名後に再検収が必要（再 assemble → 該当ブロックを再確認）")
+    else:
+        rev_lines.append("（なし）")
+    rev_lines.append("")
 
     # 機械指摘
     rev_lines.append(f"## 1. 機械の指摘（{len(machine_items)}件）")
@@ -2412,6 +2447,7 @@ def _cmd_review_impl(work: Path, wave: int = 1, sample_ratio: float = 0.1,
             "total_blocks": len(blocks),
             "seed": seed,
             "limitation": REVIEW_LIMITATION,
+            "stale_blocks": stale_blocks,
             "machine_items": machine_items,
             "risk_items": risk_items,
             "sample_items": sample_items,
@@ -2429,6 +2465,8 @@ def _cmd_review_impl(work: Path, wave: int = 1, sample_ratio: float = 0.1,
 
     print(f"[review] {REVIEW_LIMITATION}")
     print(f"[review] wave {wave}: 対象 {len(blocks)} ブロック")
+    if stale_blocks:
+        print(f"[review] 改名により stale（要再検収）: {len(stale_blocks)}件 ({_cap_list(stale_blocks)})")
     print(f"[review] 機械指摘: {len(machine_items)}件 ({_fmt(machine_items)})")
     print(f"[review] リスク箇所: {len(risk_items)}件 ({_fmt(risk_items)})")
     print(f"[review] 抜き取り: {len(sample_items)}段落 ({_fmt(sample_items)})")
