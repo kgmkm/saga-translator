@@ -250,7 +250,7 @@ class TestQa(unittest.TestCase):
         self.assertGreaterEqual(found[0]["count"], 3)
 
     def test_qa_merged_two_paragraphs_warn(self):
-        # 2段落の融合は警告(不合格にはしない)
+        # 2段落の融合も境界を消すため不合格（stage6 で fatal 化。旧「警告のみ」から契約変更）
         from qa_translation import run_qa
         draft = self.tmp / "draft.md"
         draft.write_text(
@@ -258,7 +258,8 @@ class TestQa(unittest.TestCase):
             encoding="utf-8")
         report, _ = run_qa(self.tmp, "ch001", "b1", draft)
         self.assertTrue(report["checks"]["merged_paragraphs"]["found"])
-        self.assertTrue(report["pass"])
+        self.assertFalse(report["checks"]["merged_paragraphs"]["pass"])
+        self.assertFalse(report["pass"])
 
     def test_qa_song_within_paragraph_not_merged(self):
         # 1段落内の複数行(歌・詩)は段落融合ではない
