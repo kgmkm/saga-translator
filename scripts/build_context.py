@@ -13,6 +13,13 @@ from _lib import (  # noqa: E402
 )
 
 
+# prepare が出すコンテキストの冒頭に置く、段落をまたぐ台詞の引用閉じ規則（P0-1）。
+# 文言は仕様で固定（改変禁止）。引用を開いたまま段落を終えると layout_lines が
+# 段落の区切りを消して連結する（qa の merged_paragraphs が検出して commit を止める）。
+QUOTE_RULE = "【段落の引用の閉じ方】段落をまたぐ台詞でも、その段落の終わりで 」 を閉じる。次の段落では 「 を開き直す。引用を開いたまま段落を終えないこと。"
+QUOTE_RULE_EXAMPLE = "（例: 会話が2段落に続くとき、1段落目の終わりに 」 だけを置いて閉じる）"
+
+
 def load_analysis(work: Path) -> tuple[dict, dict, dict]:
     return load_characters(work), load_terms(work), load_plot(work)
 
@@ -432,6 +439,10 @@ def _stage_impl(
         work_line += f" / 原題: {src_title}"
     lines = [
         f"# 翻訳コンテキスト: {cid} / {bid}(モード: {mode})",
+        "",
+        # 段落をまたぐ台詞の閉じ漏れ対策（P0-1）: 冒頭で閉じ方を明示する。
+        QUOTE_RULE,
+        QUOTE_RULE_EXAMPLE,
         "",
         work_line,
     ]

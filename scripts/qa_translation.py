@@ -146,10 +146,24 @@ def run_qa(work: Path, cid: str, bid: str, draft: Path, strict: bool = True) -> 
         if non_jis:
             ok = False
 
+    # [Pn] の境界を1つでも消す融合は原文と1対1の原則を壊すため、全て fatal にする
+    # （2段落の融合も通過させない）。同一 [Pn] 内の複数行（歌・詩・折り返し）は
+    # 境界を消さないため検出対象外。失敗理由の分類は timeline の
+    # merged_paragraphs（stage2）を使う。
     merged = find_merged_paragraphs(items, qopen, qclose)
-    fatal = [m for m in merged if m["count"] >= 3]
-    report["checks"]["merged_paragraphs"] = {"pass": not fatal, "found": merged}
-    if fatal:
+    report["checks"]["merged_paragraphs"] = {"pass": not merged, "found": merged}
+    if merged:
+        ok = False
+
+    # 最後の段落の閉じ漏れ（文末で引用が閉じていない）は別の検査。
+    # 段落をまたぐ閉じ漏れは上の merged_paragraphs が検出するので、ここは文末だけを見る。
+    unclosed = []
+    if items:
+        n_open, n_close = items[-1][1].count(qopen), items[-1][1].count(qclose)
+        if n_open > n_close:
+            unclosed.append({"para": items[-1][0], "open": n_open, "close": n_close})
+    report["checks"]["unclosed_quote"] = {"pass": not unclosed, "found": unclosed}
+    if unclosed:
         ok = False
 
     report["pass"] = ok
