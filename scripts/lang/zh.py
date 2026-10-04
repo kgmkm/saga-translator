@@ -21,6 +21,21 @@ _TRAD_MARKERS = "們這說學對頭車東長門見後發經過還動進會來開
 # 固有の作品名・人名は残さない（例: 筱）。
 NON_JIS_HAN = "筱"
 
+# ── 会話頭判定の例外（align.py / align_check.py が参照。定義の正本はここ）──
+# 構造タグで始まる段落は対話ではない（ルビ・挿絵タグ・章見出し・改ページ）。
+# zh 原文の会話頭には "[" が含まれるため、制御タグを会話と誤検出しないための例外。
+DIALOGUE_HEAD_EXCEPTIONS = {
+    "structure_prefixes": ("[[rb:", "[pixivimage:", "[chapter:", "[newpage]", "[uploadedimage:"),
+    # 短い引用（多くは擬音）＋地の文の段落を対話と誤判定しない条件:
+    # 引用が ono_head_max 字以内に ono_head_closers で閉じ、
+    # 閉じた後の本文が引用の ono_head_rest_factor 倍以上あること。
+    "ono_head_max": 8,
+    "ono_head_closers": "”」』\"",
+    "ono_head_rest_factor": 2,
+    # 擬音頭判定で「引用の開き」とみなす文字（align_check の粗い判定が使う）。
+    "ono_head_quotes": ("“", "[", "［", "「", "『", "（", "(", "‘", '"', "'"),
+}
+
 
 def refine(text: str, result: dict) -> None:
     """guess_lang の結果に簡繁を足す。result をその場で更新。"""

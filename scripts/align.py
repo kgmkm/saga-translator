@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _lib import (
+    LANG_PACKS,
     align_ratio_floor,
     dialogue_heads,
     direction,
@@ -43,37 +44,49 @@ class AlignFinding:
     dst_excerpt: str = ""
 
 
+# ── 会話頭判定の例外（言語 pack）────────────────────────────────
+# 構造タグ・擬音頭の例外は scripts/lang/<lang>.py の DIALOGUE_HEAD_EXCEPTIONS が正本。
+# ここでは原文言語の pack を引くだけにして、例外の定義を1か所（pack）に集約する。
+
+
+def dialogue_head_exceptions(src_lang: str) -> dict:
+    """原文言語 pack の会話頭例外定義（DIALOGUE_HEAD_EXCEPTIONS）を返す。
+
+    未知の言語は dialogue_heads の既定（zh→ja フォールバック）に合わせて zh を使う。
+    """
+    pack = LANG_PACKS.get(src_lang) or LANG_PACKS.get("zh")
+    exc = getattr(pack, "DIALOGUE_HEAD_EXCEPTIONS", None) if pack is not None else None
+    if not exc:
+        raise RuntimeError(
+            "会話頭例外の定義がありません: scripts/lang/ の pack に DIALOGUE_HEAD_EXCEPTIONS が必要"
+        )
+    return exc
+
+
 # ── パース ────────────────────────────────────────────────────
 
-# 構造マーカーで始まる段落は対話ではない（ルビ・挿絵タグ・章見出し・改ページ）。
-# zh 原文の会話頭に "[" が含まれるため、制御タグを会話と誤検出するのを防ぐ。
-_NON_DIALOGUE_HEADS = ("[[rb:", "[pixivimage:", "[chapter:", "[newpage]", "[uploadedimage:")
 
-# 短い引用が擬音で、そのあとが地の文の段落（“扑腾”一声，… / “咯咯”地笑起来…）を
-# 対話頭と誤判定しないためのしきい値。
-_ONO_HEAD_MAX = 8
-_ONO_CLOSERS = "”」』\""
-
-
-def is_onomatopoeia_head(text: str, heads) -> bool:
+def is_onomatopoeia_head(text: str, heads, exceptions: dict | None = None) -> bool:
     """短い引用符付きの語（多くは擬音）で始まり、残りが地の文の段落か。
 
     中国語の小説は擬音を “…” で括って地の文の頭に置くため、
     原文側の会話頭判定が fatal を誤爆する。引用が短く、閉じたあとの
     本文が十分長い場合だけ「擬音頭」とみなす。
+    上限字数・閉じ文字・本文の倍率は言語 pack の例外定義が正本。
     """
+    exc = exceptions if exceptions is not None else dialogue_head_exceptions("zh")
     t = text.lstrip()
     if not t.startswith(tuple(heads)):
         return False
     end = None
     for i, ch in enumerate(t[1:], start=1):
-        if ch in _ONO_CLOSERS:
+        if ch in exc["ono_head_closers"]:
             end = i
             break
-    if end is None or end > _ONO_HEAD_MAX:
+    if end is None or end > exc["ono_head_max"]:
         return False
     rest = t[end + 1:]
-    return len(rest) >= 2 * (end + 1)
+    return len(rest) >= exc["ono_head_rest_factor"] * (end + 1)
 
 
 def parse_numbered(text: str) -> list[tuple[int, str]]:
@@ -145,6 +158,7 @@ def check_block(work, chapter, block, acks: list[dict] | None = None,
     src_lang, dst_lang = direction(work)
     suf = target_suffix(dst_lang)
     src_heads, dst_heads = dialogue_heads(src_lang, dst_lang)
+    src_exc = dialogue_head_exceptions(src_lang)
     ratio_floor = align_ratio_floor(src_lang, dst_lang)
 
     meta = load_chapters_meta(work)
@@ -232,14 +246,15 @@ def check_block(work, chapter, block, acks: list[dict] | None = None,
     # 会話頭不一致 (fatal)
     # 構造マーカー([newpage]・[chapter:]・[[rb:…]] 等)で始まる段落は対話判定から除外。
     # 原文側の会話頭に "[" が含まれるため、制御タグを会話と誤検出するのを防ぐ。
+    # 例外の一覧・条件は原文言語の pack（DIALOGUE_HEAD_EXCEPTIONS）が正本。
     for n in expected:
         if n not in draft_map:
             continue
         src_text = para_map.get(n, "")
         dst_text = draft_map[n]
-        if src_text.lstrip().startswith(_NON_DIALOGUE_HEADS):
+        if src_text.lstrip().startswith(tuple(src_exc["structure_prefixes"])):
             continue
-        if is_onomatopoeia_head(src_text, src_heads):
+        if is_onomatopoeia_head(src_text, src_heads, src_exc):
             continue
         if src_text.startswith(src_heads) and not dst_text.startswith(dst_heads):
             findings.append(AlignFinding(
