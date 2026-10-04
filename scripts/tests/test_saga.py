@@ -490,7 +490,7 @@ class TestAssemble(unittest.TestCase):
         import sys
         from unittest import mock
         from assemble import main
-        with mock.patch.object(sys, "argv", ["assemble", str(self.tmp), *extra]):
+        with mock.patch.object(sys, "argv", ["assemble", str(self.tmp), "--keep-full", *extra]):
             main()
 
     def test_auto_parallel_when_age_report_exists(self):

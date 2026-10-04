@@ -99,7 +99,7 @@ def _run_assemble(work: Path, *extra: str) -> str:
     """assemble.main を sys.argv 差し替えで実行し、出力を返す。"""
     from assemble import main as assemble_main
     buf = io.StringIO()
-    with mock.patch.object(sys, "argv", ["assemble", str(work), *extra]):
+    with mock.patch.object(sys, "argv", ["assemble", str(work), "--keep-full", *extra]):
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
             assemble_main()
     return buf.getvalue()

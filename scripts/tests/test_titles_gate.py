@@ -62,7 +62,7 @@ def _write_titles(work: Path, *, with_chapter: bool = True) -> None:
 
 def _assemble(work: Path, *extra: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [PYTHON, str(SCRIPTS / "assemble.py"), str(work), *extra],
+        [PYTHON, str(SCRIPTS / "assemble.py"), str(work), "--keep-full", *extra],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
 
