@@ -11,6 +11,8 @@
 - 名前の衝突(既に同名ファイルがある)は skip せず、一意な接尾辞(`-2`, `-3`, …)で解決する。
 - 中断に備えて実行前スナップショット(改名前後の対応表)を `_work/normalize_images.json` に
   残す。再実行は冪等(2回目は何もしない exit 0)で、中断時は残りの改名と参照更新を完走する。
+- 命名規則・判定・採番の実装は _lib.py が正本（ingest と共用。分岐実装を作らない）。
+  このスクリプトは既存作品の救済（改名と参照更新の一体実行）を担う。
 
     python3 normalize_images.py <作品ディレクトリ|画像フォルダ> [--apply|--dry-run]
 
@@ -26,91 +28,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _lib import atomic_write_text, find_non_jis_han  # noqa: E402
-
-IMAGE_EXT = "png|jpg|jpeg|webp|gif"
-_EXT_SET = tuple("." + e for e in IMAGE_EXT.split("|"))
-COVER_WORDS = ("cover", "封面", "表紙", "表纸", "カバー")
-SNAPSHOT_REL = "_work/normalize_images.json"
-
-# 正規化済み(目標形): <work>-<imgid>[-<n>].<ext> / <work>-cover[-<n>].<ext>
-# work は CJK を含まない英数記号のみ、imgid は3桁以上の数字
-DONE = re.compile(
-    rf"^(?P<work>[0-9A-Za-z_-]+)-(?:(?P<img>\d{{3,}})(?:-\d+)?|(?P<cover>cover)(?:-\d+)?)\.(?:{IMAGE_EXT})$",
-    re.I,
+from _lib import (  # noqa: E402
+    IMAGE_EXT, ImageNamePlanner, allocate_image_name, atomic_write_text,
+    find_non_jis_han, find_unnormalized_images, work_id_of,
 )
-# 題名付き: <work>-<imgid>-<title>.<ext> / <work>-<title>.<ext>（work は3桁以上の数字）
-TITLED_ID = re.compile(rf"^(?P<work>\d{{3,}})-(?P<img>\d{{3,}})-(?P<title>.+)\.(?P<ext>{IMAGE_EXT})$", re.I)
-TITLED = re.compile(rf"^(?P<work>\d{{3,}})-(?P<title>.+)\.(?P<ext>{IMAGE_EXT})$", re.I)
+
+SNAPSHOT_REL = "_work/normalize_images.json"
 
 # 参照を持ちうる場所（workdir 相対）: 原文・全章の段落・translation_input・output の md/toml/txt
 REF_ROOTS = ("originals", "chapters", "translation_input", "output")
 REF_SUFFIXES = (".md", ".toml", ".txt")
-
-
-def _is_image(name: str) -> bool:
-    return name.lower().endswith(_EXT_SET)
-
-
-def _needs_rename(name: str) -> bool:
-    """目標形と違うか（改名対象か）。題名付きは字種に依らず対象、それ以外は非ASCIIを含むときだけ。"""
-    if not _is_image(name) or DONE.match(name):
-        return False
-    if any(ord(c) > 127 for c in name):
-        return True
-    return bool(re.match(r"^\d{3,}-", name))
-
-
-def _plan_target(name: str, work_id: str, next_seq) -> str | None:
-    """改名先の希望名（接尾辞の解決前）。改名不要なら None。"""
-    if not _needs_rename(name):
-        return None
-    m = TITLED_ID.match(name)
-    if m:
-        return f"{m.group('work')}-{m.group('img')}.{m.group('ext').lower()}"
-    m = TITLED.match(name)
-    if m:
-        work = m.group("work")
-        if any(w in m.group("title").lower() for w in COVER_WORDS):
-            return f"{work}-cover.{m.group('ext').lower()}"
-        return f"{work}-{next_seq(work):03d}.{m.group('ext').lower()}"
-    # 裸の名前（作品IDが無い）: manifest の作品IDと連番で採番する
-    stem, _dot, ext = name.rpartition(".")
-    if any(w in stem.lower() for w in COVER_WORDS):
-        return f"{work_id}-cover.{ext.lower()}"
-    return f"{work_id}-{next_seq(work_id):03d}.{ext.lower()}"
-
-
-def _allocate(desired: str, names: set[str], reserved: set[str]) -> str:
-    """希望名が埋まっていれば `-2`, `-3`, … の一意な接尾辞で解決する（skip しない）。"""
-    if desired not in names and desired not in reserved:
-        return desired
-    stem, _dot, ext = desired.rpartition(".")
-    k = 2
-    while f"{stem}-{k}.{ext}" in names or f"{stem}-{k}.{ext}" in reserved:
-        k += 1
-    return f"{stem}-{k}.{ext}"
-
-
-def _work_id(workdir: Path) -> str:
-    """作品ID（manifest.work_id 優先、無ければディレクトリ名）。CJK は落として安全な字だけ残す。"""
-    raw = None
-    for fname in ("manifest.toml", "manifest.json"):
-        p = workdir / fname
-        if not p.is_file():
-            continue
-        try:
-            if fname.endswith(".toml"):
-                import tomllib
-                with open(p, "rb") as f:
-                    raw = tomllib.load(f).get("work_id")
-            else:
-                raw = json.loads(p.read_text(encoding="utf-8")).get("work_id")
-        except (OSError, ValueError):
-            raw = None
-        break
-    token = re.sub(r"[^0-9A-Za-z_-]", "", str(raw or "")) or re.sub(r"[^0-9A-Za-z_-]", "", workdir.name)
-    return token or "work"
 
 
 def find_workdir(arg: Path) -> tuple[Path, Path]:
@@ -236,34 +163,19 @@ def main() -> None:
     entries = {p.name: p.is_file() for p in folder.iterdir()}
     names = set(entries)  # ファイルもディレクトリも含む（衝突回避に使う）
     files = {n for n, is_file in entries.items() if is_file}
-    work_id = _work_id(workdir)
+    work_id = work_id_of(workdir)
     snap_path = _snapshot_path(workdir)
     prev = _load_snapshot(snap_path) if snap_path else {}
 
-    # 改名の計画（決定的: 名前のソート順に一意な改名先を割り当てる）
-    reserved: set[str] = set()
-    used_nums: dict[str, set[int]] = {}
-
-    def _used(work: str) -> set[int]:
-        if work not in used_nums:
-            pat = re.compile(rf"^{re.escape(work)}-(\d{{3,}})(?:-\d+)?\.(?:{IMAGE_EXT})$", re.I)
-            used_nums[work] = {int(m.group(1)) for n in (names | reserved) if (m := pat.match(n))}
-        return used_nums[work]
-
-    def next_seq(work: str) -> int:
-        used = _used(work)
-        n = (max(used) + 1) if used else 1
-        used.add(n)
-        return n
-
+    # 改名の計画（決定的: 名前のソート順に一意な改名先を割り当てる）。
+    # 採番・衝突解決は _lib.py の正本（ImageNamePlanner）を使う（ingest と共通）。
+    planner = ImageNamePlanner(work_id, names)
     completed = {old: new for old, new in prev.items() if old not in names and new in names}
     plan: list[tuple[str, str]] = []
     for name in sorted(files):
-        desired = _plan_target(name, work_id, next_seq)
-        if desired is None:
+        target = planner.target(name)
+        if target is None:
             continue
-        target = _allocate(desired, names, reserved)
-        reserved.add(target)
         plan.append((name, target))
 
     for old, new in plan:
@@ -295,7 +207,7 @@ def main() -> None:
             continue
         if dst.exists():
             # 計画後に外部で同名が現れた場合の保険（通常は計画時に -2 等で解決済み）
-            target = _allocate(target, {p.name for p in folder.iterdir()}, set())
+            target = allocate_image_name(target, {p.name for p in folder.iterdir()}, set())
             dst = folder / target
         src.rename(dst)
         renamed[old] = target
@@ -313,7 +225,7 @@ def main() -> None:
         print(f"[normalize] スナップショット: {SNAPSHOT_REL}")
     print(f"[normalize] 対象 {len(plan)} 件 適用")
 
-    left = [p.name for p in sorted(folder.iterdir()) if p.is_file() and _needs_rename(p.name)]
+    left = find_unnormalized_images(folder)
     print(f"[normalize] 未正規化のまま残ったファイル: {len(left)}")
     for n in left:
         print(f"  ! {n}")

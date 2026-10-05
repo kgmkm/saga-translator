@@ -14,8 +14,10 @@ import unittest
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SCRIPTS))
 PYTHON = sys.executable
 NORMALIZE = SCRIPTS / "normalize_images.py"
+INGEST = SCRIPTS / "ingest.py"
 
 WORK_ID = "w123"
 IMG_TITLED = "10000000-10000001-原語題名.png"   # 題名付き → 10000000-10000001.png
@@ -224,6 +226,127 @@ class TestNormalizeImagesRecovery(_WorkFixture):
         src = (self.work / "originals" / "source.md").read_text(encoding="utf-8")
         self.assertIn("images/10000000-10000001.png", src)
         self.assertNotIn(IMG_TITLED, src)
+
+
+# ── ingest の画像名正規化（P0-2。命名規則の正本は _lib.py で normalize_images と共用） ──
+
+SRC_TITLED = "10000000-10000001-原語題名.png"   # 題名付き → 10000000-10000001.png
+SRC_BARE = "原語画像8880006.png"                # 裸の名前 → 10000000-001.png（連番）
+
+
+class TestSharedImageNaming(unittest.TestCase):
+    """正規化ロジックの正本（_lib）の単体テスト。ingest / normalize_images が共用する。"""
+
+    def test_needs_normalize(self):
+        from _lib import image_name_needs_normalize
+        # 正規化済み（目標形）・画像以外・純 ASCII の ID 単体は対象外
+        for name in ("10000000-10000001.png", "10000000-cover.png", "w123-001.jpg",
+                     "10000000-10000001-2.png", "8880007.png", "原語.txt"):
+            self.assertFalse(image_name_needs_normalize(name), name)
+        # 題名付き・裸の名前は対象
+        self.assertTrue(image_name_needs_normalize(SRC_TITLED))
+        self.assertTrue(image_name_needs_normalize("原語画像A.png"))
+        self.assertTrue(image_name_needs_normalize("12345-abc.png"))
+
+    def test_target_allocation(self):
+        from _lib import ImageNamePlanner
+        planner = ImageNamePlanner("w123")
+        self.assertIsNone(planner.target("w123-001.png"))  # 既に正規名
+        self.assertEqual(planner.target("10000000-10000001-原語題名.png"),
+                         "10000000-10000001.png")
+        self.assertEqual(planner.target("10000000-封面.png"), "10000000-cover.png")
+        self.assertEqual(planner.target("原語画像A.png"), "w123-001.png")
+        self.assertEqual(planner.target("原語画像B.png"), "w123-002.png")
+        # 既存ファイルと衝突するときは -2 で解決（skip しない）
+        collided = ImageNamePlanner("w123", {"w123-001.png"})
+        self.assertEqual(collided.target("原語画像A.png"), "w123-002.png")
+
+    def test_work_token_is_sanitized(self):
+        from _lib import ImageNamePlanner
+        # 命名規則では work は CJK を含まない（normalize_images の作品ID解決と同じ扱い）
+        planner = ImageNamePlanner("テスト作品")
+        self.assertEqual(planner.target("原語画像A.png"), "work-001.png")
+
+
+class TestIngestNormalizesImageNames(unittest.TestCase):
+    """ingest 直後のファイル名が正規名である（P0-2）。CLI はサブプロセスで実行する。"""
+
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.td, ignore_errors=True)
+        self.src = self.td / "src"
+        self.src.mkdir()
+        (self.src / SRC_TITLED).write_bytes(b"\x89PNG titled")
+        (self.src / SRC_BARE).write_bytes(b"\x89PNG bare")
+        body = "\n\n".join([
+            "测试作品",
+            "作者名",
+            "--------以下正文--------",
+            "第一段落。",
+            "第二段落。[uploadedimage:8880006]",
+            "第三段落。[uploadedimage:10000001]",
+            "第四段落。",
+            "第五段落。",
+        ]) + "\n"
+        self.input = self.src / "10000000-原語題名.txt"
+        self.input.write_text(body, encoding="utf-8")
+        self.out = self.td / "_saga"
+
+    def _ingest(self) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [PYTHON, str(INGEST), str(self.input), "-o", str(self.out)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+
+    def _work(self) -> Path:
+        works = [p for p in self.out.iterdir() if p.is_dir()]
+        self.assertEqual(len(works), 1)
+        return works[0]
+
+    def test_ingest_copies_with_normalized_names(self):
+        p = self._ingest()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        work = self._work()
+        names = sorted(x.name for x in (work / "output" / "images").iterdir())
+        self.assertEqual(names, ["10000000-001.png", "10000000-10000001.png"])
+        src_md = (work / "originals" / "source.md").read_text(encoding="utf-8")
+        self.assertIn("![](images/10000000-001.png)", src_md)
+        self.assertIn("![](images/10000000-10000001.png)", src_md)
+        self.assertNotIn(SRC_BARE, src_md)
+        self.assertNotIn(SRC_TITLED, src_md)
+        # manifest の images_copied も正規名を指す
+        man = (work / "manifest.toml").read_text(encoding="utf-8")
+        self.assertIn("10000000-001.png", man)
+        self.assertNotIn(SRC_BARE, man)
+
+    def test_reingest_keeps_names_and_refs(self):
+        """再取り込みは同じ正規名を再利用し、重複ファイルや参照の揺れを作らない。"""
+        p1 = self._ingest()
+        self.assertEqual(p1.returncode, 0, p1.stdout + p1.stderr)
+        work = self._work()
+        img = work / "output" / "images"
+        before = {x.name: x.read_bytes() for x in img.iterdir()}
+        src_md = (work / "originals" / "source.md").read_text(encoding="utf-8")
+        p2 = self._ingest()
+        self.assertEqual(p2.returncode, 0, p2.stdout + p2.stderr)
+        self.assertEqual({x.name: x.read_bytes() for x in img.iterdir()}, before,
+                         "再取り込みで画像が重複・変名された")
+        self.assertEqual((work / "originals" / "source.md").read_text(encoding="utf-8"), src_md)
+
+    def test_later_normalize_changes_nothing(self):
+        """ingest 済みなら後追いの normalize_images --apply は何も変えない（分析を無効化しない）。"""
+        p = self._ingest()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        work = self._work()
+        before = _tree(work)
+        p2 = subprocess.run(
+            [PYTHON, str(NORMALIZE), str(work), "--apply"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        self.assertEqual(p2.returncode, 0, p2.stdout + p2.stderr)
+        self.assertIn("改名 0 件", p2.stdout)
+        self.assertIn("未正規化のまま残ったファイル: 0", p2.stdout)
+        self.assertEqual(_tree(work), before, "後追い正規化がファイルを変更した")
 
 
 if __name__ == "__main__":

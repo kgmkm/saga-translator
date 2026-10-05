@@ -1,6 +1,8 @@
 """saga-translator build_context compact モードの単体テスト。"""
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -485,3 +487,127 @@ class TestEndToEndCompactOutput(unittest.TestCase):
         self.assertIn("キャロル", text)  # core
         self.assertNotIn("Alice", text)
         self.assertNotIn("ボブ", text)
+
+
+# ── P1-4 の可視化（compact の省略人物）と P0-2 の保険（analysis の未正規化警告） ──
+
+
+def _make_work(base: Path, characters: list[dict], body: list[str]) -> Path:
+    """compact / analysis テスト用の最小 work（合成データのみ）。"""
+    work = base / "test_work"
+    work.mkdir(parents=True)
+    meta = {
+        "chapters": [
+            {"id": "ch001", "title": None, "blocks": [{"id": "b1", "paras": [1, len(body)]}]},
+        ],
+        "work": {"title": "Test", "author": "Author", "lang": "zh"},
+    }
+    (work / "chapters_meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    (work / "manifest").write_text(json.dumps({"lang": "zh"}, ensure_ascii=False), encoding="utf-8")
+    chdir = work / "chapters"
+    chdir.mkdir()
+    paras = [{"n": i + 1, "text": t} for i, t in enumerate(body)]
+    (chdir / "ch001.paras.json").write_text(
+        json.dumps({"chapter": "ch001", "title": None, "paras": paras}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (work / "output" / "ch001").mkdir(parents=True)
+    (work / "translation_input").mkdir(parents=True)
+    analysis = work / "analysis"
+    analysis.mkdir()
+    (analysis / "characters.json").write_text(
+        json.dumps({"characters": characters}, ensure_ascii=False), encoding="utf-8")
+    (analysis / "terms.json").write_text(json.dumps({"terms": []}, ensure_ascii=False), encoding="utf-8")
+    (analysis / "plot.json").write_text(json.dumps({"entries": []}, ensure_ascii=False), encoding="utf-8")
+    return work
+
+
+class TestCompactOmittedCharacters(unittest.TestCase):
+    """compact が人物を落としたとき、落ちた名前を stderr に出す（P1-4 の可視化）。"""
+
+    def setUp(self):
+        import shutil
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.work = _make_work(self.tmp, characters=[
+            {"name_src": "Alice", "name_ja": "アリス", "first_person": "私"},
+            {"name_src": "Bob", "name_ja": "ボブ", "core": True},
+            {"name_src": "Dave", "name_ja": "デイブ", "first_person": "僕"},
+        ], body=["原文Alice。", "天気が良い。"])
+
+    def _stderr(self) -> str:
+        from build_context import _stage_impl
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            _stage_impl(self.work, "ch001", "b1", "translation")
+        return buf.getvalue()
+
+    def test_omitted_names_are_reported(self):
+        err = self._stderr()
+        self.assertIn("[context] compact: 人物 2/3（省略: デイブ）", err)
+
+    def test_no_omitted_part_when_all_shown(self):
+        # 本文に Dave も出るようにして全員載る状態にする
+        paras = [
+            {"n": 1, "text": "原文Alice。"},
+            {"n": 2, "text": "原文Dave。"},
+        ]
+        (self.work / "chapters" / "ch001.paras.json").write_text(
+            json.dumps({"chapter": "ch001", "title": None, "paras": paras}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        err = self._stderr()
+        self.assertIn("人物 3/3", err)
+        self.assertNotIn("省略", err)
+
+
+class TestOmittedCharacterNames(unittest.TestCase):
+    """_omitted_character_names の単体（name_ja 優先・name_src フォールバック）。"""
+
+    def test_prefers_ja_then_src(self):
+        from build_context import _omitted_character_names
+        chars = {"characters": [
+            {"name_src": "A", "name_ja": "エー"},
+            {"name_src": "B"},
+            {"name_ja": "シー"},
+        ]}
+        shown = [chars["characters"][0]]
+        self.assertEqual(_omitted_character_names(chars, shown), ["B", "シー"])
+
+
+class TestAnalysisUnnormalizedWarning(unittest.TestCase):
+    """analysis モードは未正規化画像を stderr に1行で警告する（P0-2 の保険。停止はしない）。"""
+
+    def setUp(self):
+        import shutil
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.work = _make_work(self.tmp, characters=[
+            {"name_src": "Alice", "name_ja": "アリス"},
+        ], body=["原文Alice。", "天気が良い。"])
+        self.img = self.work / "output" / "images"
+
+    def _stderr(self) -> str:
+        from build_context import _stage_impl
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            _stage_impl(self.work, "ch001", "b1", "analysis")
+        return buf.getvalue()
+
+    def test_warns_once_and_does_not_stop(self):
+        self.img.mkdir(parents=True)
+        (self.img / "插图一.png").write_bytes(b"\x89PNG")
+        err = self._stderr()
+        lines = [l for l in err.splitlines() if "未正規化" in l]
+        self.assertEqual(len(lines), 1, f"警告は1行のはず: {err!r}")
+        self.assertIn("未正規化の画像が 1 件あります", lines[0])
+        self.assertIn("analysis_src_hash", lines[0])
+        self.assertIn("插图一.png", lines[0])
+        # 警告のみ（停止しない）: コンテキストは生成される
+        self.assertTrue((self.work / "translation_input" / "ch001_b1_analysis.md").exists())
+
+    def test_no_warning_when_images_are_normalized(self):
+        self.img.mkdir(parents=True)
+        (self.img / "10000000-001.png").write_bytes(b"\x89PNG")
+        err = self._stderr()
+        self.assertNotIn("未正規化", err)

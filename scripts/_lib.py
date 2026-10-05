@@ -1312,3 +1312,189 @@ def append_jsonl(path: Path, obj) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+# ── 画像名の正規化（正本。normalize_images.py / ingest.py / build_context.py が共用） ──
+# 命名規則（normalize_images.py の実装をそのまま移設。分岐実装を作らない）:
+#   正規化済み(目標形): <work>-<imgid>[-<n>].<ext> / <work>-cover[-<n>].<ext>
+#     work は CJK を含まない英数記号のみ、imgid は3桁以上の数字
+#   題名付き: <work>-<imgid>-<title>.<ext> / <work>-<title>.<ext>（work は3桁以上の数字）
+# 判定は「非JIS漢字の有無」ではなく「目標形と違うか」で行う（題名付きは字種に依らず対象、
+# 純 ASCII の名前は ingest/relink の ID 照合を壊さないため対象にしない）。
+
+IMAGE_EXT = "png|jpg|jpeg|webp|gif"
+IMAGE_EXT_SET = tuple("." + e for e in IMAGE_EXT.split("|"))
+IMAGE_COVER_WORDS = ("cover", "封面", "表紙", "表纸", "カバー")
+
+IMAGE_NAME_DONE = re.compile(
+    rf"^(?P<work>[0-9A-Za-z_-]+)-(?:(?P<img>\d{{3,}})(?:-\d+)?|(?P<cover>cover)(?:-\d+)?)\.(?:{IMAGE_EXT})$",
+    re.I,
+)
+IMAGE_NAME_TITLED_ID = re.compile(
+    rf"^(?P<work>\d{{3,}})-(?P<img>\d{{3,}})-(?P<title>.+)\.(?P<ext>{IMAGE_EXT})$", re.I)
+IMAGE_NAME_TITLED = re.compile(
+    rf"^(?P<work>\d{{3,}})-(?P<title>.+)\.(?P<ext>{IMAGE_EXT})$", re.I)
+
+
+def is_image_name(name: str) -> bool:
+    return name.lower().endswith(IMAGE_EXT_SET)
+
+
+def image_name_needs_normalize(name: str) -> bool:
+    """目標形と違うか（正規化対象か）。題名付きは字種に依らず対象、それ以外は非ASCIIを含むときだけ。"""
+    if not is_image_name(name) or IMAGE_NAME_DONE.match(name):
+        return False
+    if any(ord(c) > 127 for c in name):
+        return True
+    return bool(re.match(r"^\d{3,}-", name))
+
+
+def image_name_target(name: str, work_id: str, next_seq) -> str | None:
+    """正規化先の希望名（接尾辞の解決前）。正規化不要なら None。"""
+    if not image_name_needs_normalize(name):
+        return None
+    m = IMAGE_NAME_TITLED_ID.match(name)
+    if m:
+        return f"{m.group('work')}-{m.group('img')}.{m.group('ext').lower()}"
+    m = IMAGE_NAME_TITLED.match(name)
+    if m:
+        work = m.group("work")
+        if any(w in m.group("title").lower() for w in IMAGE_COVER_WORDS):
+            return f"{work}-cover.{m.group('ext').lower()}"
+        return f"{work}-{next_seq(work):03d}.{m.group('ext').lower()}"
+    # 裸の名前（作品IDが無い）: work_id と連番で採番する
+    stem, _dot, ext = name.rpartition(".")
+    if any(w in stem.lower() for w in IMAGE_COVER_WORDS):
+        return f"{work_id}-cover.{ext.lower()}"
+    return f"{work_id}-{next_seq(work_id):03d}.{ext.lower()}"
+
+
+def allocate_image_name(desired: str, names: set[str], reserved: set[str]) -> str:
+    """希望名が埋まっていれば `-2`, `-3`, … の一意な接尾辞で解決する（skip しない）。"""
+    if desired not in names and desired not in reserved:
+        return desired
+    stem, _dot, ext = desired.rpartition(".")
+    k = 2
+    while f"{stem}-{k}.{ext}" in names or f"{stem}-{k}.{ext}" in reserved:
+        k += 1
+    return f"{stem}-{k}.{ext}"
+
+
+def find_unnormalized_images(images_dir) -> list[str]:
+    """画像フォルダ直下で正規化されていない（改名対象の）画像名を返す。
+
+    build_context の分析警告と normalize_images の残り一覧が共用する。
+    """
+    folder = Path(images_dir)
+    if not folder.is_dir():
+        return []
+    return [p.name for p in sorted(folder.iterdir()) if p.is_file() and image_name_needs_normalize(p.name)]
+
+
+def work_id_of(workdir) -> str:
+    """作品ID（manifest.work_id 優先、無ければディレクトリ名）。CJK は落として安全な字だけ残す。"""
+    workdir = Path(workdir)
+    raw = None
+    for fname in ("manifest.toml", "manifest.json"):
+        p = workdir / fname
+        if not p.is_file():
+            continue
+        try:
+            if fname.endswith(".toml"):
+                with open(p, "rb") as f:
+                    raw = tomllib.load(f).get("work_id")
+            else:
+                raw = json.loads(p.read_text(encoding="utf-8")).get("work_id")
+        except (OSError, ValueError):
+            raw = None
+        break
+    token = re.sub(r"[^0-9A-Za-z_-]", "", str(raw or "")) or re.sub(r"[^0-9A-Za-z_-]", "", workdir.name)
+    return token or "work"
+
+
+def _same_content_copy(images_dir: Path, data: bytes) -> str | None:
+    """images_dir 直下で、正規名かつ内容一致のファイル名を返す（再取り込みの冪等用）。"""
+    images_dir = Path(images_dir)
+    if not images_dir.is_dir():
+        return None
+    for p in sorted(images_dir.iterdir()):
+        try:
+            if not p.is_file() or not IMAGE_NAME_DONE.match(p.name) or p.stat().st_size != len(data):
+                continue
+            if p.read_bytes() == data:
+                return p.name
+        except OSError:
+            continue
+    return None
+
+
+class ImageNamePlanner:
+    """画像名の正規化計画（採番・衝突解決・コピー先の決定を一箇所に集約）。
+
+    - `target(name)`: 正規化先の一意な名前（正規化不要なら None）。normalize_images が使う。
+    - `plan_copy(src, images_dir)` / `plan_copy_entry(name, data, images_dir)`: ingest が使う。
+      同じ内容の正規名ファイルが既にあればその名前を再利用する（再取り込みの冪等。
+      「後追いの normalize_images --apply」による分析の無効化を防ぐ）。
+
+    `names` は既存の名前（ファイル・ディレクトリの両方）で、衝突回避に使う。
+    `reserved` はこの計画で採番済みの名前。work_id は命名規則に合わせて安全な字だけにする。
+    """
+
+    def __init__(self, work_id: str, names=()):
+        self.work_id = re.sub(r"[^0-9A-Za-z_-]", "", str(work_id or "")) or "work"
+        self.names = set(names)
+        self.reserved: set[str] = set()
+        self._used_nums: dict[str, set[int]] = {}
+
+    def _used(self, work: str) -> set[int]:
+        if work not in self._used_nums:
+            pat = re.compile(rf"^{re.escape(work)}-(\d{{3,}})(?:-\d+)?\.(?:{IMAGE_EXT})$", re.I)
+            self._used_nums[work] = {int(m.group(1)) for n in (self.names | self.reserved) if (m := pat.match(n))}
+        return self._used_nums[work]
+
+    def next_seq(self, work: str) -> int:
+        used = self._used(work)
+        n = (max(used) + 1) if used else 1
+        used.add(n)
+        return n
+
+    def target(self, name: str) -> str | None:
+        """正規化先の一意な名前（予約する）。正規化不要なら None。"""
+        desired = image_name_target(name, self.work_id, self.next_seq)
+        if desired is None:
+            return None
+        target = allocate_image_name(desired, self.names, self.reserved)
+        self.reserved.add(target)
+        return target
+
+    def plan_copy(self, src, images_dir) -> tuple[str, bool]:
+        """ファイル src を images_dir へコピーする際の (名前, コピー要否)。
+
+        正規化不要（既に正規名・対象外）は元の名前のまま。正規化要のときは、同じ内容の
+        正規名ファイルが既にあればそれを再利用し（コピー不要）、無ければ一意な正規名を
+        採番して返す（コピー要）。
+        """
+        src = Path(src)
+        if not image_name_needs_normalize(src.name):
+            return src.name, True
+        try:
+            data = src.read_bytes()
+        except OSError:
+            data = None
+        if data is not None:
+            existing = _same_content_copy(Path(images_dir), data)
+            if existing is not None:
+                return existing, False
+        allocated = self.target(src.name)
+        return (allocated or src.name), True
+
+    def plan_copy_entry(self, name: str, data: bytes, images_dir) -> tuple[str, bool]:
+        """zip エントリ等（epub の画像）のコピー計画。名前は基底名で判定する。"""
+        base = Path(name).name
+        if not image_name_needs_normalize(base):
+            return base, True
+        existing = _same_content_copy(Path(images_dir), data)
+        if existing is not None:
+            return existing, False
+        allocated = self.target(base)
+        return (allocated or base), True

@@ -12,9 +12,9 @@ from xml.etree import ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _lib import (  # noqa: E402
-    atomic_write_text, guess_lang, parse_filename, parse_frontmatter,
+    ImageNamePlanner, atomic_write_text, guess_lang, parse_filename, parse_frontmatter,
     parse_novel_header, read_skill_version, save_structured, skill_commit,
-    split_paras, utf8,
+    split_paras, utf8, work_id_of,
 )
 from series_detect import find_candidates, work_name_for  # noqa: E402
 
@@ -42,6 +42,21 @@ MD_IMAGE_SRC = re.compile(r"!\[([^\]]*)\]\((?:\.\./)*images/([^)]+)\)")
 def images_dir_of(work: Path) -> Path:
     """画像置き場。output/ 内に固定。訳文からの相対は常に images/。"""
     return Path(work) / "output" / "images"
+
+
+def _image_planner(work_id: str, images_dir: Path) -> ImageNamePlanner:
+    """画像の正規化名を採番する計画器（既存の名前を衝突回避に使う。命名規則は _lib が正本）。"""
+    names: set[str] = set()
+    if images_dir.is_dir():
+        names = {p.name for p in images_dir.iterdir()}
+    return ImageNamePlanner(work_id, names)
+
+
+def _copy_name(src_img: Path, images_dir: Path, planner: ImageNamePlanner | None) -> tuple[str, bool]:
+    """画像コピー先の (名前, コピー要否)。planner が無ければ従来どおり元の名前（後方互換）。"""
+    if planner is None:
+        return src_img.name, True
+    return planner.plan_copy(src_img, images_dir)
 
 
 def retarget_md_images(text: str) -> str:
@@ -89,9 +104,11 @@ def find_image_for_id(image_id: str, search_dirs: list[Path]) -> Path | None:
 
 
 def rewrite_uploaded_images(
-    text: str, images_dir: Path, search_dirs: list[Path]
+    text: str, images_dir: Path, search_dirs: list[Path],
+    planner: ImageNamePlanner | None = None,
 ) -> tuple[str, list[str], list[str]]:
     """[uploadedimage:ID] を ![](images/…) に置換。無ければタグを残す。
+    planner があればコピー先を正規化済みの名前にする（P0-2。命名規則は _lib が正本）。
     戻り値: (本文, コピーしたパス, 見つからなかったID)"""
     copied: list[str] = []
     missing: list[str] = []
@@ -106,8 +123,9 @@ def rewrite_uploaded_images(
                 missing.append(iid)
             return m.group(0)
         images_dir.mkdir(parents=True, exist_ok=True)
-        dest = images_dir / src_img.name
-        if not dest.exists():
+        dest_name, copy_ok = _copy_name(src_img, images_dir, planner)
+        dest = images_dir / dest_name
+        if copy_ok and not dest.exists():
             shutil.copy2(src_img, dest)
         copied.append(str(dest))
         return f"![](images/{dest.name})"
@@ -133,6 +151,7 @@ def relink_markdown_files(work: Path) -> list[str]:
     from _lib import atomic_write_text
     work = Path(work)
     images_dir = images_dir_of(work)
+    planner = _image_planner(work_id_of(work), images_dir)
     search = image_search_dirs(work, work)
     out = work / "output"
     files: list[Path] = []
@@ -144,7 +163,7 @@ def relink_markdown_files(work: Path) -> list[str]:
         text = f.read_text(encoding="utf-8")
         if not UPLOADED_IMAGE.search(text):
             continue
-        new, _, missing = rewrite_uploaded_images(text, images_dir, search)
+        new, _, missing = rewrite_uploaded_images(text, images_dir, search, planner=planner)
         for iid in missing:
             if iid not in seen:
                 seen.add(iid)
@@ -154,9 +173,13 @@ def relink_markdown_files(work: Path) -> list[str]:
     return still
 
 
-def collect_md_images(text: str, images_dir: Path, src_dir: Path) -> tuple[str, list[str], list[str]]:
+def collect_md_images(
+    text: str, images_dir: Path, src_dir: Path,
+    planner: ImageNamePlanner | None = None,
+) -> tuple[str, list[str], list[str]]:
     """MDの画像参照を処理。ローカル相対パスのみコピーして参照を書き換える。
-    リモートURLは取得しない。戻り値: (書き換え後テキスト, コピーした画像, リモートURL)"""
+    planner があればコピー先を正規化済みの名前にする（P0-2）。リモートURLは取得しない。
+    戻り値: (書き換え後テキスト, コピーした画像, リモートURL)"""
     images_dir.mkdir(parents=True, exist_ok=True)
     copied: list[str] = []
     remote: list[str] = []
@@ -170,20 +193,20 @@ def collect_md_images(text: str, images_dir: Path, src_dir: Path) -> tuple[str, 
         if not p.is_absolute():
             p = (src_dir / ref).resolve()
         if p.exists():
-            dest_name = p.name
+            dest_name, copy_ok = _copy_name(p, images_dir, planner)
             dest = images_dir / dest_name
-            if not dest.exists():
+            if copy_ok and not dest.exists():
                 shutil.copy2(p, dest)
             copied.append(str(dest))
-            return f"![{alt}](images/{dest_name})"
+            return f"![{alt}](images/{dest.name})"
         return m.group(0)  # 見つからない参照はそのまま
 
     new_text = IMG_REF.sub(repl, text)
     return new_text, copied, remote
 
 
-def epub_extract(path: Path, images_dir: Path) -> tuple[str, dict]:
-    """EPUBから本文(段落)とメタ+画像を抽出。"""
+def epub_extract(path: Path, images_dir: Path, planner: ImageNamePlanner | None = None) -> tuple[str, dict]:
+    """EPUBから本文(段落)とメタ+画像を抽出。planner があれば画像名を正規化する（P0-2）。"""
     ns = {"c": "urn:oasis:names:tc:opendocument:package:container",
           "o": "http://www.idpf.org/2007/opf", "dc": "http://purl.org/dc/elements/1.1/"}
     images_dir.mkdir(parents=True, exist_ok=True)
@@ -215,9 +238,14 @@ def epub_extract(path: Path, images_dir: Path) -> tuple[str, dict]:
         for name in z.namelist():
             low = name.lower()
             if low.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp")):
-                dest = images_dir / Path(name).name
-                if not dest.exists():
-                    dest.write_bytes(z.read(name))
+                data = z.read(name)
+                if planner is None:
+                    dest_name, copy_ok = Path(name).name, True
+                else:
+                    dest_name, copy_ok = planner.plan_copy_entry(name, data, images_dir)
+                dest = images_dir / dest_name
+                if copy_ok and not dest.exists():
+                    dest.write_bytes(data)
     return "\n\n".join(paras), meta
 
 
@@ -283,13 +311,15 @@ def _stage_impl(work: Path, src: Path, parent: Path, args: argparse.Namespace,
 
     meta: dict = {"source_path": str(src), "work_id": work_id, "part": part}
     images_dir = images_dir_of(work)
+    # 画像は最初から正規化済みの名前でコピーする（P0-2。命名規則は _lib が正本）。
+    planner = _image_planner(work_id, images_dir)
     copied: list[str] = []
     remote: list[str] = []
     missing_ids: list[str] = []
 
     suffix = src.suffix.lower()
     if suffix == ".epub":
-        body, epub_meta = epub_extract(src, images_dir)
+        body, epub_meta = epub_extract(src, images_dir, planner=planner)
         meta.update({k: v for k, v in epub_meta.items() if v})
         body_text = body
         text = body_text
@@ -314,11 +344,11 @@ def _stage_impl(work: Path, src: Path, parent: Path, args: argparse.Namespace,
                 meta.update(hdr)
         body_text = normalize_pixiv_markers(body_text)
         body_text, up_copied, missing_ids = rewrite_uploaded_images(
-            body_text, images_dir, image_search_dirs(src.parent, work)
+            body_text, images_dir, image_search_dirs(src.parent, work), planner=planner
         )
         copied.extend(up_copied)
         if suffix == ".md":
-            body_text, md_copied, remote = collect_md_images(body_text, images_dir, src.parent)
+            body_text, md_copied, remote = collect_md_images(body_text, images_dir, src.parent, planner=planner)
             copied.extend(md_copied)
     if not meta.get("title"):
         meta["title"] = fname["title"]

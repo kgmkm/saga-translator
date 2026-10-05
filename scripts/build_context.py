@@ -7,7 +7,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _lib import (  # noqa: E402
-    character_aliases, characters_toml_path, direction, load_chapters_meta, load_characters,
+    character_aliases, characters_toml_path, direction, find_unnormalized_images,
+    load_chapters_meta, load_characters,
     load_config, load_json, load_paras, load_plot, load_structured, load_terms, load_titles,
     load_toml, save_chapters_meta, save_json, target_suffix, target_title, utf8, voice_status_of,
 )
@@ -384,6 +385,17 @@ def _compact_characters(
     return result
 
 
+def _omitted_character_names(chars: dict, shown: list[dict]) -> list[str]:
+    """compact で落ちた人物の表示名（提案 P1-4 の可視化。stderr に出す）。"""
+    shown_ids = {id(c) for c in shown}
+    names: list[str] = []
+    for c in chars.get("characters", []):
+        if not isinstance(c, dict) or id(c) in shown_ids:
+            continue
+        names.append(str(c.get("name_ja") or c.get("name_src") or "(無名)"))
+    return names
+
+
 def _compact_terms(
     terms: dict,
     body_texts: list[str],
@@ -524,6 +536,24 @@ def get_work_id(work: Path) -> str:
     return work.name
 
 
+def _warn_unnormalized_images(work: Path) -> None:
+    """analysis モードの保険 (P0-2): 未正規化の画像を stderr に1行で警告する（停止しない）。
+
+    後から normalize_images.py を実行すると参照の書き換えで chapters/*.paras.toml が
+    変わり analysis_src_hash が変わる——確定済みの分析が無効になる前に気づかせる。
+    """
+    bad = find_unnormalized_images(work / "output" / "images")
+    if not bad:
+        return
+    shown = ", ".join(bad[:5]) + (f" ほか{len(bad) - 5}件" if len(bad) > 5 else "")
+    print(
+        f"[context] 警告: 未正規化の画像が {len(bad)} 件あります: {shown}。"
+        "先に normalize_images.py --apply で正規化してください"
+        "（後から正規化すると参照の書き換えで analysis_src_hash が変わり、確定済みの分析が無効になります）",
+        file=sys.stderr,
+    )
+
+
 def main() -> None:
     from _lib import timed_stage
     utf8()
@@ -566,6 +596,8 @@ def _stage_impl(
     work: Path, cid: str, bid: str, mode: str,
     context_style: str = "compact",
 ) -> None:
+    if mode == "analysis":
+        _warn_unnormalized_images(work)
     _, dst = direction(work)
     suf = target_suffix(dst)
     meta_all = load_chapters_meta(work)
@@ -693,13 +725,15 @@ def _stage_impl(
             "",
         ]
 
-        # 出力サイズ報告 (H)
+        # 出力サイズ報告 (H)。compact で落ちた人物名も出す（P1-4。読む側が欠落に気づける）
         n_chars_shown = len(compact_chars)
         n_terms_shown = len(compact_terms_list)
         plot_count = len(plot_texts)
         house_count = len([r for r in house_rules if r.get("status") in ("approved", "locked")])
+        omitted = _omitted_character_names(chars, compact_chars)
+        omitted_part = f"（省略: {', '.join(omitted)}）" if omitted else ""
         print(
-            f"[context] compact: 人物 {n_chars_shown}/{total_chars} / 用語 {n_terms_shown}/{total_terms} "
+            f"[context] compact: 人物 {n_chars_shown}/{total_chars}{omitted_part} / 用語 {n_terms_shown}/{total_terms} "
             f"/ arcs {arc_count}件 / plot {plot_count}件 / house_style {house_count}件",
             file=sys.stderr,
         )

@@ -158,5 +158,49 @@ class TestAlignDialogueHeadRegression(unittest.TestCase):
             )
 
 
+class TestIngestImageReferenceProtection(unittest.TestCase):
+    """P0-2: ingest の画像名正規化後も参照は images/ 相対のまま保たれ、実ファイルと一致する。
+
+    正規化はファイル名と参照を一体で行う（リンクの alt は無傷・旧名は残らない）。
+    """
+
+    def test_md_refs_rewritten_to_normalized_relative_paths(self):
+        import shutil
+        import subprocess
+        td = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, td, ignore_errors=True)
+        src = td / "src"
+        (src / "images").mkdir(parents=True)
+        (src / "images" / "10000000-10000001-原語題名.png").write_bytes(b"\x89PNG one")
+        (src / "images" / "10000000-封面.png").write_bytes(b"\x89PNG cover")
+        md = src / "10000000-原語題名.md"
+        md.write_text(
+            "---\ntitle: 原語題名\nauthor: 作者名\n---\n\n"
+            "第一段落。\n\n"
+            "![挿絵](images/10000000-10000001-原語題名.png)\n\n"
+            "![表紙](images/10000000-封面.png)\n\n"
+            "第四段落。\n\n"
+            "第五段落。\n",
+            encoding="utf-8",
+        )
+        out = td / "_saga"
+        p = subprocess.run(
+            [sys.executable, str(SCRIPTS / "ingest.py"), str(md), "-o", str(out)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        work = next(x for x in out.iterdir() if x.is_dir())
+        body = (work / "originals" / "source.md").read_text(encoding="utf-8")
+        img = work / "output" / "images"
+        # 参照は images/ 相対のまま、正規名（実ファイルと一致）を指す
+        self.assertIn("![挿絵](images/10000000-10000001.png)", body)
+        self.assertIn("![表紙](images/10000000-cover.png)", body)
+        for name in ("10000000-10000001.png", "10000000-cover.png"):
+            self.assertTrue((img / name).is_file(), f"参照先が実在しない: {name}")
+        # 旧名は参照に残らない（リンクの alt は無傷）
+        self.assertNotIn("原語題名.png", body)
+        self.assertNotIn("封面", body)
+
+
 if __name__ == "__main__":
     unittest.main()
