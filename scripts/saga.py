@@ -272,7 +272,8 @@ def _count_pending_vocab_candidates(work: Path, meta: dict, cid: str, bid: str,
                     known_terms.update(str(x) for x in kt)
         key = f"{cid}/{bid}"
         findings = vocab_check_draft(vocab, items, _block_src_text(work, key, meta),
-                                     known_terms=known_terms)
+                                     known_terms=known_terms,
+                                     src_items=_block_src_items(work, key, meta))
         draft_hash = sha12(draft_p.read_bytes())
         src_hash = _analysis_src_hash(work, key, meta)
         dict_version = vocab.dict_version()
@@ -924,6 +925,23 @@ def _block_src_text(work: Path, block_key: str, meta: dict) -> str:
     except (FileNotFoundError, OSError, ValueError):
         return ""
     return "\n".join(p.get("text", "") for p in block_paras(paras_data, b))
+
+
+def _block_src_items(work: Path, block_key: str, meta: dict) -> list[tuple[int, str]]:
+    """block 原文の (段落番号, 本文) 列。読めなければ空列。
+
+    辞書の fixed 検査を段落単位で行う（原文段落に語が出ているのに、対応する訳文
+    段落に規定訳が無い → 違反）ために使う（check_draft の src_items）。
+    """
+    b = block_meta(meta, block_key)
+    if b is None:
+        return []
+    cid = block_key.split("/", 1)[0]
+    try:
+        paras_data = load_paras(work, cid)
+    except (FileNotFoundError, OSError, ValueError):
+        return []
+    return [(int(p["n"]), str(p.get("text", ""))) for p in block_paras(paras_data, b)]
 
 
 def _vocab_ruling_exists(work: Path, finding, cid: str, bid: str,
@@ -2491,7 +2509,8 @@ def _finalize_block(work: Path, chapter: str, block: str,
             vocab = load_vocab(work)
             v_findings = vocab_check_draft(
                 vocab, items, _block_src_text(work, f"{cid}/{bid}", meta),
-                known_terms=known_terms)
+                known_terms=known_terms,
+                src_items=_block_src_items(work, f"{cid}/{bid}", meta))
             v_src_hash = _analysis_src_hash(work, f"{cid}/{bid}", meta)
             v_ruled = 0
             v_stops = []

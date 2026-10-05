@@ -13,6 +13,8 @@
   - candidates: 原語相当の語が残れば commit 停止（裁定記録 ``vocab:<src>`` で通過）
   - ja_ok: 検査から除外
 - 原文字形索引: ``src`` / ``src_variants`` の両方の字形で引ける
+- 許容別表記: 拡張 vocab.toml の任意フィールド ``dst_variants``（規定訳の許容別表記
+  リスト。dst とあわせて完全一致で照合し、どれか1つが該当段落・ブロックにあれば合格）
 - 辞書版: 拡張 vocab.toml の ``version`` を ``dict_version()`` として返す
   （``rulings.py`` の dict_version に接続する）
 
@@ -123,12 +125,14 @@ class VocabEntry:
     - ``dst``: 既定訳（fixed では規定訳）
     - ``kind``: fixed | candidates | ja_ok
     - ``variants``: src_variants（別字形・別表記。src を除く）
+    - ``dst_variants``: dst_variants（規定訳の許容別表記。dst を除く）
     - ``origin``: terms | house_style | vocab（どの探索先から来たか）
     """
     src: str
     dst: str = ""
     kind: str = DEFAULT_KIND
     variants: tuple[str, ...] = ()
+    dst_variants: tuple[str, ...] = ()
     note: str = ""
     origin: str = "vocab"
 
@@ -137,14 +141,19 @@ class VocabEntry:
         """索引・照合に使う字形（src + variants。この順）。"""
         return (self.src,) + self.variants
 
+    @property
+    def dst_forms(self) -> tuple[str, ...]:
+        """規定訳の照合に使う表記（dst + dst_variants。dst が無ければ dst_variants のみ）。"""
+        return ((self.dst,) if self.dst else ()) + self.dst_variants
+
 
 @dataclass(frozen=True)
 class VocabFinding:
     """統合辞書の検査で見つかった1件。
 
     - ``kind``: fixed | candidates（ja_ok は出さない）
-    - ``form``: 訳文に現れた字形（dst 欠落の違反では ""）
-    - ``paragraph``: 訳文の段落番号（dst 欠落の違反では 0 = ブロック全体）
+    - ``form``: 訳文に現れた字形（dst 欠落の違反では原文側の字形）
+    - ``paragraph``: 対象の段落番号（ブロック全体の違反では 0）
     - ``detail``: 人間が読む説明（語と規定訳を含む）
     """
     kind: str
@@ -205,11 +214,11 @@ class Vocab:
 
 # ── 読み込み ────────────────────────────────────────────────────────────
 
-def _norm_variants(raw, src: str) -> tuple[str, ...]:
+def _norm_variants(raw, base: str) -> tuple[str, ...]:
     out: list[str] = []
     if isinstance(raw, list):
         for v in raw:
-            if isinstance(v, str) and v and v != src and v not in out:
+            if isinstance(v, str) and v and v != base and v not in out:
                 out.append(v)
     return tuple(out)
 
@@ -232,6 +241,7 @@ def _entry_from_vocab_row(row) -> VocabEntry | None:
         note = ""
     return VocabEntry(src=src, dst=dst, kind=kind,
                       variants=_norm_variants(row.get("src_variants"), src),
+                      dst_variants=_norm_variants(row.get("dst_variants"), dst),
                       note=note, origin="vocab")
 
 
@@ -346,7 +356,7 @@ def _iter_positions(text: str, needle: str):
 
 
 def _in_dst_span(pos: int, length: int, spans) -> bool:
-    """出現 [pos, pos+length) が規定訳 dst の出現範囲に完全に含まれるか。
+    """出現 [pos, pos+length) が規定訳（dst / dst_variants）の出現範囲に完全に含まれるか。
 
     dst が原語形を含む語（例: 原語「合成語B」→ 規定訳「合成訳B」）でも、正しい
     訳語の内部を「原語形が残っている」と誤検知しないための判定。
@@ -358,18 +368,75 @@ def _residue_detail(entry: VocabEntry, form: str) -> str:
     dst = entry.dst or "(未規定)"
     if entry.kind == "fixed":
         return f"「{form}」は規定訳「{dst}」で訳す（原語形が残っています）"
-    return f"「{form}」→ 既定訳「{dst}」（原語相当の語が残っています）"
+    return (f"「{form}」→ 既定訳「{dst}」（原語相当の語が残っています）\n"
+            "既訳が混在する作品は rename_terms.py で統一してから")
+
+
+def _allowed_dst_label(entry: VocabEntry) -> str:
+    """規定訳の表示ラベル（許容別表記があれば併記）。"""
+    if not entry.dst:
+        return "規定訳" + "".join(f"『{v}』" for v in entry.dst_variants)
+    if not entry.dst_variants:
+        return f"規定訳『{entry.dst}』"
+    alts = "".join(f"『{v}』" for v in entry.dst_variants)
+    return f"規定訳『{entry.dst}』（別表記{alts}も可）"
+
+
+def _fixed_dst_by_paragraph(entry: VocabEntry, src_items,
+                            draft_paras: dict[int, str],
+                            known: list[str]) -> list[VocabFinding]:
+    """fixed の規定訳検査（段落単位）。
+
+    原文段落 n に語（src / src_variants）が出ていて、対応する訳文段落 n に規定訳
+    （dst / dst_variants のいずれか。完全一致）が無ければ違反。1段落に複数回出現
+    しても検査は1回（段落ごとに高々1件）。原文・訳文とも画像リンク ``![...](...)``
+    を除いたビューで判定し、known_terms に含まれる字形は原文側の出現として数えない
+    （ブロック全体検査と同じ保護）。
+    """
+    dst_forms = entry.dst_forms
+    out: list[VocabFinding] = []
+    seen: set[int] = set()
+    for n, text in src_items:
+        try:
+            num = int(n)
+        except (TypeError, ValueError):
+            continue
+        if num in seen:
+            continue
+        probe = _IMAGE_LINK.sub("", str(text))
+        hit = ""
+        for form in entry.forms:
+            if not form or any(t in form for t in known):
+                continue
+            if form in probe:
+                hit = form
+                break
+        if not hit:
+            continue
+        seen.add(num)
+        if any(s in draft_paras.get(num, "") for s in dst_forms):
+            continue
+        out.append(VocabFinding(
+            kind="fixed", entry=entry, form=hit, paragraph=num,
+            detail=(f"原文段落{num}の『{hit}』は{_allowed_dst_label(entry)}"
+                    "で訳されていません")))
+    return out
 
 
 def check_draft(vocab: Vocab, items, src_text: str = "",
-                known_terms=None) -> list[VocabFinding]:
+                known_terms=None, src_items=None) -> list[VocabFinding]:
     """訳文ドラフト（段落列）を統合辞書で検査する（純関数。裁定・I/O は呼び出し側）。
 
     ``items`` は ``(段落番号, 本文)`` の列（qa_translation.parse_draft と同じ形）。
     画像リンク ``![...](...)`` は実ファイル名（原語表記）を保持するため検査から除く。
 
     - fixed: 訳文に原語相当の語（src / src_variants）が残る、または原文に語が
-      出ているのに規定訳 dst が訳文に無い → 違反
+      出ているのに規定訳（dst / dst_variants のいずれか。完全一致）が訳文に無い
+      → 違反
+      - ``src_items``（原文の ``(段落番号, 本文)`` 列）を渡すと、規定訳の検査は
+        段落単位になる: 原文段落 n に語が出ていて、対応する訳文段落 n に規定訳が
+        無ければ違反（段落は原文と1対1）。省略時（None）は従来どおりブロック
+        全体で検査する（互換）
     - candidates: 訳文に原語相当の語が残る → 違反
     - ja_ok: 検査しない
     - ``known_terms``: 作品全体で意図的に残す語。含まれる字形は除外する
@@ -378,16 +445,32 @@ def check_draft(vocab: Vocab, items, src_text: str = "",
     body = "\n".join(_IMAGE_LINK.sub("", t) for _, t in items)
     findings: list[VocabFinding] = []
 
+    # 訳文段落のビュー（画像リンク除去済み。段落番号 → 本文）。src_items がある
+    # 場合の段落単位の規定訳検査に使う（重複した段落番号は連結して扱う）。
+    draft_paras: dict[int, str] = {}
+    if src_items is not None:
+        for n, text in items:
+            try:
+                num = int(n)
+            except (TypeError, ValueError):
+                continue
+            probe = _IMAGE_LINK.sub("", str(text))
+            draft_paras[num] = (f"{draft_paras[num]}\n{probe}"
+                                if num in draft_paras else probe)
+
     for entry in vocab.entries:
         if entry.kind == "ja_ok":
             continue
         if any(t in entry.src for t in known):
             continue
-        dst = entry.dst or ""
+        dst_forms = entry.dst_forms
         residue_found = False
         for n, text in items:
             probe = _IMAGE_LINK.sub("", text)
-            dst_spans = [(i, i + len(dst)) for i in _iter_positions(probe, dst)] if dst else []
+            # 規定訳（dst / dst_variants）の出現範囲。その内部を「原語形が残る」と
+            # 誤検知しない（許容別表記が原語形を含む場合も同様）。
+            dst_spans = [(i, i + len(s)) for s in dst_forms
+                         for i in _iter_positions(probe, s)]
             for form in entry.forms:
                 if not form or any(t in form for t in known):
                     continue
@@ -399,11 +482,16 @@ def check_draft(vocab: Vocab, items, src_text: str = "",
                         paragraph=int(n), detail=_residue_detail(entry, form)))
                     residue_found = True
                     break
-        if entry.kind == "fixed" and dst and not residue_found:
-            if any(form in src_text for form in entry.forms if form):
-                if dst not in body:
+        if entry.kind == "fixed" and dst_forms and not residue_found:
+            if src_items is not None:
+                # 段落単位: 原文段落ごとに規定訳の出現を強制する（表記ブレの検出）
+                findings.extend(_fixed_dst_by_paragraph(
+                    entry, src_items, draft_paras, known))
+            elif any(form in src_text for form in entry.forms if form):
+                if not any(s in body for s in dst_forms):
+                    shown = entry.dst or "／".join(entry.dst_variants)
                     findings.append(VocabFinding(
                         kind="fixed", entry=entry, form="", paragraph=0,
-                        detail=(f"原文の「{entry.src}」の訳語は規定訳「{dst}」"
+                        detail=(f"原文の「{entry.src}」の訳語は規定訳「{shown}」"
                                 "（訳文に規定訳が見つかりません）")))
     return findings
