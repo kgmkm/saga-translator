@@ -27,6 +27,9 @@ PYTHON = sys.executable
 sys.path.insert(0, str(SCRIPTS))
 
 import _lib  # noqa: E402
+import os  # noqa: E402
+# テストの環境独立: 兄弟ディレクトリの拡張 vocab.toml（自動探索）に依存しない
+os.environ.setdefault("SAGA_VOCAB_SKIP_AUTO", "1")
 
 DRAFT_SUFFIX = "_ja"
 

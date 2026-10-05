@@ -17,6 +17,8 @@ SCRIPTS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPTS))
 
 import vocab  # noqa: E402
+# テストの環境独立: 兄弟ディレクトリの拡張 vocab.toml（自動探索）に依存しない
+os.environ.setdefault("SAGA_VOCAB_SKIP_AUTO", "1")
 
 
 def _write(p: Path, text: str) -> None:

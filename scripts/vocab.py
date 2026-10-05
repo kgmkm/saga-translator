@@ -83,13 +83,16 @@ def _extension_vocab_paths() -> list[Path]:
       ``references/vocab.toml``
     - ``SAGA_VOCAB_PATH``: os.pathsep 区切りで追加指定（ファイル、または
       ``vocab.toml`` / ``references/vocab.toml`` を含むディレクトリ）
+    - ``SAGA_VOCAB_SKIP_AUTO``: 真値なら自動探索を無効化（テストの環境独立用。
+      ``SAGA_VOCAB_PATH`` は有効のまま）
     """
     out: list[Path] = []
     skill_root = Path(__file__).resolve().parent.parent
     try:
-        for p in sorted(skill_root.parent.glob("saga-translator-*/references/vocab.toml")):
-            if p.is_file() and p not in out:
-                out.append(p)
+        if not os.environ.get("SAGA_VOCAB_SKIP_AUTO"):
+            for p in sorted(skill_root.parent.glob("saga-translator-*/references/vocab.toml")):
+                if p.is_file() and p not in out:
+                    out.append(p)
     except OSError:
         pass
     for raw in os.environ.get("SAGA_VOCAB_PATH", "").split(os.pathsep):
@@ -367,7 +370,8 @@ def _in_dst_span(pos: int, length: int, spans) -> bool:
 def _residue_detail(entry: VocabEntry, form: str) -> str:
     dst = entry.dst or "(未規定)"
     if entry.kind == "fixed":
-        return f"「{form}」は規定訳「{dst}」で訳す（原語形が残っています）"
+        return (f"「{form}」は規定訳「{dst}」で訳す（原語形が残っています）\n"
+                "既訳が混在する作品は rename_terms.py で統一してから")
     return (f"「{form}」→ 既定訳「{dst}」（原語相当の語が残っています）\n"
             "既訳が混在する作品は rename_terms.py で統一してから")
 
