@@ -8,6 +8,7 @@ CLI をサブプロセスで実行し、終了コード・出力・chapters_meta
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -347,6 +348,122 @@ class TestAnalysisResidueCheck(_GateTestBase):
         out = p.stdout + p.stderr
         self.assertNotEqual(p.returncode, 0, out)
         self.assertIn("残渣", out)
+
+
+class TestProtectedOverwrite(_GateTestBase):
+    """analyze-commit --allow-protected-overwrite と監査記録（P1-5）。"""
+
+    def _seed(self) -> None:
+        """既存エントリ（role / name_ja つき）を作る。"""
+        p = self.fx.analyze_commit(
+            "ch001", "b1",
+            'block = "ch001/b1"\n\n[[characters_delta]]\n'
+            'match_key = "name_src"\nmatch_value = "テスト甲"\n'
+            'name_ja = "テスト甲"\nrole = "主人公"\n')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def _entry(self) -> dict:
+        chars = tomllib.loads(self.fx.analysis_file("characters-[ネタバレあり].toml")
+                              .read_text(encoding="utf-8"))
+        return chars["characters"][0]
+
+    def _edits(self) -> list[dict]:
+        p = self.fx.work / "_work" / "analysis_edits.jsonl"
+        if not p.is_file():
+            return []
+        return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+    def _delta(self, body: str, name: str = "delta_po.toml") -> Path:
+        d = self.td / name
+        d.write_text('block = "ch001/b1"\n\n[[characters_delta]]\n'
+                     'match_key = "name_src"\nmatch_value = "テスト甲"\n' + body,
+                     encoding="utf-8")
+        return d
+
+    def test_flag_overwrites_and_records_audit(self):
+        """フラグ指定時は記述系キー（role）を本体へ上書きし、監査記録を1行残す。"""
+        self._seed()
+        d = self._delta('role = "語り手"\n')
+        p = _saga("analyze-commit", str(self.fx.work), "--delta", str(d),
+                  "--allow-protected-overwrite")
+        out = p.stdout + p.stderr
+        self.assertEqual(p.returncode, 0, out)
+        entry = self._entry()
+        self.assertEqual(entry["role"], "語り手")
+        self.assertNotIn("proposed", entry)
+        edits = self._edits()
+        self.assertEqual(len(edits), 1, edits)
+        rec = edits[0]
+        self.assertEqual(rec["key"], "role")
+        self.assertEqual(rec["old"], "主人公")
+        self.assertEqual(rec["new"], "語り手")
+        self.assertTrue(rec["ts"])
+        self.assertEqual(rec["file"], "characters-[ネタバレあり].toml")
+
+    def test_without_flag_role_goes_to_proposed(self):
+        """フラグ無しは従来どおり proposed に退避（回帰）。監査記録も作らない。"""
+        self._seed()
+        d = self._delta('role = "語り手"\n', "delta_noflag.toml")
+        p = _saga("analyze-commit", str(self.fx.work), "--delta", str(d))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        entry = self._entry()
+        self.assertEqual(entry["role"], "主人公")
+        self.assertIn("role", entry.get("proposed", ""))
+        self.assertEqual(self._edits(), [])
+
+    def test_flag_does_not_touch_name_ja(self):
+        """フラグ指定でも name_ja は proposed のまま（rename_terms の領分。上書き不可）。"""
+        self._seed()
+        d = self._delta('name_ja = "テスト甲改"\n', "delta_name.toml")
+        p = _saga("analyze-commit", str(self.fx.work), "--delta", str(d),
+                  "--allow-protected-overwrite")
+        out = p.stdout + p.stderr
+        self.assertEqual(p.returncode, 0, out)
+        entry = self._entry()
+        self.assertEqual(entry["name_ja"], "テスト甲")
+        self.assertIn("name_ja", entry.get("proposed", ""))
+        self.assertEqual(self._edits(), [], "name_ja は監査記録の対象にもしない")
+
+
+class TestAnalysisPrepareContextStyle(_GateTestBase):
+    """分析 prepare のコンテキストは full 固定（P1-4）。"""
+
+    def test_analysis_prepare_includes_character_not_in_body(self):
+        """本文に名前が出ない人物も分析コンテキストには載る（compact で落ちない）。"""
+        chars = self.fx.analysis_file("characters-[ネタバレあり].toml")
+        chars.write_text('[[characters]]\nname_src = "隠れ甲"\nname_ja = "隠れ甲"\n'
+                         'role = "脇役"\n', encoding="utf-8")
+        p = self.fx.prepare("--mode", "analysis")
+        out = p.stdout + p.stderr
+        self.assertEqual(p.returncode, 0, out)
+        ctx = (self.fx.work / "translation_input" / "ch001_b1_analysis.md"
+               ).read_text(encoding="utf-8")
+        self.assertIn("隠れ甲", ctx)
+        # compact の出力ではない（full 固定）
+        self.assertNotIn("[context] compact:", p.stderr)
+
+
+class TestPrepareResidueWarning(_GateTestBase):
+    """prepare --mode analysis は既存 analysis の残渣を stderr 1行で警告する（P0-3）。"""
+
+    def test_warning_one_line_with_residue(self):
+        chars = self.fx.analysis_file("characters-[ネタバレあり].toml")
+        chars.write_text('[[characters]]\nname_src = "甲"\nrole = "测试角色"\n',
+                         encoding="utf-8")
+        p = self.fx.prepare("--mode", "analysis")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        lines = [l for l in p.stderr.splitlines()
+                 if l.startswith("[prepare]") and "残渣" in l]
+        self.assertEqual(len(lines), 1, p.stderr)
+        self.assertIn("lint", lines[0])
+
+    def test_no_warning_without_residue(self):
+        chars = self.fx.analysis_file("characters-[ネタバレあり].toml")
+        chars.write_text('[[characters]]\nname_src = "甲"\nrole = "主人公"\n',
+                         encoding="utf-8")
+        p = self.fx.prepare("--mode", "analysis")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertNotIn("残渣", p.stderr)
 
 
 if __name__ == "__main__":

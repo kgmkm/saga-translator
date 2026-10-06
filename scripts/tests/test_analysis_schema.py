@@ -5,6 +5,7 @@ CLI をサブプロセスで実行し、終了コード・stdout/stderr・chapte
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -159,6 +160,20 @@ class TestRejections(AnalysisSchemaBase):
         out = self._assert_rejected('block = "ch001/b1"\n')
         self.assertIn("no_changes", out)
 
+    def test_reject_unknown_plot_key(self):
+        """6. plot_delta の未知キー → 拒否（replace は許容キー。P1-5）。"""
+        out = self._assert_rejected('block = "ch001/b1"\n[[plot_delta]]\n'
+                                    'block = "ch001/b1"\ntext = "x"\nreplac = true\n')
+        self.assertIn("未知", out)
+        self.assertIn("replace", out)  # 許容キーの案内に replace が出る
+
+    def test_reject_non_bool_replace(self):
+        """7. replace が boolean でない → 拒否。"""
+        out = self._assert_rejected('block = "ch001/b1"\n[[plot_delta]]\n'
+                                    'block = "ch001/b1"\nreplace = "yes"\ntext = "x"\n')
+        self.assertIn("replace", out)
+        self.assertIn("boolean", out)
+
 
 class TestAcceptance(AnalysisSchemaBase):
     """正常系・no_changes 明示・ハッシュ記録。"""
@@ -207,6 +222,106 @@ class TestAcceptance(AnalysisSchemaBase):
         self.assertEqual(code, 0, out)
         h2 = _block(_load_meta(self.work), "ch001/b1")["analysis_src_hash"]
         self.assertNotEqual(h1, h2, "原文が変われば hash も変わる")
+
+
+class TestPlotReplace(AnalysisSchemaBase):
+    """plot_delta の replace = true（P1-5）。"""
+
+    def _plot_texts(self, block: str = "ch001/b1") -> list[str]:
+        data = tomllib.loads((self.work / "analysis" / "plot-[ネタバレあり].toml")
+                             .read_text(encoding="utf-8"))
+        return [e["text"] for e in data.get("entries", []) if e.get("block") == block]
+
+    def test_replace_updates_existing_block(self):
+        """replace = true は同一 block の text を置換する。"""
+        d = self._delta()
+        _write_delta(d, 'block = "ch001/b1"\n[[plot_delta]]\nblock = "ch001/b1"\ntext = "旧要点。"\n')
+        code, out = _run_ac(self.work, d)
+        self.assertEqual(code, 0, out)
+        d2 = self._delta("delta2.toml")
+        _write_delta(d2, 'block = "ch001/b1"\n[[plot_delta]]\nblock = "ch001/b1"\n'
+                         'replace = true\ntext = "新要点。"\n')
+        code, out = _run_ac(self.work, d2)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self._plot_texts(), ["新要点。"])
+        # 置換は監査記録にも残る
+        edits = [l for l in (self.work / "_work" / "analysis_edits.jsonl")
+                 .read_text(encoding="utf-8").splitlines() if l.strip()]
+        self.assertEqual(len(edits), 1)
+        rec = json.loads(edits[0])
+        self.assertEqual(rec["key"], "text")
+        self.assertEqual(rec["old"], "旧要点。")
+        self.assertEqual(rec["new"], "新要点。")
+        self.assertEqual(rec["via"], "plot-replace")
+
+    def test_append_without_replace_keeps_both(self):
+        """replace 無し（既定）は従来どおり追記。"""
+        d = self._delta()
+        _write_delta(d, 'block = "ch001/b1"\n[[plot_delta]]\nblock = "ch001/b1"\ntext = "要点A。"\n')
+        code, out = _run_ac(self.work, d)
+        self.assertEqual(code, 0, out)
+        d2 = self._delta("delta2.toml")
+        _write_delta(d2, 'block = "ch001/b1"\n[[plot_delta]]\nblock = "ch001/b1"\ntext = "要点B。"\n')
+        code, out = _run_ac(self.work, d2)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self._plot_texts(), ["要点A。", "要点B。"])
+
+    def test_replace_without_existing_block_appends(self):
+        """同一 block のエントリが無い replace は追記に回す。"""
+        d = self._delta()
+        _write_delta(d, 'block = "ch001/b2"\n[[plot_delta]]\nblock = "ch001/b2"\n'
+                         'replace = true\ntext = "初回要点。"\n')
+        code, out = _run_ac(self.work, d)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self._plot_texts("ch001/b2"), ["初回要点。"])
+
+
+class TestLint(AnalysisSchemaBase):
+    """saga.py lint の事前一覧（P0-3）。読み取り専用・行番号つき。"""
+
+    def _run_lint(self, *extra: str) -> tuple[int, str]:
+        r = subprocess.run(
+            [sys.executable, str(SAGA), "lint", str(self.work), *extra],
+            capture_output=True, text=True, cwd=str(SCRIPTS))
+        return r.returncode, r.stdout + r.stderr
+
+    def test_lint_clean_exit0(self):
+        """残渣なし → exit 0。"""
+        code, out = self._run_lint()
+        self.assertEqual(code, 0, out)
+        self.assertIn("残渣なし", out)
+
+    def test_lint_flags_residue_with_line_and_key(self):
+        """残渣あり → exit 1。ファイル:行: キーつきで列挙し、案内を出す。"""
+        (self.work / "analysis" / "characters-[ネタバレあり].toml").write_text(
+            '[[characters]]\n'
+            'name_src = "甲"\n'
+            'name_ja = "甲"\n'
+            'role = "测试角色"\n', encoding="utf-8")
+        code, out = self._run_lint()
+        self.assertEqual(code, 1, out)
+        self.assertIn("characters-[ネタバレあり].toml:4: role:", out)
+        self.assertIn("非JIS字", out)
+        self.assertIn("日本語フィールドは訳語のみ", out)
+
+    def test_lint_delta_flags_target_and_excludes_src(self):
+        """--delta: 対象欄は行番号つきで検出、match_value 等の原文側は除外。"""
+        d = self._delta()
+        _write_delta(d, 'block = "ch001/b1"\n[[characters_delta]]\n'
+                        'match_key = "name_src"\nmatch_value = "测试甲"\n'
+                        'name_ja = "テスト甲"\nrole = "测试角色"\n')
+        code, out = self._run_lint("--delta", str(d))
+        self.assertEqual(code, 1, out)
+        self.assertIn("delta.toml:6: role:", out)
+        self.assertNotIn("match_value:", out)  # 原文側は検査対象外
+        self.assertNotIn("name_ja:", out)
+
+    def test_lint_delta_clean_exit0(self):
+        d = self._delta()
+        _write_delta(d, 'block = "ch001/b1"\n[[plot_delta]]\nblock = "ch001/b1"\ntext = "要点。"\n')
+        code, out = self._run_lint("--delta", str(d))
+        self.assertEqual(code, 0, out)
+        self.assertIn("残渣なし", out)
 
 
 if __name__ == "__main__":

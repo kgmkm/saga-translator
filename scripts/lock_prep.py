@@ -415,6 +415,10 @@ def _fmt_naming_md(items: list[dict], policy: dict | None) -> list[str]:
         )
     else:
         lines.append("- 混在: なし")
+    lines.append(
+        "- 本文で名前が伏せられるキャラ（「女」「彼」等で呼ばれる）は、人物表で "
+        "`core = true` を付けると compact コンテキストから落ちない（P1-4）"
+    )
     lines.append("")
     for cat in NAMING_CATEGORIES:
         g = groups.get(cat, [])
@@ -636,6 +640,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  命名方針: {style}" + (f"（scope={scope}）" if scope else ""))
     else:
         print("  命名方針: 未決定（house_style.toml の [naming_policy] で決める。series スコープ推奨）")
+    print("  人物表: 本文で名前が伏せられるキャラは core = true を推奨（compact から落ちない。P1-4）")
     print(f"  出力: {md_path}, {toml_path}")
     print(f"  {_spicy_placeholder}")
 

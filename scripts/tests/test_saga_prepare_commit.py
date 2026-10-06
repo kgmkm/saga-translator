@@ -182,6 +182,32 @@ class TestPrepare(unittest.TestCase):
         self.assertEqual(rc, 1)
 
 
+class TestPrepareFull(unittest.TestCase):
+    """prepare --full は compact を解除する（P1-4）。"""
+
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _ctx(self, work: Path) -> str:
+        return (work / "translation_input" / "ch001_b1_translation.md"
+                ).read_text(encoding="utf-8")
+
+    def test_prepare_full_shows_all_characters(self):
+        """既定（compact）では本文に出ない人物が落ち、--full で全件出る。"""
+        from saga import cmd_prepare
+        work = _make_work(self.td)
+        rc = cmd_prepare(work, "ch001", "b1")
+        self.assertEqual(rc, 0)
+        self.assertNotIn("张三", self._ctx(work))  # compact: 本文に名前が出ない人物は落ちる
+        rc = cmd_prepare(work, "ch001", "b1", full=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("张三", self._ctx(work))     # --full: 全件（人物表の全欄つき）
+
+
 class TestCommit(unittest.TestCase):
     """saga.py commit のテスト。"""
 

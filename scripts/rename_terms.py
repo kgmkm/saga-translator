@@ -586,6 +586,23 @@ def renames_log_path(work) -> Path:
     return Path(work) / "_work" / "renames.jsonl"
 
 
+def load_pairs(path: Path) -> list[tuple[str, str]]:
+    """'旧<TAB>新' の行を読む（P1-6。空行・# 始まりは無視）。
+
+    タブが無い行は行番号つきの ValueError。旧・新のどちらかが空の行は読み飛ばす。
+    """
+    pairs: list[tuple[str, str]] = []
+    for i, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if "\t" not in line:
+            raise ValueError(f"{path}:{i}: タブ区切り '旧<TAB>新' が必要です")
+        old, new = line.split("\t", 1)
+        if old and new:
+            pairs.append((old, new))
+    return pairs
+
+
 def _fmt_hit(h: dict) -> str:
     """正本ヒットの（ブロック・段落）表記。"""
     bits: list[str] = []
@@ -608,29 +625,26 @@ def _fmt_ruby_item(it: dict) -> str:
     return f"{it['before']}（全体保護のため未変更。手当ての要確認）{where}"
 
 
-def main() -> None:
-    utf8()
-    ap = argparse.ArgumentParser(description="訳語変更の伝播")
-    ap.add_argument("work")
-    ap.add_argument("--term", required=True, help="旧訳語")
-    ap.add_argument("--to", required=True, help="新訳語")
-    ap.add_argument("--apply", action="store_true", help="実際に置換する(未指定は影響表示のみ)")
-    args = ap.parse_args()
+def _run_one(work: Path, old: str, to: str, apply: bool) -> dict:
+    """1ペア分の改名（影響表示と、--apply 時の適用。P1-6 の一括モードでも共用）。
 
-    work = Path(args.work)
-    targets = scan_targets(work, args.term)
-    alias_hits = scan_aliases(work, args.term)
+    保護（画像パス・ルビ読み）と確定後の契約（正本・対訳の訳文側の更新、派生物と
+    検査記録の stale 化、renames.jsonl への記録）は従来の1ペア処理のまま。
+    戻り値は logs/rename_last.json に保存する report。
+    """
+    targets = scan_targets(work, old)
+    alias_hits = scan_aliases(work, old)
     canon_total = sum(h["total"] for h in targets["canonical"])
     par_total = sum(h["total"] for h in targets["parallel"])
     deriv_total = sum(h["total"] for h in targets["derivatives"])
     alias_total = sum(h["total"] for h in alias_hits)
-    report = {"term": args.term, "to": args.to, "applied": False,
-              "files": scan(work, args.term), "aliases": alias_hits}
+    report = {"term": old, "to": to, "applied": False,
+              "files": scan(work, old), "aliases": alias_hits}
 
     if not (targets["canonical"] or targets["parallel"] or targets["derivatives"] or alias_hits):
-        print(f"[rename] 「{args.term}」の出力への出現なし（変更なし。影響0）")
+        print(f"[rename] 「{old}」の出力への出現なし（変更なし。影響0）")
     else:
-        print(f"[rename] 「{args.term}」→「{args.to}」: 正本 {canon_total}箇所 / "
+        print(f"[rename] 「{old}」→「{to}」: 正本 {canon_total}箇所 / "
               f"対訳(訳文側) {par_total}箇所 / 派生 {deriv_total}箇所 / aliases {alias_total}箇所")
         for h in targets["canonical"]:
             flag = " ※同一段落に複数(文脈要確認)" if h.get("multi") else ""
@@ -644,10 +658,10 @@ def main() -> None:
         for h in alias_hits:
             print(f"[rename]   aliases: {h['name']}: 「{h['alias']}」 {h['total']}箇所")
 
-    if args.apply:
+    if apply:
         ts_now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        prop = apply_propagation(work, args.term, args.to, when=ts_now)
-        n_alias, alias_names = apply_alias_renames(work, args.term, args.to)
+        prop = apply_propagation(work, old, to, when=ts_now)
+        n_alias, alias_names = apply_alias_renames(work, old, to)
         changed = prop["changed"] or n_alias > 0
         report.update({
             "applied": changed,
@@ -679,8 +693,8 @@ def main() -> None:
                 print("[rename] ルビ読みの要確認リスト: なし")
             append_jsonl(renames_log_path(work), {
                 "ts": ts_now,
-                "term": args.term,
-                "to": args.to,
+                "term": old,
+                "to": to,
                 "canonical": prop["canonical"],
                 "parallel": prop["parallel"],
                 "blocks": prop["changed_blocks"],
@@ -695,8 +709,51 @@ def main() -> None:
             print("[rename] 書き換え対象（正本・対訳）に変更なし")
             for h in targets["derivatives"]:
                 print(f"[rename]   派生に旧語が残っています（再 assemble で更新）: {h['file']}")
+    return report
+
+
+def main() -> int:
+    utf8()
+    ap = argparse.ArgumentParser(description="訳語変更の伝播")
+    ap.add_argument("work")
+    ap.add_argument("--term", default=None, help="旧訳語")
+    ap.add_argument("--to", default=None, help="新訳語")
+    ap.add_argument("--pairs-file", type=Path, default=None,
+                    help="'旧<TAB>新' を並べた一括置換ファイル（空行・# 始まりは無視。P1-6）")
+    ap.add_argument("--apply", action="store_true", help="実際に置換する(未指定は影響表示のみ)")
+    args = ap.parse_args()
+
+    work = Path(args.work)
+
+    if args.pairs_file is not None:
+        if args.term or args.to:
+            print("[rename] エラー: --pairs-file と --term/--to は同時に指定できません",
+                  file=sys.stderr)
+            return 1
+        try:
+            pairs = load_pairs(args.pairs_file)
+        except (OSError, ValueError) as e:
+            print(f"[rename] エラー: {e}", file=sys.stderr)
+            return 1
+        if not pairs:
+            print(f"[rename] ペアがありません（変更なし）: {args.pairs_file}")
+            return 0
+        print(f"[rename] 一括: {len(pairs)} ペア（{args.pairs_file}）"
+              + ("（適用）" if args.apply else "（影響表示のみ）"))
+        reports = [_run_one(work, old, new, args.apply) for old, new in pairs]
+        save_json(work / "logs" / "rename_last.json",
+                  {"pairs": reports,
+                   "applied": any(bool(r.get("applied")) for r in reports)})
+        return 0
+
+    if not (args.term and args.to):
+        print("[rename] エラー: --term と --to（または --pairs-file）が必要です",
+              file=sys.stderr)
+        return 1
+    report = _run_one(work, args.term, args.to, args.apply)
     save_json(work / "logs" / "rename_last.json", report)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

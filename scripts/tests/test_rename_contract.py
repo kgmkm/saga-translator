@@ -337,5 +337,60 @@ class TestIdempotent(_Base):
         self.assertNotIn("derivatives_stale_at", man)
 
 
+class TestPairsFile(_Base):
+    """rename_terms.py --pairs-file（P1-6）。"""
+
+    def _pairs_file(self, text: str, name: str = "fixes.txt") -> Path:
+        p = self.tmp / name
+        p.write_text(text, encoding="utf-8", newline="\n")
+        return p
+
+    def test_pairs_file_applies_multiple_and_records(self):
+        """複数ペアを順に一括適用し、renames.jsonl にペアごとの行を追記する。"""
+        pf = self._pairs_file("# 修正一覧\n\n旧訳\t新訳\n歩いた\t歩んだ\n")
+        code, out = _run(RENAME, [str(self.work), "--pairs-file", str(pf), "--apply"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("一括: 2 ペア", out)
+        done = _read(self.work, DONE_B1)
+        self.assertIn("新訳が歩んだ。", done)
+        self.assertNotIn("旧訳", done.replace("[[rb:旧訳 > きゅうやく]]", ""))
+        lines = [l for l in (self.work / JSONL).read_text(encoding="utf-8").splitlines()
+                 if l.strip()]
+        self.assertEqual(len(lines), 2, lines)
+        recs = [json.loads(l) for l in lines]
+        self.assertEqual([r["term"] for r in recs], [OLD, "歩いた"])
+        self.assertEqual([r["to"] for r in recs], [NEW, "歩んだ"])
+
+    def test_pairs_file_dry_run_shows_impact_without_change(self):
+        """--apply 無しは影響表示のみ（ファイルは変えない）。"""
+        pf = self._pairs_file("旧訳\t新訳\n歩いた\t歩んだ\n")
+        before = (self.work / DONE_B1).read_bytes()
+        code, out = _run(RENAME, [str(self.work), "--pairs-file", str(pf)])
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"「{OLD}」→「{NEW}」", out)
+        self.assertIn("「歩いた」→「歩んだ」", out)
+        self.assertEqual((self.work / DONE_B1).read_bytes(), before)
+        self.assertFalse((self.work / JSONL).exists())
+
+    def test_pairs_file_tabless_line_errors_with_line_number(self):
+        """タブ無し行は行番号つきでエラー。読み込み前に落ちるので何も適用しない。"""
+        pf = self._pairs_file("# c\n\n旧訳\t新訳\nタブなし行\n")
+        before = (self.work / DONE_B1).read_bytes()
+        code, out = _run(RENAME, [str(self.work), "--pairs-file", str(pf), "--apply"])
+        self.assertEqual(code, 1, out)
+        self.assertIn(":4:", out)
+        self.assertIn("タブ", out)
+        self.assertEqual((self.work / DONE_B1).read_bytes(), before)
+        self.assertFalse((self.work / JSONL).exists())
+
+    def test_pairs_file_conflicts_with_term(self):
+        """--pairs-file と --term/--to の同時指定はエラー。"""
+        pf = self._pairs_file("旧訳\t新訳\n")
+        code, out = _run(RENAME, [str(self.work), "--pairs-file", str(pf),
+                                  "--term", OLD, "--to", NEW, "--apply"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("同時に指定できません", out)
+
+
 if __name__ == "__main__":
     unittest.main()

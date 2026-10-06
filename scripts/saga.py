@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -15,8 +16,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _lib import (  # noqa: E402
-    VOICE_STATUSES, acquire_lock, atomic_write_text, block_meta, block_paras, block_src_hash,
-    character_aliases, derivatives_stale_at, direction, dump_toml, load_chapters_meta,
+    VOICE_STATUSES, acquire_lock, append_jsonl, atomic_write_text, block_meta, block_paras,
+    block_src_hash, character_aliases, derivatives_stale_at, direction, dump_toml,
+    load_chapters_meta,
     load_characters, load_paras,
     load_plot, load_structured, load_terms, load_toml, merge_speaker_candidate,
     merge_variant_candidates, normalize_variant_candidates, read_skill_version, record_timeline,
@@ -160,10 +162,11 @@ def _naming_policy_of(work: Path) -> dict | None:
 
 
 def _status_pending_analysis(work: Path) -> list[str]:
-    """status の「分析の確認待ち」節（P0-4・#7）。
+    """status の「分析の確認待ち」節（P0-4・#7 / P2-9）。
 
     未確定の声（unconfirmed / insufficient_evidence）と、未解決の話者/異表記の
-    確認候補を列挙する。検収済みの「未確定」は許容する（推測で埋めない方針の明示）。
+    確認候補、proposed が残っているエントリ（訳語変更の候補）を列挙する。
+    検収済みの「未確定」は許容する（推測で埋めない方針の明示）。
     """
     from build_context import VOICE_STATUS_LABELS
     try:
@@ -175,7 +178,13 @@ def _status_pending_analysis(work: Path) -> list[str]:
     voice_wait: list[str] = []
     speaker_wait: list[str] = []
     variant_wait: list[str] = []
+    proposed_wait: list[str] = []
     seen_pairs: set[tuple[str, str]] = set()
+
+    def _proposed_line(name: str, proposed: str) -> str:
+        """proposed 滞留の1行（名前＋先頭40字。P2-9）。"""
+        head = proposed.splitlines()[0] if proposed else ""
+        return f"{name}: {head[:40]}"
 
     def _variant_line(name_src: str, similar_to: str, block: str, suffix: str = "") -> str:
         pair = "⇔".join(sorted((name_src, similar_to))) if similar_to else name_src
@@ -195,6 +204,9 @@ def _status_pending_analysis(work: Path) -> list[str]:
                 continue
             seen_pairs.add(pair)
             variant_wait.append(_variant_line(cand["name_src"], cand["similar_to_src"], cand["block"]))
+        proposed = str(c.get("proposed") or "").strip()
+        if proposed:
+            proposed_wait.append(_proposed_line(str(name), proposed))
     for cand in normalize_variant_candidates(chars_data.get("variant_candidates")):
         pair = tuple(sorted((cand["name_src"], cand["similar_to_src"])))
         if pair in seen_pairs:
@@ -203,7 +215,20 @@ def _status_pending_analysis(work: Path) -> list[str]:
         variant_wait.append(
             _variant_line(cand["name_src"], cand["similar_to_src"], cand["block"], "（該当キャラなし）"))
 
-    if not voice_wait and not speaker_wait and not variant_wait:
+    # proposed の滞留（用語集。P2-9）
+    try:
+        terms_list = load_terms(work).get("terms") or []
+    except Exception:
+        terms_list = []
+    for t in terms_list:
+        if not isinstance(t, dict):
+            continue
+        proposed = str(t.get("proposed") or "").strip()
+        if proposed:
+            tname = str(t.get("term_ja") or t.get("term_src") or "(無名)")
+            proposed_wait.append(_proposed_line(tname, proposed))
+
+    if not voice_wait and not speaker_wait and not variant_wait and not proposed_wait:
         return ["[status] 分析の確認待ち: なし"]
     out = ["[status] 分析の確認待ち:"]
     if voice_wait:
@@ -212,6 +237,12 @@ def _status_pending_analysis(work: Path) -> list[str]:
         out.append("[status]   話者の確認候補: " + _cap_list(speaker_wait))
     if variant_wait:
         out.append("[status]   異表記候補: " + _cap_list(variant_wait))
+    if proposed_wait:
+        out.append("[status]   proposed 滞留（訳語変更の候補。承認後に rename_terms で本採用）:")
+        for x in proposed_wait[:8]:
+            out.append(f"[status]     {x}")
+        if len(proposed_wait) > 8:
+            out.append(f"[status]     …他{len(proposed_wait) - 8}件")
     out.append("[status]   （検収済みの「未確定」は許容。推測で埋めず、埋め直しは1周後に delta で1回）")
     return out
 
@@ -521,6 +552,182 @@ def _cmd_status_impl(work: Path) -> int:
 
 
 # ---------------------------------------------------------------------------
+# 残渣検査の共通収集と lint サブコマンド（P0-3）
+# ---------------------------------------------------------------------------
+#
+# lint は「analyze-commit が保存前に拒否する残渣」を commit の前に一覧化する
+# 読み取り専用コマンド。検出は analyze-commit と同一の find_cn_residue_fields
+# （構造で対象欄を選ぶ既存実装）をそのまま使い、分岐実装は作らない。
+# 検査対象は analyze-commit が保存前に検査する3ファイル（characters / terms /
+# plot）と、--delta で渡された差分 TOML。
+#
+# 原文側（値が原語）として除外するキーの正:
+#   - data-schema.md の src キー: name_src / term_src / title_src / src /
+#     target_src / similar_to_src（+ aliases は原文の異表記）
+#     → detect.zh2ja.find_cn_residue_fields の _is_src_key が除外する
+#   - 差分 TOML 固有: match_key / match_value / block（照合キーとブロック指定）
+#     → 差分を検査するときだけ DELTA_SRC_KEYS で除外する
+
+#: 差分 TOML で値が原語（原文側）になるキー（lint --delta の検査から除外）。
+DELTA_SRC_KEYS = frozenset({"match_key", "match_value", "block"})
+
+
+def collect_analysis_residue(
+        entries: list[tuple[str, dict, str]]) -> list[tuple[str, int, str, str, str]]:
+    """分析 TOML の残渣を収集する（analyze-commit / lint / prepare 警告の共通経路）。
+
+    ``entries`` は ``(表示名, 検査対象データ, 行番号を探すテキスト)``。検出は
+    ``detect.zh2ja.find_cn_residue_fields``（analyze-commit が保存前に使うのと
+    同じ関数）そのもの。戻り値は ``(名前, 行, キー, 理由, 場所)`` の一覧。
+    """
+    from detect.zh2ja import find_cn_residue_fields
+
+    out: list[tuple[str, int, str, str, str]] = []
+    for name, data, text in entries:
+        for f in find_cn_residue_fields(data):
+            line, key = _residue_line_key(f, text)
+            out.append((name, line, key, f.value, f.context or ""))
+    return out
+
+
+def _residue_line_key(finding, text: str) -> tuple[int, str]:
+    """Finding に (行番号, キー名) を付ける。
+
+    Finding.context は find_cn_residue_fields が作る ``"path = 値…"`` 形式。
+    ``text``（TOML テキスト）から値の先頭部分を探し、最初に一致した行を返す
+    （見つからなければ 0 = 不明。値の推測はしない）。
+    """
+    ctx = finding.context or ""
+    loc, sep, snip = ctx.partition(" = ")
+    if not sep:
+        loc, snip = "", ctx
+    key = loc.rsplit(".", 1)[-1] if loc else ""
+    key = re.sub(r"\[\d+\]$", "", key)
+    line = 0
+    first = snip.splitlines()[0] if snip else ""
+    if first:
+        for i, ln in enumerate(text.splitlines(), 1):
+            if first in ln:
+                line = i
+                break
+    return line, key
+
+
+def _load_residue_targets(work: Path) -> tuple[list[tuple[str, dict, str]], list[str]]:
+    """残渣検査の対象（analyze-commit が保存前に検査する3ファイル）を読む。
+
+    戻り値: ``(エントリ, 読み取りエラー)``。エントリは
+    ``(表示名, パース済みデータ, 行番号探索用テキスト)``。存在しないファイルは
+    対象外（残渣なしと矛盾しない）。壊れたファイルはエラーとして返す。
+    """
+    entries: list[tuple[str, dict, str]] = []
+    errors: list[str] = []
+    for kind in ("characters", "terms", "plot"):
+        p = _analysis_path(work, kind)
+        if not p.is_file():
+            continue
+        try:
+            data = load_toml(p)
+        except Exception as e:
+            errors.append(f"{p.name} を読めません: {e}")
+            continue
+        if not isinstance(data, dict) or not data:
+            continue
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError as e:
+            errors.append(f"{p.name} を読めません: {e}")
+            continue
+        entries.append((p.name, data, text))
+    return entries, errors
+
+
+def _delta_residue_view(delta: dict) -> dict:
+    """差分 TOML を残渣検査用のビューに写す。
+
+    match_key / match_value / block の値は原文側（照合キー・ブロック指定）
+    なので空にして検査対象から外す。通常の src キー（src / *_src / aliases）は
+    find_cn_residue_fields 側が構造で除外する。
+    """
+    view = copy.deepcopy(delta)
+
+    def scrub(obj) -> None:
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if k in DELTA_SRC_KEYS and isinstance(v, str):
+                    obj[k] = ""
+                else:
+                    scrub(v)
+        elif isinstance(obj, list):
+            for x in obj:
+                scrub(x)
+
+    scrub(view)
+    return view
+
+
+def _analysis_residue_warning(work: Path) -> str | None:
+    """prepare --mode analysis の残渣の事前警告（P0-3）。1行だけ返す（無ければ None）。"""
+    try:
+        entries, _errors = _load_residue_targets(work)
+        hits = collect_analysis_residue(entries)
+    except Exception:
+        return None
+    if not hits:
+        return None
+    names = sorted({h[0] for h in hits})
+    shown = ", ".join(names[:3]) + ("…" if len(names) > 3 else "")
+    return (f"[prepare] 警告: 既存の分析 TOML に日本語フィールドの残渣が {len(hits)} 件あります"
+            f"（{shown}）。saga.py lint で一覧し、修正してから分析してください"
+            f"（日本語フィールドは訳語のみ。原語は *_src / match_value 等）")
+
+
+def cmd_lint(work: Path, delta: Path | None = None) -> int:
+    """分析 TOML の日本語フィールド残渣の事前一覧（読み取り専用。P0-3）。
+
+    ファイルは書かない（ロック・計測記録も取らない）。残渣が無ければ exit 0、
+    あれば exit 1 で、日本語フィールドは訳語のみで書くよう案内する。
+    """
+    if not work.is_dir():
+        print(f"[lint] エラー: ディレクトリが見つかりません: {work}", file=sys.stderr)
+        return 1
+
+    entries, errors = _load_residue_targets(work)
+    for e in errors:
+        print(f"[lint] エラー: {e}", file=sys.stderr)
+
+    hits = collect_analysis_residue(entries)
+
+    if delta is not None:
+        if not delta.is_file():
+            print(f"[lint] エラー: delta ファイルが見つかりません: {delta}", file=sys.stderr)
+            return 1
+        try:
+            d_data = load_toml(delta)
+        except Exception as e:
+            print(f"[lint] エラー: delta を読めません: {e}", file=sys.stderr)
+            return 1
+        try:
+            d_text = delta.read_text(encoding="utf-8")
+        except OSError:
+            d_text = ""
+        hits += collect_analysis_residue(
+            [(delta.name, _delta_residue_view(d_data), d_text)])
+
+    if hits:
+        for name, line, key, reasons, _ctx in hits:
+            at = f"{name}:{line}" if line else name
+            print(f"[lint] {at}: {key or '-'}: {reasons}")
+        print(f"[lint] {len(hits)} 件。日本語フィールドは訳語のみで書いてください"
+              "（原語は *_src / match_value 等にだけ書く）", file=sys.stderr)
+        return 1
+    if errors:
+        return 1
+    print("[lint] 残渣なし（analysis/*.toml の日本語フィールド）")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # analyze-commit サブコマンド
 # ---------------------------------------------------------------------------
 
@@ -570,11 +777,37 @@ def _check_voice_transition(entry: dict, provided: dict, match_value: str) -> No
             "が必要です")
 
 
-def _apply_chars_delta(chars: list[dict], delta_list: list[dict]) -> list[str]:
+#: --allow-protected-overwrite で上書きを許す記述系キー（P1-5）。
+#: 訳語そのもの（name_ja / term_ja）と声・ルビの欄は引き続き proposed へ退避する
+#: （訳語の変更は rename_terms.py の領分）。
+PROTECTED_OVERWRITABLE_KEYS = frozenset(
+    {"memo", "role", "appearance", "relationships", "note"})
+
+
+def _analysis_edits_path(work: Path) -> Path:
+    """分析の訂正監査記録（_work/analysis_edits.jsonl。purge しない。P1-5）。"""
+    return work / "_work" / "analysis_edits.jsonl"
+
+
+def _record_protected_overwrite(edits_out: list[dict] | None, match: str,
+                                key: str, old, new) -> None:
+    """保護キーの明示上書きを監査記録として集める（P1-5。old == new は記録しない）。"""
+    if edits_out is None or str(old) == str(new):
+        return
+    edits_out.append({"ts": _now_iso(), "match": match, "key": key,
+                      "old": old, "new": new, "via": "protected-overwrite"})
+
+
+def _apply_chars_delta(chars: list[dict], delta_list: list[dict],
+                       allow_protected_overwrite: bool = False,
+                       edits_out: list[dict] | None = None) -> list[str]:
     """キャラ差分を適用。proposed が発生した変更を説明する文字列リストを返す。
 
     aliases は既存への追記マージ（重複排除）。voice_status = confirmed への
     遷移は声の記述が必要で、無ければ ValueError（P0-4）。
+    ``allow_protected_overwrite``（P1-5）では記述系キー
+    （PROTECTED_OVERWRITABLE_KEYS）だけ proposed へ退避せず本体を更新し、
+    監査記録を ``edits_out`` に集める（name_ja 等は従来どおり proposed）。
     """
     proposed_log: list[str] = []
     SPECIAL = {"match_key", "match_value", "updates", "new_fields",
@@ -605,6 +838,11 @@ def _apply_chars_delta(chars: list[dict], delta_list: list[dict]) -> list[str]:
                     continue
                 existing = entry.get(k)
                 if existing is not None and str(existing).strip() and k in protect_keys:
+                    if allow_protected_overwrite and k in PROTECTED_OVERWRITABLE_KEYS:
+                        # 記述系キーの明示上書き（proposed に退避せず、監査記録に残す。P1-5）
+                        _record_protected_overwrite(edits_out, match_value, k, existing, v)
+                        entry[k] = v
+                        continue
                     proposed = entry.get("proposed") or ""
                     line = f"{k}: 「{existing}」→「{v}」"
                     if line not in proposed:
@@ -635,8 +873,15 @@ def _apply_chars_delta(chars: list[dict], delta_list: list[dict]) -> list[str]:
     return proposed_log
 
 
-def _apply_terms_delta(terms: list[dict], delta_list: list[dict]) -> list[str]:
-    """用語差分を適用。proposed ログを返す。"""
+def _apply_terms_delta(terms: list[dict], delta_list: list[dict],
+                       allow_protected_overwrite: bool = False,
+                       edits_out: list[dict] | None = None) -> list[str]:
+    """用語差分を適用。proposed ログを返す。
+
+    ``allow_protected_overwrite``（P1-5）では記述系キー
+    （PROTECTED_OVERWRITABLE_KEYS。terms では memo）だけ proposed へ退避せず
+    本体を更新し、監査記録を ``edits_out`` に集める（term_ja 等は従来どおり）。
+    """
     proposed_log: list[str] = []
     SPECIAL = {"match_key", "match_value", "updates", "new_fields",
                "characters_delta", "terms_delta", "plot_delta", "block"}
@@ -656,6 +901,11 @@ def _apply_terms_delta(terms: list[dict], delta_list: list[dict]) -> list[str]:
             for k, v in updates.items():
                 existing = entry.get(k)
                 if existing is not None and str(existing).strip() and k in protect_keys:
+                    if allow_protected_overwrite and k in PROTECTED_OVERWRITABLE_KEYS:
+                        # 記述系キーの明示上書き（proposed に退避せず、監査記録に残す。P1-5）
+                        _record_protected_overwrite(edits_out, match_value, k, existing, v)
+                        entry[k] = v
+                        continue
                     proposed = entry.get("proposed") or ""
                     line = f"{k}: 「{existing}」→「{v}」"
                     if line not in proposed:
@@ -677,12 +927,29 @@ def _apply_terms_delta(terms: list[dict], delta_list: list[dict]) -> list[str]:
     return proposed_log
 
 
-def _apply_plot_delta(entries: list[dict], delta_list: list[dict]) -> list[str]:
-    """プロットエントリを追記。冪等性: 同一 block + 同一 text は重複スキップ。"""
+def _apply_plot_delta(entries: list[dict], delta_list: list[dict],
+                      edits_out: list[dict] | None = None) -> list[str]:
+    """プロットエントリを追記（既定）。``replace = true`` は同一 block の text を置換（P1-5）。
+
+    冪等性: 追記は同一 block + 同一 text を重複スキップ。置換は同一 block の
+    先頭エントリの text を置き換える（同一 block のエントリが無ければ追記に回す）。
+    置換の監査記録は ``edits_out`` に集める。
+    """
     proposed_log: list[str] = []
     for delta in delta_list:
         block = delta.get("block", "")
         text = (delta.get("updates") or {}).get("text") or delta.get("text", "")
+        if delta.get("replace") is True and block:
+            # 同一 block の text を置換（既定は従来どおり追記。P1-5）
+            idx = next((i for i, e in enumerate(entries)
+                        if str(e.get("block", "")).strip() == block.strip()), None)
+            if idx is not None:
+                old = str(entries[idx].get("text", ""))
+                entries[idx]["text"] = text
+                if edits_out is not None and old != str(text):
+                    edits_out.append({"ts": _now_iso(), "match": block, "key": "text",
+                                      "old": old, "new": text, "via": "plot-replace"})
+                continue
         # 冪等性チェック: 既存に同じ block+text があればスキップ
         if block and text:
             dup = any(
@@ -711,7 +978,16 @@ def _analysis_backup_dir(work: Path) -> Path:
     return work / "_work" / "analysis_backup"
 
 
-def _build_analysis_payloads(work: Path, delta: dict) -> tuple[list[tuple[Path, dict]] | None, list[str], list[str]]:
+def _tag_edits(edits: list[dict], start: int, file_name: str) -> None:
+    """``edits[start:]`` に書き込み先ファイル名を付ける（P1-5 の監査記録用）。"""
+    for e in edits[start:]:
+        e.setdefault("file", file_name)
+
+
+def _build_analysis_payloads(work: Path, delta: dict,
+                             allow_protected_overwrite: bool = False,
+                             edits_out: list[dict] | None = None
+                             ) -> tuple[list[tuple[Path, dict]] | None, list[str], list[str]]:
     """差分を適用した書き込み対象（パス, データ）を組み立てる。書き込みは行わない。
 
     戻り値 ``(payloads, logs, errors)``:
@@ -722,6 +998,8 @@ def _build_analysis_payloads(work: Path, delta: dict) -> tuple[list[tuple[Path, 
 
     反映対象（characters / terms / plot）を**すべて先に組み立て・検証**する。
     ここで例外が出れば一切書き込まずに ``payloads=None`` を返す。
+    ``allow_protected_overwrite`` / ``edits_out`` は保護キーの明示上書きの
+    監査記録（P1-5）。記録は呼び出し側が保存成功後に書き出す。
     """
     try:
         chars = load_characters(work)
@@ -735,10 +1013,21 @@ def _build_analysis_payloads(work: Path, delta: dict) -> tuple[list[tuple[Path, 
     plot_entries = plot.get("entries", [])
 
     all_logs: list[str] = []
+    edits: list[dict] = edits_out if edits_out is not None else []
     try:
-        cl = _apply_chars_delta(chars_list, delta.get("characters_delta", []))
-        tl = _apply_terms_delta(terms_list, delta.get("terms_delta", []))
-        pl = _apply_plot_delta(plot_entries, delta.get("plot_delta", []))
+        n0 = len(edits)
+        cl = _apply_chars_delta(chars_list, delta.get("characters_delta", []),
+                                allow_protected_overwrite=allow_protected_overwrite,
+                                edits_out=edits)
+        _tag_edits(edits, n0, _analysis_path(work, "characters").name)
+        n1 = len(edits)
+        tl = _apply_terms_delta(terms_list, delta.get("terms_delta", []),
+                                allow_protected_overwrite=allow_protected_overwrite,
+                                edits_out=edits)
+        _tag_edits(edits, n1, _analysis_path(work, "terms").name)
+        n2 = len(edits)
+        pl = _apply_plot_delta(plot_entries, delta.get("plot_delta", []), edits_out=edits)
+        _tag_edits(edits, n2, _analysis_path(work, "plot").name)
     except Exception as e:
         return None, [], [str(e)]
 
@@ -1040,6 +1329,11 @@ def _translation_analysis_gate(work: Path, meta: dict, block_key: str,
     return 0
 
 
+#: plot_delta エントリの許容キー（P1-5。replace は同一 block の text 置換）。
+#: 未知キーは黙って無視せず拒否する。
+PLOT_DELTA_KEYS = frozenset({"block", "text", "replace", "updates", "new_fields"})
+
+
 def validate_analysis_delta(meta: dict, delta: dict) -> tuple[bool, str | None, bool]:
     """analyze-commit の受入検証（純関数・I/O 無し）。
 
@@ -1052,7 +1346,8 @@ def validate_analysis_delta(meta: dict, delta: dict) -> tuple[bool, str | None, 
     1. ``block`` 必須
     2. ``block`` が chapters_meta に存在（``chNNN/bN`` 形式）
     3. スキーマ検証（型不一致は拒否。block 以外のキーは無視）
-    4. plot エントリの ``block`` は delta の block と一致
+    4. plot エントリの ``block`` は delta の block と一致。``replace`` は
+       boolean。未知キーは拒否（許容: PLOT_DELTA_KEYS）
     5. 差分が空なら ``no_changes = true`` の明示が必要
     """
     block = delta.get("block")
@@ -1106,6 +1401,12 @@ def validate_analysis_delta(meta: dict, delta: dict) -> tuple[bool, str | None, 
         if not isinstance(pb, str) or pb.strip() != block:
             return False, (f"plot_delta[{i}] の `block` が delta の block と一致しません"
                            f"（対象外ブロックの plot は拒否: {pb!r} != {block!r}）"), False
+        if "replace" in p and not isinstance(p["replace"], bool):
+            return False, f"plot_delta[{i}].replace は true / false（boolean）であるべきです", False
+        unknown = [k for k in p if k not in PLOT_DELTA_KEYS]
+        if unknown:
+            return False, (f"plot_delta[{i}] に未知のキー `{unknown[0]}` があります"
+                           f"（許容: {' / '.join(sorted(PLOT_DELTA_KEYS))}）"), False
 
     has_changes = any(len(delta.get(k, [])) > 0
                       for k in ("characters_delta", "terms_delta", "plot_delta"))
@@ -1117,16 +1418,18 @@ def validate_analysis_delta(meta: dict, delta: dict) -> tuple[bool, str | None, 
 
 
 def cmd_analyze_commit(work: Path, delta_path: Path,
-                       force_residue: bool = False) -> int:
+                       force_residue: bool = False,
+                       allow_protected_overwrite: bool = False) -> int:
     started = time.time()
-    rc = _cmd_analyze_commit_impl(work, delta_path, force_residue)
+    rc = _cmd_analyze_commit_impl(work, delta_path, force_residue, allow_protected_overwrite)
     reason = "success" if rc == 0 else "other"
     _record_stage(work, "analyze-commit", None, None, started, rc, reason=reason)
     return rc
 
 
 def _cmd_analyze_commit_impl(work: Path, delta_path: Path,
-                             force_residue: bool = False) -> int:
+                             force_residue: bool = False,
+                             allow_protected_overwrite: bool = False) -> int:
     if not delta_path.is_file():
         print(f"[analyze-commit] エラー: delta ファイルが見つかりません: {delta_path}", file=sys.stderr)
         return 1
@@ -1161,8 +1464,12 @@ def _cmd_analyze_commit_impl(work: Path, delta_path: Path,
         logs: list[str] = []
         candidate_logs: list[str] = []
         candidates_changed = False
+        edits: list[dict] = []
         if has_changes or check_active:
-            payloads, logs, errors = _build_analysis_payloads(work, delta)
+            payloads, logs, errors = _build_analysis_payloads(
+                work, delta,
+                allow_protected_overwrite=allow_protected_overwrite,
+                edits_out=edits)
             if payloads is None:
                 for e in errors:
                     print(f"[analyze-commit] エラー: {e}", file=sys.stderr)
@@ -1175,14 +1482,14 @@ def _cmd_analyze_commit_impl(work: Path, delta_path: Path,
 
         forced_residue = False
         if check_active and payloads is not None:
-            from detect.zh2ja import find_cn_residue_fields
-            residue: list[tuple[str, object]] = []
-            for r_path, r_data in payloads:
-                for f in find_cn_residue_fields(r_data):
-                    residue.append((r_path.name, f))
+            # 残渣収集は lint / prepare 警告と共通（collect_analysis_residue。P0-3）。
+            # 行番号は保存される形（dump_toml）の上で数える。
+            residue = collect_analysis_residue(
+                [(p.name, d, dump_toml(d)) for p, d in payloads])
             if residue:
-                for r_name, f in residue[:20]:
-                    print(f"[analyze-commit] 残渣: {r_name}: {f.value} ({f.context})")
+                for r_name, r_line, r_key, r_reasons, r_ctx in residue[:20]:
+                    at = f"{r_name}:{r_line}" if r_line else r_name
+                    print(f"[analyze-commit] 残渣: {at}: {r_key or '-'}: {r_reasons} ({r_ctx})")
                 if len(residue) > 20:
                     print(f"[analyze-commit] … 他 {len(residue) - 20} 件")
                 if not force_residue:
@@ -1205,6 +1512,9 @@ def _cmd_analyze_commit_impl(work: Path, delta_path: Path,
             if write_errors:
                 print("[analyze-commit] エラー: マージ検証失敗、何も書きませんでした", file=sys.stderr)
                 return 1
+            # 監査記録（P1-5）: 保護キーの明示上書き・plot 置換を保存成功後に1行ずつ残す
+            for e in edits:
+                append_jsonl(_analysis_edits_path(work), e)
         else:
             logs = []
 
@@ -1239,6 +1549,9 @@ def _cmd_analyze_commit_impl(work: Path, delta_path: Path,
             print(f"[analyze-commit] 完了: {n} 件マージ（{len([l for l in logs if '→proposed' in l])} 件は proposed に退避）")
         else:
             print("[analyze-commit] 完了: 差分なし（analysis_no_changes = true を記録）")
+        if edits:
+            print(f"[analyze-commit] 監査記録: {len(edits)} 件を _work/analysis_edits.jsonl に追記"
+                  "（保護キーの明示上書き・plot 置換）")
         for l in candidate_logs:
             print(f"[analyze-commit] {l}")
         return 0
@@ -1552,16 +1865,18 @@ def _find_first_unanalyzed(chapters: list[dict]) -> tuple[str, str, dict] | None
 
 
 def cmd_prepare(work: Path, chapter: str | None, block: str | None,
-                mode: str = "translation", no_analysis: bool = False) -> int:
+                mode: str = "translation", no_analysis: bool = False,
+                full: bool = False) -> int:
     started = time.time()
     outcome: dict = {"cid": chapter, "bid": block}
-    rc = _cmd_prepare_impl(work, chapter, block, mode, outcome, no_analysis)
+    rc = _cmd_prepare_impl(work, chapter, block, mode, outcome, no_analysis, full)
     _record_stage(work, "prepare", outcome["cid"], outcome["bid"], started, rc, mode=mode)
     return rc
 
 
 def _cmd_prepare_impl(work: Path, chapter: str | None, block: str | None,
-                      mode: str, outcome: dict, no_analysis: bool = False) -> int:
+                      mode: str, outcome: dict, no_analysis: bool = False,
+                      full: bool = False) -> int:
     if not work.is_dir():
         print(f"[prepare] エラー: ディレクトリが見つかりません: {work}", file=sys.stderr)
         return 1
@@ -1572,13 +1887,14 @@ def _cmd_prepare_impl(work: Path, chapter: str | None, block: str | None,
         print(f"[prepare] エラー: {lock_reason}（終了コード 3）", file=sys.stderr)
         return 3
     try:
-        return _cmd_prepare_locked(work, chapter, block, mode, outcome, no_analysis)
+        return _cmd_prepare_locked(work, chapter, block, mode, outcome, no_analysis, full)
     finally:
         _release_lock(work)
 
 
 def _cmd_prepare_locked(work: Path, chapter: str | None, block: str | None,
-                        mode: str, outcome: dict, no_analysis: bool = False) -> int:
+                        mode: str, outcome: dict, no_analysis: bool = False,
+                        full: bool = False) -> int:
     # スキル版ドリフト警告: 記録された skill_version と実行中の版が違えば知らせる
     # （非致命。記録が無い旧作業ディレクトリでは警告しない）。
     try:
@@ -1625,6 +1941,13 @@ def _cmd_prepare_locked(work: Path, chapter: str | None, block: str | None,
 
     src, dst = direction(work)
     suffix = target_suffix(dst)
+
+    # 残渣の事前警告（P0-3）: 分析を書き始める前に、既存 analysis の残渣に気づける
+    # （stderr に1行だけ。止めはしない。保存前検査は analyze-commit 側が行う）。
+    if mode == "analysis":
+        warn = _analysis_residue_warning(work)
+        if warn:
+            print(warn, file=sys.stderr)
 
     if mode == "analysis":
         # 分析モードは「未分析の先頭ブロック」を選ぶ（翻訳の未完了ではない: #4b）
@@ -1677,11 +2000,13 @@ def _cmd_prepare_locked(work: Path, chapter: str | None, block: str | None,
         if rc_gate:
             return rc_gate
 
-    # コンテキスト生成
+    # コンテキスト生成（--full は compact 解除。分析モードは full 固定:
+    # build_context の CLI と同じ決定式。P1-4）
     work_dir_obj = work
     (work_dir_obj / "translation_input").mkdir(parents=True, exist_ok=True)
     from build_context import _stage_impl as bc_stage
-    bc_stage(work, cid, bid, mode)
+    context_style = "full" if (full or mode == "analysis") else "compact"
+    bc_stage(work, cid, bid, mode, context_style)
 
     ctx_path = work / "translation_input" / f"{cid}_{bid}_{mode}.md"
 
@@ -3121,12 +3446,22 @@ def main() -> None:
     p_status = sub.add_parser("status", help="進捗確認")
     p_status.add_argument("work", help="作品ディレクトリ")
 
+    # lint
+    p_lint = sub.add_parser("lint", help="分析 TOML の日本語フィールド残渣の事前一覧（読み取り専用）")
+    p_lint.add_argument("work", help="作品ディレクトリ")
+    p_lint.add_argument("--delta", default=None, help="差分TOMLも検査する")
+
     # analyze-commit
     p_ac = sub.add_parser("analyze-commit", help="分析差分のコミット")
     p_ac.add_argument("work", help="作品ディレクトリ")
     p_ac.add_argument("--delta", required=True, help="差分TOMLファイル")
     p_ac.add_argument("--force-residue", action="store_true",
                       help="分析 TOML の中国語残渣を警告のうえで通す（block 記録に残す）")
+    p_ac.add_argument("--allow-protected-overwrite", action="store_true",
+                      dest="allow_protected_overwrite",
+                      help="記述系キー（memo / role / appearance / relationships / note）の"
+                           "上書きを許可し、_work/analysis_edits.jsonl に監査記録を残す"
+                           "（name_ja / term_ja は対象外＝rename_terms の領分）")
 
     # prepare
     p_prep = sub.add_parser("prepare", help="翻訳コンテキスト準備")
@@ -3137,6 +3472,8 @@ def main() -> None:
                         help="コンテキストのモード（既定: translation）")
     p_prep.add_argument("--no-analysis", action="store_true",
                         help="未分析ブロックの翻訳を明示的に許可する（analysis_skipped として記録）")
+    p_prep.add_argument("--full", action="store_true",
+                        help="compact をやめて全件の人物表・用語集を出力する")
 
     # review
     p_rev = sub.add_parser("review", help="検収リスト生成")
@@ -3175,12 +3512,15 @@ def main() -> None:
 
     if args.command == "status":
         raise SystemExit(cmd_status(work))
+    elif args.command == "lint":
+        raise SystemExit(cmd_lint(work, Path(args.delta) if args.delta else None))
     elif args.command == "analyze-commit":
         raise SystemExit(cmd_analyze_commit(work, Path(args.delta),
-                                            force_residue=args.force_residue))
+                                            force_residue=args.force_residue,
+                                            allow_protected_overwrite=args.allow_protected_overwrite))
     elif args.command == "prepare":
         raise SystemExit(cmd_prepare(work, args.chapter, args.block, mode=args.mode,
-                                     no_analysis=args.no_analysis))
+                                     no_analysis=args.no_analysis, full=args.full))
     elif args.command == "review":
         raise SystemExit(cmd_review(work, wave=args.wave,
                                      sample_ratio=args.sample_ratio,

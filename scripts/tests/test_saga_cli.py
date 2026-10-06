@@ -165,6 +165,32 @@ class TestSagaStatus(unittest.TestCase):
         code = cmd_status(bare)
         self.assertEqual(code, 1)
 
+    def test_status_proposed_backlog(self):
+        """proposed が残っているエントリを一覧表示する（P2-9）。"""
+        _make_plot_file(self.work, ["ch001/b1", "ch001/b2", "ch001/b3"])
+        _lib.save_toml(self.work / "analysis" / "characters-[ネタバレあり].toml", {
+            "characters": [{"name_src": "张三", "name_ja": "チョウサン",
+                            "proposed": "あ" * 50}]})
+        _lib.save_toml(self.work / "analysis" / "terms.toml", {
+            "terms": [{"term_src": "灵氣", "term_ja": "霊気",
+                       "proposed": "term_ja: 「霊気」→「レイキ」"}]})
+        code, out = self._run_status()
+        self.assertEqual(code, 0)
+        self.assertIn("proposed 滞留", out)
+        # 名前＋先頭40字（40字で切る）
+        self.assertIn("チョウサン: " + "あ" * 40, out)
+        self.assertNotIn("あ" * 41, out)
+        self.assertIn("霊気: term_ja: 「霊気」→「レイキ」", out)
+
+    def test_status_no_proposed_no_backlog_section(self):
+        """proposed が無ければ滞留節は出ない（従来どおり「なし」）。"""
+        _make_plot_file(self.work, ["ch001/b1", "ch001/b2", "ch001/b3"])
+        _lib.save_toml(self.work / "analysis" / "characters-[ネタバレあり].toml",
+                       {"characters": [{"name_src": "张三", "name_ja": "チョウサン"}]})
+        code, out = self._run_status()
+        self.assertEqual(code, 0)
+        self.assertNotIn("proposed 滞留", out)
+
 
 class TestSagaAnalyzeCommit(unittest.TestCase):
     """analyze-commit サブコマンドのテスト。"""
@@ -410,6 +436,51 @@ class TestSagaAnalyzeCommit(unittest.TestCase):
         b = meta["chapters"][0]["blocks"][0]
         self.assertIn("analysis_committed_at", b)
         self.assertTrue(b["analysis_committed_at"])
+
+
+class TestSagaLintReadOnly(unittest.TestCase):
+    """saga.py lint は読み取り専用（ファイルを書かない。P0-3）。"""
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        self.tmp = Path(tempfile.mkdtemp())
+        self.shutil = shutil
+        self.work = _make_work(self.tmp)
+        _lib.save_toml(self.work / "analysis" / "characters-[ネタバレあり].toml", {
+            "characters": [{"name_src": "甲", "name_ja": "甲", "role": "测试角色"}]})
+        _lib.save_toml(self.work / "analysis" / "terms.toml", {"terms": []})
+        _lib.save_toml(self.work / "analysis" / "plot-[ネタバレあり].toml", {"entries": []})
+
+    def tearDown(self):
+        self.shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _snapshot(self) -> dict:
+        """work 配下の全ファイルの (相対パス -> バイト列)。"""
+        return {p.relative_to(self.work): p.read_bytes()
+                for p in sorted(self.work.rglob("*")) if p.is_file()}
+
+    def _run_lint(self) -> tuple[int, str]:
+        from scripts.saga import cmd_lint
+        import io
+        old_out, old_err = sys.stdout, sys.stderr
+        buf = io.StringIO()
+        try:
+            sys.stdout = sys.stderr = buf
+            code = cmd_lint(self.work)
+        finally:
+            sys.stdout, sys.stderr = old_out, old_err
+        return code or 0, buf.getvalue()
+
+    def test_lint_writes_nothing(self):
+        """残渣があっても、lint はファイルを一切書かない（タイムライン記録も無し）。"""
+        before = self._snapshot()
+        code, out = self._run_lint()
+        self.assertEqual(code, 1, out)
+        self.assertIn("非JIS字", out)
+        self.assertEqual(self._snapshot(), before, "lint はファイルを書いてはいけない")
+        # 計測記録（timeline）も作らない
+        self.assertFalse((self.work / "_work" / "logs" / "timeline.jsonl").exists())
 
 
 class TestZeroStatePrepare(unittest.TestCase):
