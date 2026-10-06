@@ -35,9 +35,25 @@ class TestSkillRefs(unittest.TestCase):
         """references/troubleshooting.md を参照している。"""
         self.assertIn("references/troubleshooting.md", self.content)
 
-    def test_references_hermes_delegation(self):
-        """references/hermes-delegation.md を参照している。"""
-        self.assertIn("references/hermes-delegation.md", self.content)
+    def test_references_agent_delegation(self):
+        """references/agent-delegation.md を参照している。"""
+        self.assertIn("references/agent-delegation.md", self.content)
+
+    def test_references_env_windows(self):
+        """references/env-windows.md を参照している。"""
+        self.assertIn("references/env-windows.md", self.content)
+
+    def test_renamed_docs_forwarding_stubs(self):
+        """旧名の転送スタブ（1行）が残り、改名先へ転送している。"""
+        for stub, target in (("references/hermes-delegation.md", "agent-delegation.md"),
+                             ("references/env-hermes-windows.md", "env-windows.md")):
+            path = os.path.join(BASE, stub)
+            self.assertTrue(os.path.isfile(path), f"転送スタブが無い: {stub}")
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            lines = [ln for ln in text.splitlines() if ln.strip()]
+            self.assertEqual(len(lines), 1, f"{stub} は1行の転送スタブであるべき")
+            self.assertIn(target, text, f"{stub} が {target} へ転送していない")
 
     def test_scripts_py(self):
         """scripts/*.py への参照が実在する。"""

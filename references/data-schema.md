@@ -182,6 +182,8 @@ paras = [13, 40]
 
 - `chapters_meta.toml` の各 block に記録: `analysis_committed_at`（従来どおり）/ `analysis_src_hash`（ブロック原文の sha256 先頭12桁。原文が変われば変わる）/ `analysis_no_changes`（(b) の場合のみ true）
 - 分析 delta（analyze-commit の入力。`templates/brief_analyze.md` の形式が正）: トップレベル `block = "chNNN/bN"` 必須・chapters_meta に実在、`no_changes = true` は空差分の明示に必須。テーブルは **`[[characters_delta]]` / `[[terms_delta]]` / `[[plot_delta]]`**（`[[characters]]` 等の短縮形は無視されて空差分扱いになるので注意）。`[[characters_delta]]`・`[[terms_delta]]` は `match_key`/`match_value` 必須、`[[plot_delta]]` は `block`（delta と一致）/`text` 必須。違反はすべて拒否（exit 1・記録しない）
+- `[[plot_delta]]` の `replace = true`（boolean）は同一 block の `text` を置換する（既定は追記）
+- 保護キーの明示上書き（`--allow-protected-overwrite`。記述系キー memo / role / appearance / relationships / note のみで、`name_ja` / `term_ja` は対象外＝`rename_terms.py` の領分）と `replace = true` の plot 置換は、保存成功後に `_work/analysis_edits.jsonl` に1行ずつ追記する（`ts` / `match` / `key` / `old` / `new` / `via`。`via` は `protected-overwrite` か `plot-replace`。purge しない）
 - 旧ブロック（`analysis_committed_at` のみ）は hash 未記録を許容
 
 ## 裁定記録 `_work/rulings.json`（stage3 / P2-3 前半・`scripts/rulings.py`）
@@ -202,6 +204,7 @@ version = "1"          # 辞書の版。裁定記録（rulings）の dict_versio
 src = "合成語A"            # 原語（原文字形＝簡体字のまま）
 src_variants = ["合成語A"]  # 別字形・別表記（任意。両方で索引される）
 dst = "合成訳A"    # 既定訳
+dst_variants = ["合成訳A状"]  # 許容される別表記（任意。dst か dst_variants のどれか1つが該当段落/ブロックにあれば合格）
 kind = "fixed"          # fixed | candidates | ja_ok
 note = ""               # 任意の注記
 ```
@@ -209,5 +212,6 @@ note = ""               # 任意の注記
 - `fixed`: 機械で確定できる語。原文に出たら訳文は `dst` でなければならない。違反は commit 停止。
 - `candidates`: 文脈で変わる語。訳文に原語相当の語が残れば commit 停止（通すのは本文修正か裁定記録）。
 - `ja_ok`: 日本語としても正当な語（触手・改造など）。検査から除外。
+- **許容別表記**: `dst_variants` は規定訳の許容別表記（任意）。規定訳の照合は `dst` と `dst_variants` の完全一致で行い、どれか1つが該当段落/ブロックにあれば合格。
 - **優先順位**: 作品 terms（analysis/terms.toml）＞ house_style.toml ＞ 拡張 vocab.toml。同じ `src` は上位が勝つ。
 - **原文字形索引**: `src` と `src_variants` の両方で引ける（spicy の見出しが日本語字形（合成語A）でも原文（合成語A）で当たる）。

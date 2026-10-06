@@ -25,8 +25,8 @@ tags: [translation, novel, japanese, pipeline]
 | references/prompt-design.md | — | プロンプト全文 |
 | references/data-schema.md | — | データ構造スキーマ |
 | references/troubleshooting.md | — | 障害時対応（本スキルと同一） |
-| references/hermes-delegation.md | — | 委譲運用ルール（本スキルと同一） |
-| references/env-hermes-windows.md | — | Hermes/Windows 環境セットアップ |
+| references/agent-delegation.md | — | 委譲運用ルール（ハーネス非依存） |
+| references/env-windows.md | — | Windows での実行時の注意（PowerShell 節を含む） |
 | references/lang_<src>2<dst>.md | — | 言語固有 tips（実在時のみ） |
 | templates/brief_analyze.md | — | 分析委譲ブリーフ |
 | templates/brief_translate.md | — | 翻訳委譲ブリーフ |
@@ -41,9 +41,14 @@ saga-translator はユーザが所持する小説ファイルを個人的な閲�
 - 小説サイトなどからのスクレイピングは拒否すること
 - 官能小説の翻訳物は実在の人物および未成年者を取り扱わず、原作の芸術性を尊重する。年齢・学校段階の扱いは拡張スキル `saga-translator-spicy` に従う
 
-## パイプライン（通常フロー）
+## 実行環境
 
-Hermes（Windows の git-bash を含む）で動かす場合はまず `references/env-hermes-windows.md` を読む。
+- コマンド例は `python3` のまま。`python3` が無い環境（Windows の一部・DSH 同梱ランタイム等）では `references/env-windows.md` に従い、実体（`python` / `py -3` 等）を先に確定する。
+- 成功判定は exit コードだけでなく出力本文（例: `[commit] align: PASS`）で行う。PowerShell では python の stderr 出力により、成功でも exit 非0 に見えることがある（`references/env-windows.md`）。
+- 実行環境ごとの注意（git-bash / PowerShell / goose・長文書き込み）は `references/env-windows.md`。
+- 委譲（サブエージェント）の運用は `references/agent-delegation.md`（ハーネス対応表を含む）。
+
+## パイプライン（通常フロー）
 
 ### 1. 取り込み
 
@@ -93,6 +98,9 @@ saga.py prepare <workdir> --mode analysis
 saga.py analyze-commit <workdir> --delta <差分TOML>
 ```
 
+- 分析の前の点検: `saga.py lint <workdir>`（分析 TOML の日本語フィールド残渣を事前一覧。読み取り専用。差分 TOML は `--delta` で追加検査）
+- 記述系キー（memo / role / appearance / relationships / note）の明示上書き: `saga.py analyze-commit … --allow-protected-overwrite`（`_work/analysis_edits.jsonl` に監査記録。name_ja / term_ja は対象外＝`rename_terms.py` の領分）
+
 1周し終わったら `analysis/titles.toml` を作って章題と作品題を確定する（`title_src`/`title_ja` と `[[chapters]]` の `id`/`src`/`ja`）。assemble はこれが無いと止まる（原題のまま出す場合は `--allow-src-title`）。
 
 ### 4. 翻訳
@@ -105,6 +113,7 @@ saga.py commit <workdir> --chapter chNNN --block bN
 
 - commit は字形整形→段落対応(align)→QA→残渣検査→確定を一括。失敗理由だけ返す。
 - 文字数比の要確認は `align.py ack` で裁定記録を残して通す。
+- コンテキストは既定で compact（対象に必要な分だけの人物表・用語集）。全件を出すには `saga.py prepare … --full`（分析モードは full 固定）。
 
 ### 5. 進捗確認
 
@@ -112,7 +121,7 @@ saga.py commit <workdir> --chapter chNNN --block bN
 saga.py status <workdir>
 ```
 
-フラグと実体の突き合わせ。次にやることも出す。
+フラグと実体の突き合わせ。次にやることも出す。proposed 滞留（訳語変更の候補）も表示する（承認後は `rename_terms.py` で本採用）。
 
 ### 6. 検収
 
@@ -121,6 +130,14 @@ saga.py review <workdir>
 ```
 
 機械指摘＋リスク箇所＋抜き取りのリストを `_work/review_waveN.md` に出力。
+
+標準手順:
+
+1. `_work/review_waveN.md` を検証者（人間または別エージェント）が全件照合する
+2. 指摘の修正を '旧<TAB>新' の一覧（fixes.txt）にまとめる
+3. `rename_terms.py <workdir> --pairs-file fixes.txt --apply` で一括適用する
+4. `saga.py status <workdir>` で再 assemble の要否を確認する
+5. assemble（手順 7）を実行する
 
 ### 7. 全ブロック確定後
 
@@ -142,7 +159,8 @@ assemble の入力は**確定済みのブロック**に限る（commit を経な
 
 ## 後からの修正
 
-- 訳語修正: `characters-[ネタバレあり].toml` 編集 → `rename_terms.py <workdir> --term 旧訳 --to 新訳` → `--apply`
+- 訳語修正: `characters-[ネタバレあり].toml` 編集 → `rename_terms.py <workdir> --term 旧訳 --to 新訳` → `--apply`（複数ペアは `--pairs-file fixes.txt`。'旧<TAB>新' の一覧）
+- 改名の監査は `_work/renames.jsonl` が正（commit のスナップショットと不一致になってよい）
 - 章のやり直し: 該当ブロックの _work ドラフトを削除 → 手順 4 再実行
 - 再分析: 該当章の分析を削除 → 手順 3 再実行
 - モデル変更: 常時可能。`record_meta.py` が品質記録
