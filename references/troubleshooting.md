@@ -32,6 +32,10 @@ rename_terms 等の一括置換で `term_src` / `name_src` / `title_src` / `targ
 
 「failed」でもファイルは部分的に書かれていることが多い。`verify_progress.py`（scripts/ に実在）を必ず使い、フラグと実体の両方を突き合わせてから再投入範囲を決める。
 
+## 失敗コミット後の draft 再読込
+
+commit は検査前に字形整形を draft へ in-place 適用する（`[commit] 字形整形: N件適用 …` と出る）。失敗コミットの後で draft を編集するときは、**必ず再読込してから**編集する（適用前の読み取り内容での編集は競合する）。
+
 ## 空行の無い TXT の対処
 
 ```

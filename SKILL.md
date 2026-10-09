@@ -115,6 +115,33 @@ saga.py commit <workdir> --chapter chNNN --block bN
 - 文字数比の要確認は `align.py ack` で裁定記録を残して通す。
 - コンテキストは既定で compact（対象に必要な分だけの人物表・用語集）。全件を出すには `saga.py prepare … --full`（分析モードは full 固定）。
 - 確定時に `_work/ledger.toml` へ台帳を追記する（ルビ適用・用語初出は自動、使用済みオノマトペは `saga.py ledger-ono <workdir> --form <表記> --block chNNN/bM [--para N]` で申告）。prepare は「消費済みルビ（再付与不可）・使用済みオノマトペ・用語の初出済み」を注入するので、消費済みの再使用は避ける。台帳は purge 対象外で、連作では carry で引き継ぐ。
+- 語彙 candidates の裁定記録（`vocab:<原語>`）に CLI はない。一時 .py ファイルで `rulings.add_ruling` を呼ぶ（8キー全一致。原文・ドラフトを変えたら無効になり再記録が必要）。ハッシュは手計算せず `align` / `rulings` の関数で求める:
+  ```python
+  import sys; sys.path.insert(0, "scripts")
+  from pathlib import Path
+  from rulings import add_ruling, text_hash
+  from align import config_version, draft_hash
+  from _lib import load_paras, block_paras, load_chapters_meta, block_meta, direction, target_suffix  # 原文段落の取得
+  work = Path("<workdir>"); chapter = "ch001"; block = "b1"; para = 443; src = "穴口"
+  bmeta = block_meta(load_chapters_meta(work), f"{chapter}/{block}")
+  paras = {int(p["n"]): str(p.get("text", "")) for p in block_paras(load_paras(work, chapter), bmeta)}
+  suf = target_suffix(direction(work)[1])
+  draft_p = work / "output" / "_work" / f"{chapter}_{block}{suf}_numbered.md"
+  add_ruling(work, work_id=work.name, chapter=chapter, block=block, paragraph=para,
+             rule_id=f"vocab:{src}", src_hash=text_hash(paras[para]),
+             draft_hash=draft_hash(draft_p), dict_version=config_version(work),
+             rationale="<なぜこの訳でよいか>", adjudicator="translator",
+             disposition="allow", status="active")
+  ```
+  `dict_version` 省略時は `'none'` になる（拡張辞書なし時と一致すれば有効。配線はされている）。
+- 声の確定: 分析差分に次を入れて `analyze-commit`（声の記述が1つ以上ないと拒否される）。status の「声の状態(未確認)」はこれで消える:
+  ```toml
+  [[characters_delta]]
+  match_key = "name_src"
+  match_value = "<原語名>"
+  voice_status = "confirmed"
+  ```
+- 判断記録: 曖昧原文の判断理由は本文に書かず `output/_work/notes.md` へ追記する（任意・追記式。機械は読まない。再開・検収時に親が読む）。
 
 ### 5. 進捗確認
 
