@@ -114,6 +114,7 @@ saga.py commit <workdir> --chapter chNNN --block bN
 - commit は字形整形→段落対応(align)→QA→残渣検査→確定を一括。失敗理由だけ返す。
 - 文字数比の要確認は `align.py ack` で裁定記録を残して通す。
 - コンテキストは既定で compact（対象に必要な分だけの人物表・用語集）。全件を出すには `saga.py prepare … --full`（分析モードは full 固定）。
+- 確定時に `_work/ledger.toml` へ台帳を追記する（ルビ適用・用語初出は自動、使用済みオノマトペは `saga.py ledger-ono <workdir> --form <表記> --block chNNN/bM [--para N]` で申告）。prepare は「消費済みルビ（再付与不可）・使用済みオノマトペ・用語の初出済み」を注入するので、消費済みの再使用は避ける。台帳は purge 対象外で、連作では carry で引き継ぐ。
 
 ### 5. 進捗確認
 

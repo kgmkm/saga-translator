@@ -193,6 +193,37 @@ paras = [13, 40]
 - known_terms（作品全体の文字列除去）は house_style.toml の `residue.known_terms` のまま。局所の誤検出裁定と混ぜない
 - align ack の共通土台への移行は後続（stage4/11）
 
+## 横断状態の台帳 `_work/ledger.toml`（review-1・`scripts/ledger.py`）
+
+ブロックを跨ぐ消費状態（ルビ適用・用語初出・オノマトペ使用）をエージェントの文脈依存からファイルへ移した台帳。purge 対象外。連作では carry で引き継ぐ。
+
+```toml
+[ledger]
+version = 1
+updated_at = "2026-10-09T17:44:56+00:00"
+
+[[ruby_applied]]          # 確定訳文の VFM {親|読み} 初出を commit 確定時に自動記録（term+reading がキー。2回目以降は追記しない）
+term = "剣"
+reading = "つるぎ"
+block = "ch001/b1"
+paragraph = 1
+
+[[term_first_use]]        # terms.toml の term_ja が確定訳文に初めて現れた位置（既記録の語は追記しない）
+term = "雪"
+block = "ch001/b1"
+paragraph = 2
+
+[[ono_used]]              # 翻訳者が saga.py ledger-ono で申告（本体に表がないため自動抽出しない。form+block+para がキー）
+form = "どきどき"
+block = "ch001/b2"
+paragraph = 3
+context = "鼓動"
+```
+
+- 更新は commit 確定時の差分追記のみ（当該ブロックの確定訳文だけ走査）。冪等。再確定・revise で消えた記録の削除はしない（履歴として残す）。
+- prepare（翻訳モード）は「消費済みルビ（再付与不可）・使用済みオノマトペ・用語の初出済み」の3節を注入する（上限つき省略表示。データなしでは節ごと非表示）。
+- 既知の制限: `rename_terms.py` で親文字が変わると台帳の term が古くなる（実装対象外。台帳は履歴として残す）。
+
 ## 拡張語彙データの形式（stage7 / P0-3。spicy 側が中身を作る）
 
 拡張スキル（saga-translator-spicy 等）が語彙マップを機械可読 TOML で提供する（`vocab.toml`。置き場所は拡張スキルの `references/`。本体は探索先リストから読む）:
