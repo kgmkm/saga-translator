@@ -180,6 +180,11 @@ def _status_pending_analysis(work: Path) -> list[str]:
     variant_wait: list[str] = []
     proposed_wait: list[str] = []
     seen_pairs: set[tuple[str, str]] = set()
+    # 名前の形 → キャラ（別人として棄却済みの候補を出さないための照合用。5b）
+    owners_by_form: dict[str, dict] = {}
+    for c in chars:
+        for f in _name_forms(c):
+            owners_by_form.setdefault(f, c)
 
     def _proposed_line(name: str, proposed: str) -> str:
         """proposed 滞留の1行（名前＋先頭40字。P2-9）。"""
@@ -199,6 +204,8 @@ def _status_pending_analysis(work: Path) -> list[str]:
         if blocks:
             speaker_wait.append(f"{name} ({', '.join(blocks)})")
         for cand in variant_candidates_of(c):
+            if _candidate_dismissed(cand, c, owners_by_form):
+                continue  # 別人として棄却済み（dismiss_variant）
             pair = tuple(sorted((cand["name_src"], cand["similar_to_src"])))
             if pair in seen_pairs:
                 continue
@@ -208,6 +215,8 @@ def _status_pending_analysis(work: Path) -> list[str]:
         if proposed:
             proposed_wait.append(_proposed_line(str(name), proposed))
     for cand in normalize_variant_candidates(chars_data.get("variant_candidates")):
+        if _work_candidate_dismissed(cand, owners_by_form):
+            continue  # 別人として棄却済み（dismiss_variant）
         pair = tuple(sorted((cand["name_src"], cand["similar_to_src"])))
         if pair in seen_pairs:
             continue
@@ -575,11 +584,39 @@ def _cmd_status_impl(work: Path) -> int:
 #   - data-schema.md の src キー: name_src / term_src / title_src / src /
 #     target_src / similar_to_src（+ aliases は原文の異表記）
 #     → detect.zh2ja.find_cn_residue_fields の _is_src_key が除外する
+#   - dismiss_variant / dismissed_variants / dismiss_reason（5b。相手の原文名を
+#     保持する欄）→ collect_analysis_residue が検査ビューから外す
 #   - 差分 TOML 固有: match_key / match_value / block（照合キーとブロック指定）
 #     → 差分を検査するときだけ DELTA_SRC_KEYS で除外する
 
 #: 差分 TOML で値が原語（原文側）になるキー（lint --delta の検査から除外）。
 DELTA_SRC_KEYS = frozenset({"match_key", "match_value", "block"})
+
+#: 残渣検査のビューから外すキー（相手の原文名・その理由を保持する欄）。
+#: aliases は find_cn_residue_fields 側（_is_src_key）が除外する。dismiss 系は
+#: 原文名（非JIS字を含み得る）を保持する仕様のため、ここでビューから外す。
+RESIDUE_SRC_VIEW_KEYS = frozenset(
+    {"dismiss_variant", "dismissed_variants", "dismiss_reason"})
+
+
+def _residue_src_view(data):
+    """残渣検査用のビューを返す（dismiss 系の原文名の欄を外した deepcopy）。"""
+    if not isinstance(data, dict):
+        return data
+    view = copy.deepcopy(data)
+
+    def scrub(obj) -> None:
+        if isinstance(obj, dict):
+            for k in [k for k in obj if k in RESIDUE_SRC_VIEW_KEYS]:
+                obj.pop(k, None)
+            for v in obj.values():
+                scrub(v)
+        elif isinstance(obj, list):
+            for x in obj:
+                scrub(x)
+
+    scrub(view)
+    return view
 
 
 def collect_analysis_residue(
@@ -588,13 +625,14 @@ def collect_analysis_residue(
 
     ``entries`` は ``(表示名, 検査対象データ, 行番号を探すテキスト)``。検出は
     ``detect.zh2ja.find_cn_residue_fields``（analyze-commit が保存前に使うのと
-    同じ関数）そのもの。戻り値は ``(名前, 行, キー, 理由, 場所)`` の一覧。
+    同じ関数）に、原文側の欄（dismiss 系。RESIDUE_SRC_VIEW_KEYS）を外した
+    ビューを渡す。戻り値は ``(名前, 行, キー, 理由, 場所)`` の一覧。
     """
     from detect.zh2ja import find_cn_residue_fields
 
     out: list[tuple[str, int, str, str, str]] = []
     for name, data, text in entries:
-        for f in find_cn_residue_fields(data):
+        for f in find_cn_residue_fields(_residue_src_view(data)):
             line, key = _residue_line_key(f, text)
             out.append((name, line, key, f.value, f.context or ""))
     return out
@@ -808,9 +846,188 @@ def _record_protected_overwrite(edits_out: list[dict] | None, match: str,
                       "old": old, "new": new, "via": "protected-overwrite"})
 
 
+# ── 異表記候補の別人棄却（dismiss_variant。5b） ──────────────────────────
+# 近い表記の名前が原文に併存するときの「異表記候補」は、aliases に入れるまで
+# 残る。別人（同音・類似だが別の人物）だと確定した場合は dismiss_variant で
+# 相手の name_src を指定して棄却を記録し、該当ペアを候補から落として再検出を
+# 抑止する。棄却は対象キャラの dismissed_variants（相手名の文字列配列）に残し、
+# 監査は _work/analysis_edits.jsonl へ via="variant-dismiss" の1行で記録する。
+
+def _dismissed_variants_of(entry: dict) -> list[str]:
+    """キャラの `dismissed_variants`（別人として棄却した相手名）を返す。無ければ空。"""
+    v = entry.get("dismissed_variants")
+    if not isinstance(v, list):
+        return []
+    return [x.strip() for x in v if isinstance(x, str) and x.strip()]
+
+
+def _merge_dismissed_variants(existing, names) -> list[str]:
+    """dismissed_variants の追記マージ（既存の順を保ち、重複は足さない）。"""
+    out: list[str] = list(existing) if isinstance(existing, list) else []
+    seen = {v.strip() for v in out if isinstance(v, str) and v.strip()}
+    values = names if isinstance(names, list) else [names]
+    for v in values:
+        if not isinstance(v, str) or not v.strip():
+            continue
+        if v.strip() in seen:
+            continue
+        seen.add(v.strip())
+        out.append(v.strip())
+    return out
+
+
+def _pair_dismissed(a: dict, b: dict) -> bool:
+    """a と b のペアが「別人」として棄却済みか（相互の名前を照合する）。
+
+    片方が相手の名前（name_src / name_ja / ruby / aliases のいずれか）を
+    dismissed_variants に持てば、そのペアは棄却済みとして扱う。
+    """
+    dv_a = set(_dismissed_variants_of(a))
+    dv_b = set(_dismissed_variants_of(b))
+    if not dv_a and not dv_b:
+        return False
+    if dv_a & set(_name_forms(b)):
+        return True
+    if dv_b & set(_name_forms(a)):
+        return True
+    return False
+
+
+def _candidate_dismissed(cand: dict, entry: dict, owners: dict[str, dict]) -> bool:
+    """キャラ候補が entry 側から見て棄却済みか（dismiss_variant）。
+
+    entry 自身が候補の相手名を棄却済み、または相手キャラが entry の名前を
+    棄却済みなら真（該当キャラが見つからない揺れ表記は名前の直接照合のみ）。
+    """
+    other = cand["name_src"]
+    if other and other in _dismissed_variants_of(entry):
+        return True
+    owner = owners.get(other)
+    if owner is not None and _pair_dismissed(entry, owner):
+        return True
+    return False
+
+
+def _work_candidate_dismissed(cand: dict, owners: dict[str, dict]) -> bool:
+    """work レベル候補が棄却済みか（dismiss_variant）。
+
+    既知側（similar_to_src / name_src のうち人物表に居る方）の持ち主が
+    もう一方の名前を棄却済みなら真。
+    """
+    for known, other in ((cand["similar_to_src"], cand["name_src"]),
+                         (cand["name_src"], cand["similar_to_src"])):
+        owner = owners.get(known)
+        if owner is None or not other:
+            continue
+        if other in _dismissed_variants_of(owner):
+            return True
+        other_owner = owners.get(other)
+        if other_owner is not None and _pair_dismissed(owner, other_owner):
+            return True
+    return False
+
+
+def _apply_variant_dismissal(chars: list[dict], target: dict, partner_name,
+                             reason: str, match_value: str,
+                             chars_data: dict | None,
+                             edits_out: list[dict] | None) -> str | None:
+    """別人の棄却（dismiss_variant）を適用する。変更があればログ1行を返す。
+
+    - 対象キャラの ``dismissed_variants`` へ相手名を追記する
+    - 対象・相手（相手がキャラのとき）・work レベルの variant_candidates から
+      該当ペアを除去する
+    - 監査記録（``via="variant-dismiss"``）を ``edits_out`` に1行だけ追加する
+
+    相手名が人物表の name_src にも既存の異表記候補にも無い場合は ValueError
+    （存在しない相手名は黙殺しない）。再検出の抑止は _record_voice_candidates。
+    """
+    name = str(partner_name or "").strip()
+    target_src = str(target.get("name_src") or "").strip()
+    if not name:
+        raise ValueError("dismiss_variant は相手の name_src（空でない文字列）が必要です")
+    if name == target_src:
+        raise ValueError(f"dismiss_variant: 自分自身（{name}）は別人として棄却できません")
+    partner = next((c for c in chars if isinstance(c, dict)
+                    and str(c.get("name_src") or "").strip() == name), None)
+
+    # 相手名は「人物表の name_src」か「既存の異表記候補に出る名前」のどちらかに
+    # 実在することを要求する（存在しない名前はタイプミスとして拒否）
+    known_names: set[str] = set()
+    for c in chars:
+        if not isinstance(c, dict):
+            continue
+        known_names.add(str(c.get("name_src") or "").strip())
+        for cand in variant_candidates_of(c):
+            known_names.add(cand["name_src"])
+            known_names.add(cand["similar_to_src"])
+    if isinstance(chars_data, dict):
+        for cand in normalize_variant_candidates(chars_data.get("variant_candidates")):
+            known_names.add(cand["name_src"])
+            known_names.add(cand["similar_to_src"])
+    known_names.discard("")
+    if name not in known_names:
+        raise ValueError(
+            f"dismiss_variant: 相手の name_src「{name}」が人物表にも異表記候補にも"
+            "見つかりません（存在しない相手名の棄却はできません）")
+
+    changed = False
+    if name not in _dismissed_variants_of(target):
+        target["dismissed_variants"] = _merge_dismissed_variants(
+            target.get("dismissed_variants"), [name])
+        changed = True
+
+    target_forms = set(_name_forms(target))
+    partner_forms = set(_name_forms(partner)) if partner is not None else {name}
+
+    def _is_pair(cand: dict) -> bool:
+        """候補の両端が対象と相手にまたがるか（該当ペア）。"""
+        ends = {cand["name_src"], cand["similar_to_src"]} - {""}
+        return bool(ends & target_forms) and bool(ends & partner_forms)
+
+    def _strip(holder: dict) -> bool:
+        raw = holder.get("variant_candidates")
+        if not isinstance(raw, list) or not raw:
+            return False
+        kept = [c for c in variant_candidates_of(holder) if not _is_pair(c)]
+        if len(kept) == len(variant_candidates_of(holder)):
+            return False
+        if kept:
+            holder["variant_candidates"] = kept
+        else:
+            holder.pop("variant_candidates", None)
+        return True
+
+    if _strip(target):
+        changed = True
+    if partner is not None and partner is not target and _strip(partner):
+        changed = True
+    if isinstance(chars_data, dict) and isinstance(
+            chars_data.get("variant_candidates"), list):
+        work = normalize_variant_candidates(chars_data["variant_candidates"])
+        kept_w = [c for c in work if not _is_pair(c)]
+        if len(kept_w) != len(work):
+            if kept_w:
+                chars_data["variant_candidates"] = kept_w
+            else:
+                chars_data.pop("variant_candidates", None)
+            changed = True
+
+    if not changed:
+        return None
+    if edits_out is not None:
+        rec = {"ts": _now_iso(), "match": match_value, "key": "dismiss_variant",
+               "old": "", "new": name, "via": "variant-dismiss"}
+        if reason:
+            rec["reason"] = reason
+        edits_out.append(rec)
+    return (f"異表記棄却: {target_src or match_value}⇔{name}"
+            "（別人として記録。dismissed_variants に追記し、再検出しない）")
+
+
 def _apply_chars_delta(chars: list[dict], delta_list: list[dict],
                        allow_protected_overwrite: bool = False,
-                       edits_out: list[dict] | None = None) -> list[str]:
+                       edits_out: list[dict] | None = None,
+                       chars_data: dict | None = None) -> list[str]:
     """キャラ差分を適用。proposed が発生した変更を説明する文字列リストを返す。
 
     aliases は既存への追記マージ（重複排除）。voice_status = confirmed への
@@ -818,15 +1035,24 @@ def _apply_chars_delta(chars: list[dict], delta_list: list[dict],
     ``allow_protected_overwrite``（P1-5）では記述系キー
     （PROTECTED_OVERWRITABLE_KEYS）だけ proposed へ退避せず本体を更新し、
     監査記録を ``edits_out`` に集める（name_ja 等は従来どおり proposed）。
+    ``dismiss_variant``（5b）は相手の name_src を ``dismissed_variants`` へ
+    追記し、該当ペアを variant_candidates から除去する。work レベルの候補の
+    除去には ``chars_data``（characters TOML 全体）を使う（無ければ char のみ）。
     """
     proposed_log: list[str] = []
     SPECIAL = {"match_key", "match_value", "updates", "new_fields",
-               "characters_delta", "terms_delta", "plot_delta", "block"}
+               "characters_delta", "terms_delta", "plot_delta", "block",
+               "dismiss_variant", "dismiss_reason"}
     protect_keys = {"name_ja", "role", "first_person", "second_person",
                     "speech_style", "vocab", "catchphrase", "ruby"}
     for delta in delta_list:
         match_key = delta.get("match_key", "name_src")
         match_value = delta.get("match_value", "")
+        # 別人の棄却は updates / new_fields 経由でも受け付ける
+        nested = dict(delta.get("updates") or {})
+        nested.update(delta.get("new_fields") or {})
+        dismiss_variant = nested.get("dismiss_variant", delta.get("dismiss_variant"))
+        dismiss_reason = nested.get("dismiss_reason", delta.get("dismiss_reason"))
         idx = _find_entry_by_key(chars, match_key, match_value)
         if idx is not None:
             entry = chars[idx]
@@ -837,6 +1063,9 @@ def _apply_chars_delta(chars: list[dict], delta_list: list[dict],
             for k, v in delta.items():
                 if k not in SPECIAL:
                     updates[k] = v
+            # 棄却の指定はフィールドとして書かず、更新適用の後に専用処理する
+            updates.pop("dismiss_variant", None)
+            updates.pop("dismiss_reason", None)
             # 声の遷移検証は適用前に行う（拒否時にエントリを変更しない）
             prospective = dict(entry)
             prospective.update({k: v for k, v in updates.items() if k != "aliases"})
@@ -876,10 +1105,21 @@ def _apply_chars_delta(chars: list[dict], delta_list: list[dict],
             for k, v in delta.items():
                 if k not in SPECIAL:
                     base[k] = v
+            base.pop("dismiss_variant", None)
+            base.pop("dismiss_reason", None)
             if "aliases" in base:
                 base["aliases"] = _merge_aliases([], base["aliases"])
             _check_voice_transition(base, base, match_value)
             chars.append(base)
+            entry = base
+        # 別人の棄却（dismiss_variant）: 対象の更新後に適用する
+        if dismiss_variant is not None:
+            log = _apply_variant_dismissal(
+                chars, entry, dismiss_variant,
+                dismiss_reason if isinstance(dismiss_reason, str) else "",
+                match_value, chars_data, edits_out)
+            if log:
+                proposed_log.append(log)
     return proposed_log
 
 
@@ -1028,7 +1268,7 @@ def _build_analysis_payloads(work: Path, delta: dict,
         n0 = len(edits)
         cl = _apply_chars_delta(chars_list, delta.get("characters_delta", []),
                                 allow_protected_overwrite=allow_protected_overwrite,
-                                edits_out=edits)
+                                edits_out=edits, chars_data=chars)
         _tag_edits(edits, n0, _analysis_path(work, "characters").name)
         n1 = len(edits)
         tl = _apply_terms_delta(terms_list, delta.get("terms_delta", []),
@@ -1380,8 +1620,9 @@ def validate_analysis_delta(meta: dict, delta: dict) -> tuple[bool, str | None, 
         for key in ("match_key", "match_value"):
             if not _str_field(c, key):
                 return False, f"characters_delta[{i}] に必須キー `{key}`（文字列）がありません", False
-        # 追加欄の型検証（aliases / voice_status / voice_note。P0-4）
-        for key in ("voice_status", "voice_note", "aliases"):
+        # 追加欄の型検証（aliases / voice_status / voice_note / dismiss_variant。P0-4 / 5b）
+        for key in ("voice_status", "voice_note", "aliases",
+                    "dismiss_variant", "dismiss_reason"):
             for loc, holder in (("", c), ("updates", c.get("updates")),
                                 ("new_fields", c.get("new_fields"))):
                 if not isinstance(holder, dict) or key not in holder:
@@ -1396,6 +1637,10 @@ def validate_analysis_delta(meta: dict, delta: dict) -> tuple[bool, str | None, 
                 if key == "aliases" and (not isinstance(v, list)
                                          or not all(isinstance(x, str) for x in v)):
                     return False, f"{where} は文字列の配列であるべきです", False
+                if key == "dismiss_variant" and (not isinstance(v, str) or not v.strip()):
+                    return False, f"{where} は相手の name_src（空でない文字列）であるべきです", False
+                if key == "dismiss_reason" and not isinstance(v, str):
+                    return False, f"{where} は文字列であるべきです", False
     for i, t in enumerate(delta.get("terms_delta", [])):
         if not isinstance(t, dict):
             return False, f"terms_delta[{i}] はテーブル（配列ofテーブル）であるべきです", False
@@ -1561,7 +1806,7 @@ def _cmd_analyze_commit_impl(work: Path, delta_path: Path,
             print("[analyze-commit] 完了: 差分なし（analysis_no_changes = true を記録）")
         if edits:
             print(f"[analyze-commit] 監査記録: {len(edits)} 件を _work/analysis_edits.jsonl に追記"
-                  "（保護キーの明示上書き・plot 置換）")
+                  "（保護キーの明示上書き・plot 置換・異表記棄却）")
         for l in candidate_logs:
             print(f"[analyze-commit] {l}")
         return 0
@@ -1640,8 +1885,9 @@ def _record_voice_candidates(work: Path, block_key: str, meta: dict,
       「名前が近くにあるだけでは話者と確定できない」のでセリフありとは扱わず、
       `speaker_candidate`（ブロックキーのリスト）として記録するだけにする。
     - 異表記候補: 近い表記の名前が原文で併存しているもの。`variant_candidates`
-      として記録し、aliases に入るまで残す（解決済みは自動で落とす）。該当
-      キャラが無い候補は work レベル（characters TOML トップ）に置く。
+      として記録し、aliases に入るか dismiss_variant で別人と記録するまで残す
+      （解決済み・棄却済みは自動で落とし、再検出もしない）。該当キャラが無い
+      候補は work レベル（characters TOML トップ）に置く。
 
     確定はしない（推測で埋めない）。戻り値: (表示ログ, データを変更したか)。
     """
@@ -1662,7 +1908,8 @@ def _record_voice_candidates(work: Path, block_key: str, meta: dict,
         for f in forms:
             owners.setdefault(f, c)
 
-    # 解決済みの異表記候補を先に落とす（aliases へ移った・相手の別名になった）
+    # 解決済みの異表記候補を先に落とす（aliases へ移った・相手の別名になった・
+    # dismiss_variant で別人として棄却済み）
     for c, _forms in entries:
         raw = c.get("variant_candidates")
         kept = []
@@ -1672,6 +1919,8 @@ def _record_voice_candidates(work: Path, block_key: str, meta: dict,
                 continue
             owner = owners.get(other)
             if owner is not None and own and own in character_aliases(owner):
+                continue
+            if _candidate_dismissed(cand, c, owners):
                 continue
             kept.append(cand)
         if isinstance(raw, list) and len(kept) != len(variant_candidates_of(c)):
@@ -1713,6 +1962,8 @@ def _record_voice_candidates(work: Path, block_key: str, meta: dict,
                         continue
                     if b in character_aliases(ca) or a in character_aliases(cb):
                         continue  # 既に aliases で結ばれている＝解決済み
+                    if _pair_dismissed(ca, cb):
+                        continue  # 別人として棄却済み（dismiss_variant）
                     ea = variant_candidates_of(ca)
                     eb = variant_candidates_of(cb)
                     ma = merge_variant_candidates(
@@ -1728,12 +1979,15 @@ def _record_voice_candidates(work: Path, block_key: str, meta: dict,
                     if ma != ea or mb != eb:
                         log.append(
                             f"異表記候補: {'⇔'.join(sorted((a, b)))} ({block_key})"
-                            f"（同一人物の異表記の可能性。aliases に入れるか別人と記録するまで残す）")
+                            f"（同一人物の異表記の可能性。aliases に入れるか"
+                            f"dismiss_variant で別人と記録するまで残す）")
 
     # ③ 異表記候補（原文側だけに近い表記がある。該当キャラが無い → work レベル）
     raw_work = chars_data.get("variant_candidates")
     work_cands = normalize_variant_candidates(raw_work)
-    kept_work = [x for x in work_cands if x["name_src"] not in known]
+    kept_work = [x for x in work_cands
+                 if x["name_src"] not in known
+                 and not _work_candidate_dismissed(x, owners)]
     if isinstance(raw_work, list) and len(kept_work) != len(work_cands):
         changed = True
     work_cands = kept_work
@@ -1749,6 +2003,8 @@ def _record_voice_candidates(work: Path, block_key: str, meta: dict,
                     continue
                 if not _similar_names(n, t):
                     continue
+                if t in _dismissed_variants_of(_c):
+                    continue  # 別人として棄却済み（dismiss_variant）
                 seen_t.add(t)
                 if text.count(t) < VARIANT_TEXT_MIN_OCCURRENCES:
                     continue
@@ -1760,7 +2016,7 @@ def _record_voice_candidates(work: Path, block_key: str, meta: dict,
                     log.append(
                         f"異表記候補: {'⇔'.join(sorted((t, n)))} ({block_key})"
                         f"（原文に近い表記が併存。該当キャラなし。"
-                        f"aliases に入れるか別人と記録するまで残す）")
+                        f"aliases に入れるか dismiss_variant で別人と記録するまで残す）")
     if work_cands:
         if chars_data.get("variant_candidates") != work_cands:
             chars_data["variant_candidates"] = work_cands
@@ -3137,11 +3393,74 @@ def _extract_machine_findings(reports: list[dict]) -> list[dict]:
     return findings
 
 
+def _term_first_occurrences(work: Path, blocks: list[tuple[str, str]]) -> list[dict]:
+    """ruby を持つ用語の初出（対象ブロックを順に原文走査して最初に現れる箇所）。
+
+    戻り値の各要素は ``{term, term_src, ruby, block, para, text}``。対象ブロックの
+    中に現れない用語は含めない（対象外ブロックの初出は出さない）。``para`` は
+    初出段落の番号（段落列に無ければ None）、``text`` はその段落の原文。
+    """
+    try:
+        terms = load_terms(work).get("terms") or []
+    except Exception:
+        return []
+    ruby_terms: list[tuple[str, str, str]] = []
+    for t in terms:
+        if not isinstance(t, dict):
+            continue
+        src = str(t.get("term_src") or "").strip()
+        ruby = str(t.get("ruby") or "").strip()
+        if not src or not ruby:
+            continue
+        name = str(t.get("term_ja") or "").strip() or src
+        ruby_terms.append((name, src, ruby))
+    if not ruby_terms:
+        return []
+    meta = load_chapters_meta(work)
+    paras_cache: dict[str, dict] = {}
+    block_cache: dict[str, dict | None] = {}
+    text_cache: dict[str, str] = {}
+    out: list[dict] = []
+    for name, src, ruby in ruby_terms:
+        hit: dict | None = None
+        for cid, bid in blocks:
+            key = f"{cid}/{bid}"
+            if key not in block_cache:
+                block_cache[key] = block_meta(meta, key)
+            b = block_cache[key]
+            if b is None:
+                continue
+            if key not in text_cache:
+                text_cache[key] = _block_src_text(work, key, meta)
+            if src not in text_cache[key]:
+                continue
+            para_n: int | None = None
+            para_text = ""
+            if cid not in paras_cache:
+                try:
+                    paras_cache[cid] = load_paras(work, cid)
+                except Exception:
+                    paras_cache[cid] = {}
+            for p in block_paras(paras_cache[cid], b):
+                pt = str(p.get("text") or "")
+                if src in pt:
+                    para_n = int(p.get("n", 0))
+                    para_text = pt
+                    break
+            hit = {"term": name, "term_src": src, "ruby": ruby,
+                   "block": key, "para": para_n, "text": para_text}
+            break
+        if hit is not None:
+            out.append(hit)
+    return out
+
+
 def _find_risk_blocks(work: Path, blocks: list[tuple[str, str]]) -> list[dict]:
     """リスクの高い箇所を列挙:
     - arcs の at_block 開始点
     - address を持つ人物がいるブロック
     - ruby を持つ人物の初出ブロック
+    - ruby を持つ用語の初出ブロック（用語ルビ。対象ブロック内のみ）
     """
     from _lib import load_characters
     from _lib import load_paras
@@ -3188,6 +3507,15 @@ def _find_risk_blocks(work: Path, blocks: list[tuple[str, str]]) -> list[dict]:
                     "detail": f"ruby={ruby}",
                 })
 
+    # ruby を持つ用語の初出（用語ルビ）。対象ブロックを順に原文走査し、最初に
+    # term_src が現れるブロックだけを出す（対象外ブロックの初出は出さない）
+    for occ in _term_first_occurrences(work, blocks):
+        risk_items.append({
+            "block": occ["block"],
+            "kind": f"{occ['term']} 初出（用語ルビ）",
+            "detail": f"ruby={occ['ruby']}",
+        })
+
     # 重複除去
     seen: set[tuple[str, str]] = set()
     deduped: list[dict] = []
@@ -3210,7 +3538,11 @@ def _review_seed(work_id: str, wave: int) -> str:
 
 def _sample_paragraphs(work: Path, blocks: list[tuple[str, str]],
                         ratio: float, seed: str) -> list[dict]:
-    """指定ブロックの段落から ratio の割合で決定的に選択する（seed は固定）。"""
+    """指定ブロックの段落から ratio の割合で決定的に選択する（seed は固定）。
+
+    末尾に ruby を持つ用語の初出段落を ``kind="用語初出"`` として決定的に
+    追記する（ランダム部は変えない。初出の確認を強制するための追記）。
+    """
     from _lib import load_paras
     rng = random.Random(seed)
     samples: list[dict] = []
@@ -3237,6 +3569,22 @@ def _sample_paragraphs(work: Path, blocks: list[tuple[str, str]],
                 "para": p.get("n", 0),
                 "text": p.get("text", ""),
             })
+    # 強制追加: ruby を持つ用語の初出段落（決定的。既存の選定の後ろへ追記する）
+    seen_forced: set[tuple[str, int]] = set()
+    for occ in _term_first_occurrences(work, blocks):
+        para_n = occ["para"]
+        if para_n is None:
+            continue
+        key = (occ["block"], para_n)
+        if key in seen_forced:
+            continue
+        seen_forced.add(key)
+        samples.append({
+            "block": occ["block"],
+            "para": para_n,
+            "text": occ["text"],
+            "kind": "用語初出",
+        })
     return samples
 
 
@@ -3398,7 +3746,11 @@ def _cmd_review_impl(work: Path, wave: int = 1, sample_ratio: float = 0.1,
         for s in sample_items:
             blk = s["block"]
             pn = s["para"]
-            rev_lines.append(f"### {blk} P{pn}")
+            kind = str(s.get("kind") or "")
+            head = f"### {blk} P{pn}"
+            if kind:
+                head += f"（{kind}）"
+            rev_lines.append(head)
             rev_lines.append("")
             rev_lines.append(f"原文: {s['text']}")
             cid, bid = blk.split("/")
