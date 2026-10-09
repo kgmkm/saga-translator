@@ -144,6 +144,7 @@ saga.py commit <workdir> --chapter chNNN --block bN
   match_value = "<原語名>"
   voice_status = "confirmed"
   ```
+- 異表記候補の別人棄却: 分析差分に `dismiss_variant = "<相手の原語名>"`（対象キャラの match 指定と併せて。任意で `dismiss_reason`）を入れて `analyze-commit`。該当ペアは status の異表記候補から落ち、再検出しない。監査は `_work/analysis_edits.jsonl`（`via="variant-dismiss"`）。連作では carry で引き継ぐ。
 - 判断記録: 曖昧原文の判断理由は本文に書かず `output/_work/notes.md` へ追記する（任意・追記式。機械は読まない。再開・検収時に親が読む）。
 
 ### 5. 進捗確認

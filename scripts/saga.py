@@ -592,47 +592,20 @@ def _cmd_status_impl(work: Path) -> int:
 #: 差分 TOML で値が原語（原文側）になるキー（lint --delta の検査から除外）。
 DELTA_SRC_KEYS = frozenset({"match_key", "match_value", "block"})
 
-#: 残渣検査のビューから外すキー（相手の原文名・その理由を保持する欄）。
-#: aliases は find_cn_residue_fields 側（_is_src_key）が除外する。dismiss 系は
-#: 原文名（非JIS字を含み得る）を保持する仕様のため、ここでビューから外す。
-RESIDUE_SRC_VIEW_KEYS = frozenset(
-    {"dismiss_variant", "dismissed_variants", "dismiss_reason"})
-
-
-def _residue_src_view(data):
-    """残渣検査用のビューを返す（dismiss 系の原文名の欄を外した deepcopy）。"""
-    if not isinstance(data, dict):
-        return data
-    view = copy.deepcopy(data)
-
-    def scrub(obj) -> None:
-        if isinstance(obj, dict):
-            for k in [k for k in obj if k in RESIDUE_SRC_VIEW_KEYS]:
-                obj.pop(k, None)
-            for v in obj.values():
-                scrub(v)
-        elif isinstance(obj, list):
-            for x in obj:
-                scrub(x)
-
-    scrub(view)
-    return view
-
-
 def collect_analysis_residue(
         entries: list[tuple[str, dict, str]]) -> list[tuple[str, int, str, str, str]]:
     """分析 TOML の残渣を収集する（analyze-commit / lint / prepare 警告の共通経路）。
 
     ``entries`` は ``(表示名, 検査対象データ, 行番号を探すテキスト)``。検出は
     ``detect.zh2ja.find_cn_residue_fields``（analyze-commit が保存前に使うのと
-    同じ関数）に、原文側の欄（dismiss 系。RESIDUE_SRC_VIEW_KEYS）を外した
-    ビューを渡す。戻り値は ``(名前, 行, キー, 理由, 場所)`` の一覧。
+    同じ関数。原文側の欄は `_is_src_key` が除外する）。戻り値は
+    ``(名前, 行, キー, 理由, 場所)`` の一覧。
     """
     from detect.zh2ja import find_cn_residue_fields
 
     out: list[tuple[str, int, str, str, str]] = []
     for name, data, text in entries:
-        for f in find_cn_residue_fields(_residue_src_view(data)):
+        for f in find_cn_residue_fields(data):
             line, key = _residue_line_key(f, text)
             out.append((name, line, key, f.value, f.context or ""))
     return out

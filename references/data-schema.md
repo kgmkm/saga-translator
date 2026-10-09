@@ -183,7 +183,7 @@ paras = [13, 40]
 - `chapters_meta.toml` の各 block に記録: `analysis_committed_at`（従来どおり）/ `analysis_src_hash`（ブロック原文の sha256 先頭12桁。原文が変われば変わる）/ `analysis_no_changes`（(b) の場合のみ true）
 - 分析 delta（analyze-commit の入力。`templates/brief_analyze.md` の形式が正）: トップレベル `block = "chNNN/bN"` 必須・chapters_meta に実在、`no_changes = true` は空差分の明示に必須。テーブルは **`[[characters_delta]]` / `[[terms_delta]]` / `[[plot_delta]]`**（`[[characters]]` 等の短縮形は無視されて空差分扱いになるので注意）。`[[characters_delta]]`・`[[terms_delta]]` は `match_key`/`match_value` 必須、`[[plot_delta]]` は `block`（delta と一致）/`text` 必須。違反はすべて拒否（exit 1・記録しない）
 - `[[plot_delta]]` の `replace = true`（boolean）は同一 block の `text` を置換する（既定は追記）
-- 保護キーの明示上書き（`--allow-protected-overwrite`。記述系キー memo / role / appearance / relationships / note のみで、`name_ja` / `term_ja` は対象外＝`rename_terms.py` の領分）と `replace = true` の plot 置換は、保存成功後に `_work/analysis_edits.jsonl` に1行ずつ追記する（`ts` / `match` / `key` / `old` / `new` / `via`。`via` は `protected-overwrite` か `plot-replace`。purge しない）
+- 保護キーの明示上書き（`--allow-protected-overwrite`。記述系キー memo / role / appearance / relationships / note のみで、`name_ja` / `term_ja` は対象外＝`rename_terms.py` の領分）と `replace = true` の plot 置換は、保存成功後に `_work/analysis_edits.jsonl` に1行ずつ追記する（`ts` / `match` / `key` / `old` / `new` / `via`。`via` は `protected-overwrite`・`plot-replace`・`variant-dismiss`（別人棄却。`reason` 付き）。purge しない）
 - 旧ブロック（`analysis_committed_at` のみ）は hash 未記録を許容
 
 ## 裁定記録 `_work/rulings.json`（stage3 / P2-3 前半・`scripts/rulings.py`）

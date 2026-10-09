@@ -443,8 +443,10 @@ def find_cn_residue_fields(data, config: ResidueConfig | None = None) -> list[Fi
 
     def _is_src_key(key: str) -> bool:
         # aliases は別名・愛称・原文の異表記を保持する欄であり、原語形を含む
-        # ことが仕様（P0-4）。原文側として残渣検査から除外する。
-        return key == "src" or key.endswith("_src") or key == "aliases"
+        # ことが仕様（P0-4）。dismiss 系（別人棄却の相手原文名・理由）も原文名を
+        # 保持する仕様のため同列に除外する。原文側として残渣検査から除外する。
+        return key == "src" or key.endswith("_src") or key in (
+            "aliases", "dismiss_variant", "dismissed_variants", "dismiss_reason")
 
     def _check(key: str, value: str, path: str) -> None:
         probe = value

@@ -296,5 +296,29 @@ class TestVariantDismiss(_Base):
         self.assertEqual(_merge_dismissed_variants(["甲", "乙"], ["乙", "丙"]), ["甲", "乙", "丙"])
 
 
+    def test_dismiss_keys_excluded_by_detector(self):
+        """dismiss 系の欄は検出器側（_is_src_key）で除外される（単一の正本）。"""
+        from detect.zh2ja import find_cn_residue_fields
+        data = {"dismiss_variant": "张叁",
+                "dismissed_variants": ["张叁"],
+                "dismiss_reason": "别人",
+                "memo": "日本語の覚書。"}
+        self.assertEqual(find_cn_residue_fields(data), [])
+        # 対照: 同じ語が日本語欄にあれば検出される
+        hit = find_cn_residue_fields({"memo": "张叁の件。"})
+        self.assertTrue(hit)
+        self.assertIn("memo", hit[0].context)
+
+    def test_dismissed_variants_carried_to_next_work(self):
+        """dismissed_variants は carry の CHAR_FIELDS で次作へ引き継がれる。"""
+        from carry_analysis import CHAR_FIELDS, _merge_items
+        self.assertIn("dismissed_variants", CHAR_FIELDS)
+        prev = [{"name_src": "张三", "dismissed_variants": ["张叁"]}]
+        merged, added, filled = _merge_items(
+            prev, [{"name_src": "张三"}], "name_src", CHAR_FIELDS, "n")
+        self.assertEqual(merged[0]["dismissed_variants"], ["张叁"])
+        self.assertEqual(filled, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

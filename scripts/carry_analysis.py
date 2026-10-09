@@ -35,6 +35,7 @@ CHAR_FIELDS = (
     "name_src",
     "name_ja",
     "aliases",
+    "dismissed_variants",
     "ruby",
     "role",
     "first_person",
