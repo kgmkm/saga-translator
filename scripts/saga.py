@@ -436,6 +436,16 @@ def _status_resume_ticket(work: Path, meta: dict, chapters: list[dict],
             out.append(f"[status]     {cid2}/{bid2}: 受領 {got}{total}（残り {lost}）")
         if len(pending_records) > 8:
             out.append(f"[status]     …他{len(pending_records) - 8}件")
+
+    # 台帳（ブロック横断状態の外部化。レビュー提案1）: 消費済みの件数
+    try:
+        from ledger import ledger_counts
+        lc = ledger_counts(work)
+    except Exception:
+        lc = None
+    if lc is not None:
+        out.append(f"[status] 台帳: ルビ消費 {lc[0]}件・用語初出 {lc[1]}件・"
+                   f"オノマトペ使用 {lc[2]}件")
     return out
 
 
@@ -2911,6 +2921,21 @@ def _finalize_block(work: Path, chapter: str, block: str,
             b2["translation"] = rec
             save_chapters_meta(work, meta2)
 
+        # 7) 台帳（ブロック横断状態の外部化。レビュー提案1）: 当該ブロックの確定訳文
+        #    だけを走査し、ルビ初出と用語初出を _work/ledger.toml へ差分追記する
+        #    （冪等）。既知の制限は ledger.py 冒頭のコメントを参照（rename_terms で
+        #    親文字が変わっても台帳の term は古いまま／revise でルビが消えても履歴
+        #    として残す）。失敗しても確定（emit 済み）は壊さない。
+        try:
+            from ledger import update_from_confirmed
+            added = update_from_confirmed(work, f"{cid}/{bid}", items)
+            if added["ruby"] or added["terms"]:
+                print(f"[commit] 台帳: ルビ +{added['ruby']}件 / "
+                      f"用語初出 +{added['terms']}件（_work/ledger.toml）")
+        except Exception as e:
+            print(f"[commit] 警告: 台帳（_work/ledger.toml）の更新に失敗しました: {e}",
+                  file=sys.stderr)
+
         report["hashes"] = {k: rec[k] for k in
                             ("src_hash", "analysis_src_hash", "config_hash",
                              "draft_hash", "final_hash")}
@@ -3437,6 +3462,51 @@ def _cmd_review_impl(work: Path, wave: int = 1, sample_ratio: float = 0.1,
     return 0
 
 
+# ---------------------------------------------------------------------------
+# ledger-ono サブコマンド（ブロック横断状態の外部化。レビュー提案1）
+# ---------------------------------------------------------------------------
+#
+# 使用済みオノマトペの申告を _work/ledger.toml の [[ono_used]] へ追記する。
+# 本体（原文・訳文）にオノマトペの表が無いため自動抽出はせず、翻訳者が
+# 「この表記はもう使った」と申告するための入口。同一 form+block+para は
+# 重複させない（再申告は「既に記録済み」の1行を出して exit 0）。
+
+def cmd_ledger_ono(work: Path, form: str, block: str,
+                   paragraph: int | None = None, context: str = "") -> int:
+    """オノマトペ使用の申告を台帳へ追記する（成功・失敗を timeline に1行記録）。"""
+    started = time.time()
+    rc = _cmd_ledger_ono_impl(work, form, block, paragraph, context)
+    _record_stage(work, "ledger-ono", None, block, started, rc,
+                  reason="success" if rc == 0 else "other")
+    return rc
+
+
+def _cmd_ledger_ono_impl(work: Path, form: str, block: str,
+                         paragraph: int | None, context: str) -> int:
+    if not work.is_dir():
+        print(f"[ledger-ono] エラー: ディレクトリが見つかりません: {work}", file=sys.stderr)
+        return 1
+    if not str(form or "").strip():
+        print("[ledger-ono] エラー: --form は空にできません", file=sys.stderr)
+        return 1
+    try:
+        from ledger import declare_ono
+        res = declare_ono(work, form, block, paragraph, context)
+    except Exception as e:
+        print(f"[ledger-ono] エラー: 台帳を更新できません: {e}", file=sys.stderr)
+        return 1
+    form_s = str(form).strip()
+    block_s = str(block or "").strip()
+    para_s = f" para={paragraph}" if paragraph is not None else ""
+    if res["added"]:
+        print(f"[ledger-ono] 記録しました: form={form_s} block={block_s}{para_s}"
+              f"（オノマトペ使用 {res['count']}件）")
+    else:
+        print(f"[ledger-ono] 既に記録済みです（重複しません）: "
+              f"form={form_s} block={block_s}{para_s}")
+    return 0
+
+
 def main() -> None:
     utf8()
     ap = argparse.ArgumentParser(description="saga-translator CLI")
@@ -3506,6 +3576,15 @@ def main() -> None:
                       help="依頼ID（冪等キー。再送は同じIDを使う）")
     p_da.add_argument("--file", default=None, help="部分ドラフトのファイル（省略時は標準入力）")
 
+    # ledger-ono
+    p_lo = sub.add_parser("ledger-ono",
+                          help="使用済みオノマトペの申告（_work/ledger.toml へ追記）")
+    p_lo.add_argument("work", help="作品ディレクトリ")
+    p_lo.add_argument("--form", required=True, help="オノマトペの表記")
+    p_lo.add_argument("--block", required=True, help="ブロック（例: ch001/b2）")
+    p_lo.add_argument("--para", type=int, default=None, help="段落番号（任意）")
+    p_lo.add_argument("--context", default="", help="注記（任意）")
+
     args = ap.parse_args()
 
     work = Path(args.work).resolve()
@@ -3534,6 +3613,9 @@ def main() -> None:
         raise SystemExit(cmd_draft_append(work, args.chapter, args.block,
                                           args.start, args.end,
                                           args.request_id, args.file))
+    elif args.command == "ledger-ono":
+        raise SystemExit(cmd_ledger_ono(work, args.form, args.block,
+                                        args.para, args.context))
 
 
 if __name__ == "__main__":

@@ -229,6 +229,34 @@ def _carry_naming_policy(work: Path, prev: Path) -> None:
     print(f"[carry] 命名方針を現作の house_style へコピーしました: {target}")
 
 
+# ── 台帳（ブロック横断状態の外部化。レビュー提案1） ──────────────────────
+
+
+def _carry_ledger(work: Path, prev: Path) -> None:
+    """前作の台帳（_work/ledger.toml）を現作へ引き継ぐ（連作で消費状態を継続）。
+
+    最小実装: 前作にファイルがあればコピーし、1行表示する。無ければその旨を1行。
+    """
+    prev_ledger = prev / "_work" / "ledger.toml"
+    if not prev_ledger.is_file():
+        print("[carry] ledger: 前作に台帳はありません")
+        return
+    dst = work / "_work" / "ledger.toml"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        atomic_write_text(dst, prev_ledger.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"[carry] 警告: 台帳を引き継ぎできませんでした（手動でコピーしてください）: {e}")
+        return
+    try:
+        from ledger import ledger_counts
+        c = ledger_counts(work)
+    except Exception:
+        c = None
+    counts = f"ルビ{c[0]}件・用語初出{c[1]}件・オノマトペ使用{c[2]}件" if c else "件数不明"
+    print(f"[carry] ledger: 前作の台帳を引き継ぎました（{counts}） -> {dst}")
+
+
 def main() -> None:
     utf8()
     ap = argparse.ArgumentParser(description="前作の分析を現作へ引き継ぐ")
@@ -281,6 +309,9 @@ def main() -> None:
 
     # 命名方針（P0-5）: 前作の [naming_policy] を現作の house_style 候補として引き継ぐ
     _carry_naming_policy(work, prev)
+
+    # 台帳（レビュー提案1）: 前作の消費状態（ルビ・用語初出・オノマトペ）を継続する
+    _carry_ledger(work, prev)
 
     print("[carry] 以降の分析は引き継いだ訳語・声を確定値として扱い、変化だけ arcs に追記すること")
 

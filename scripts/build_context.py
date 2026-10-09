@@ -492,6 +492,67 @@ def _fmt_vocab_selection(work: Path, body_texts: list[str]) -> list[str]:
     return lines
 
 
+# ── 台帳（ブロック横断状態の外部化。レビュー提案1） ──────────────────────
+# 確定済みブロックで消費したルビ・用語初出・申告済みオノマトペを「消費済み」と
+# して翻訳コンテキストへ注入し、再付与・重複を防ぐ。上限を超えた分は
+# 「…他N件」で省略する（status の一覧と同じ形式）。
+
+LEDGER_LIST_CAP = 8
+
+
+def _fmt_capped(items: list[str], cap: int = LEDGER_LIST_CAP) -> str:
+    """一覧を上限まで並べ、超過分は「…他N件」で省略する。"""
+    shown = ", ".join(items[:cap])
+    if len(items) > cap:
+        shown += f" …他{len(items) - cap}件"
+    return shown
+
+
+def _fmt_ledger_consumed(work: Path) -> list[str]:
+    """台帳の「消費済み」節（翻訳モードのみ。データが無ければ節ごと出さない）。
+
+    - 消費済みルビ（再付与不可）: [[ruby_applied]] の term
+    - 使用済みオノマトペ: [[ono_used]] の form（context があれば括弧付き）
+    - 用語の初出済み: [[term_first_use]] の term
+    """
+    try:
+        from ledger import load_ledger
+        data = load_ledger(work)
+    except Exception:
+        return []
+    out: list[str] = []
+
+    ruby_terms: list[str] = []
+    for r in data.get("ruby_applied", []):
+        t = str(r.get("term") or "").strip()
+        if t and t not in ruby_terms:
+            ruby_terms.append(t)
+    if ruby_terms:
+        out += ["## 消費済みルビ（再付与不可）", _fmt_capped(ruby_terms), ""]
+
+    ono_items: list[str] = []
+    for o in data.get("ono_used", []):
+        form = str(o.get("form") or "").strip()
+        if not form:
+            continue
+        ctx = str(o.get("context") or "").strip()
+        item = f"{form}（{ctx}）" if ctx else form
+        if item not in ono_items:
+            ono_items.append(item)
+    if ono_items:
+        out += ["## 使用済みオノマトペ", _fmt_capped(ono_items), ""]
+
+    term_items: list[str] = []
+    for t in data.get("term_first_use", []):
+        v = str(t.get("term") or "").strip()
+        if v and v not in term_items:
+            term_items.append(v)
+    if term_items:
+        out += ["## 用語の初出済み", _fmt_capped(term_items), ""]
+
+    return out
+
+
 _kind_map = {
     "naming": "命名",
     "ruby": "ルビ",
@@ -694,6 +755,8 @@ def _stage_impl(
         # 対象ブロックの原文に出る語を選別して追加する（terms は既存の選別のまま）。
         if mode == "translation":
             lines += _fmt_vocab_selection(work, body_texts)
+            # 台帳の「消費済み」節（レビュー提案1。データが無ければ出ない）
+            lines += _fmt_ledger_consumed(work)
 
         # plot 時点解決 (E)
         plot_texts, plot_resolved = _compact_plot(plot, cid, bid)
@@ -764,6 +827,8 @@ def _stage_impl(
         # 訳語の差し込み (P0-3。翻訳コンテキストのみ)
         if mode == "translation":
             lines += _fmt_vocab_selection(work, body_texts)
+            # 台帳の「消費済み」節（レビュー提案1。データが無ければ出ない）
+            lines += _fmt_ledger_consumed(work)
 
     # 分析モードの生 TOML 廃止 (G): 整形済み人物表は full/compact 両方で既に出ている
     # 旧来の生 TOML ブロックは出力しない
