@@ -1,7 +1,7 @@
 ---
 name: saga-translator
 description: Use when a novel file needs translating into Japanese or Simplified Chinese.
-version: 0.11.0
+version: 0.12.0
 author: saga-translator
 license: MIT
 tags: [translation, novel, japanese, pipeline]
@@ -26,6 +26,7 @@ tags: [translation, novel, japanese, pipeline]
 | references/data-schema.md | — | データ構造スキーマ |
 | references/troubleshooting.md | — | 障害時対応（本スキルと同一） |
 | references/agent-delegation.md | — | 委譲運用ルール（ハーネス非依存） |
+| references/series-translation.md | — | 連作翻訳フロー（パイロット先行・chain-carry 量産） |
 | references/env-windows.md | — | Windows での実行時の注意（PowerShell 節を含む） |
 | references/lang_<src>2<dst>.md | — | 言語固有 tips（実在時のみ） |
 | templates/brief_analyze.md | — | 分析委譲ブリーフ |
@@ -89,6 +90,8 @@ python3 scripts/lock_prep.py <workdir>
 ```
 python3 scripts/carry_analysis.py <workdir> --from <前作のworkdir>
 ```
+
+連作2作目以降の運用（パイロット先行・量産・レビュー二段階）は `references/series-translation.md` に従う。
 
 以下を章/ブロック単位で先頭から1周:
 
@@ -208,6 +211,7 @@ assemble の入力は**確定済みのブロック**に限る（commit を経な
 | 「画像が無い」 | output/images/ へ ID 入り画像を置くよう案内。assemble 再実行 |
 | 「成人向け作品を訳したい」 | 本体非対応。拡張スキル `saga-translator-spicy` があればそれに従う |
 | 「全体を一気に訳して」 | 1M 以上の context モデルなら例外許可。ただし章単位を推奨 |
+| 「連作を訳して」 | 第1話で型決め→残りは carry 量産。手順は `references/series-translation.md` |
 
 ## 出力スタイル（既定）
 

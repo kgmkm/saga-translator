@@ -77,7 +77,7 @@ proposed = ""
   - `speech_style`: 敬語/タメ口 と語尾の実例。形容詞だけで済ませない
   - `vocab`: 語彙の特徴（漢語過多・擬音・無口など）
   - `catchphrase`: 口癖。口調そのものとは別
-- `arcs` は変化の記録。`at_block` 以降に効く。変わった欄だけ書く。精神状態は `note`、声の変化は `speech_style` / `first_person` 等。翻訳時は対象ブロックに対応する arc を使う
+- `arcs` は変化の記録。`at_block` 以降に効く。変わった欄だけ書く。精神状態は `note`、声の変化は `speech_style` / `first_person` 等。翻訳時は対象ブロックに対応する arc を使う。連作では前作の arcs を持ち込まない（詳細は `references/series-translation.md`）
 - `proposed` は既存訳語の変更候補。オーナー承認後に本採用し、`rename_terms.py` で伝播
 - 通行人は `name_src` / `name_ja` / `role` だけでよい。セリフがある人物は声の欄を埋める
 
