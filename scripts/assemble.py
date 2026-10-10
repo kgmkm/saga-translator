@@ -1,10 +1,12 @@
 """確定済みブロックの結合: 章訳文・対訳・目次・全文。
-対訳(章対訳・全文_対訳.md)は --parallel 指定で生成する。年齢正規化の記録
-(analysis/age_policy_report-[ネタバレあり].md)がある作品では自動で有効。
-章が1つだけの作品では全文を出さず章ファイルのみとする(--keep-full で従来どおり
-両方)。全ブロック確定後は原文と中間物を消す(--keep-source で残す)が、監査記録
-(output/_work/commit・output/_work/done)と改名の記録(_work/renames.jsonl)は
-残し、assemble の最後に「残る中間物」として一覧表示する。
+対訳(章対訳・全文_対訳.md)は既定で生成する(--no-parallel で抑制)。全文(全文_訳文.md)
+も章数によらず既定で生成する(--no-full で抑制。単章作品で章ファイルとの重複を避けたい
+ときだけ抑制する)。全ブロック確定後は原文と中間物を消す(--keep-source で残す)が、
+chapters/*.paras.toml(改訂路 --revise の原文)と単章作品の output/<ch>/(ブロック訳)は
+残し、監査記録(output/_work/commit・output/_work/done)と改名の記録
+(_work/renames.jsonl)も残して、assemble の最後に「残る中間物」として一覧表示する。
+空の組立て(確定済みブロックなし)はエラー終了(exit 1)。purge の前に成果物の実在・
+サイズを確認し、不備があれば原文を消さずに停止する。
 titles.toml(analysis/)が無い・空のときは停止する。原題のまま出力するときだけ
 --allow-src-title を指定する（未確定の章題は目次に「題未確定」と明示する）。"""
 from __future__ import annotations
@@ -24,8 +26,6 @@ from ingest import (  # noqa: E402
     MD_IMAGE_SRC, missing_image_notice, relink_markdown_files, retarget_md_images,
 )
 
-AGE_REPORT = "age_policy_report-[ネタバレあり].md"
-
 
 def _is_toml_table(v) -> bool:
     """dump_toml がテーブル([key]/[[key]])として書く値かどうか。"""
@@ -40,6 +40,7 @@ def _record_assembled(work: Path, outputs: list[str]) -> None:
     既存キー（skill_version 等）はそのまま残す。dump_toml はテーブル以降の
     スカラーを再読込時にテーブル内へ取り込むため、テーブル化される値は末尾へ
     回してから追記する（ingest と同じ注意）。
+    成果物はバイト数を併記する（AS-3: 「N 件」だけでは空出力・縮退に気づけない）。
     """
     try:
         man = load_structured(work / "manifest")
@@ -52,6 +53,46 @@ def _record_assembled(work: Path, outputs: list[str]) -> None:
     save_structured(work / "manifest", {**scalars, **tables})
     print(f"[assemble] 完成を記録: assembled_at={scalars['assembled_at']}"
           f"（出力成果物 {len(outputs)} 件）")
+    _print_output_sizes(work, outputs)
+
+
+def _print_output_sizes(work: Path, outputs: list[str]) -> None:
+    """成果物の一覧をバイト数つきで出す。空(0B)の成果物は警告する（AS-3）。"""
+    sizes: list[tuple[str, int | None]] = []
+    for rel in outputs:
+        try:
+            sizes.append((rel, (work / rel).stat().st_size))
+        except OSError:
+            sizes.append((rel, None))
+    shown = ", ".join(
+        f"{rel}（不明）" if size is None else f"{rel} {size:,}B" for rel, size in sizes[:12])
+    if len(sizes) > 12:
+        shown += f"…（他 {len(sizes) - 12} 件）"
+    total = sum(size for _rel, size in sizes if size is not None)
+    print(f"[assemble] 出力サイズ: {shown} ／ 合計 {total:,}B")
+    empty = [rel for rel, size in sizes if size == 0]
+    if empty:
+        print("[assemble] WARN: 空(0B)の成果物があります: " + ", ".join(empty))
+
+
+def _artifact_problems(work: Path, outputs: list[str]) -> list[str]:
+    """purge の前に成果物（この実行で書いた出力）の実在とサイズを確認する（G23/AS-1）。
+
+    不備（欠落・空ファイル）があれば理由の一覧を返す。呼び出し側はこれが
+    空でないとき purge を実行しない（原文を消して復元不能になるのを防ぐ）。
+    """
+    problems: list[str] = []
+    for rel in outputs:
+        p = work / rel
+        if not p.is_file():
+            problems.append(f"{rel}: 成果物がありません")
+            continue
+        try:
+            if p.stat().st_size == 0:
+                problems.append(f"{rel}: 成果物が空です(0B)")
+        except OSError as e:  # pragma: no cover - 環境依存
+            problems.append(f"{rel}: サイズを確認できません ({e})")
+    return problems
 
 
 def _remaining_intermediates(work: Path) -> list[tuple[str, str]]:
@@ -182,12 +223,15 @@ def main() -> None:
     ap.add_argument("work")
     ap.add_argument("--keep-source", action="store_true", help="原文・中間物を残す(既定は全ブロック確定後に削除)")
     ap.add_argument("--parallel", action="store_true",
-                    help="対訳(章対訳・全文_対訳.md)を生成する。年齢正規化の記録がある作品では指定不要(自動)")
+                    help="対訳を生成する（既定で有効。互換のため受理。抑制は --no-parallel）")
+    ap.add_argument("--no-parallel", action="store_true",
+                    help="対訳(章対訳・全文_対訳.md)を生成しない")
     ap.add_argument("--allow-src-title", action="store_true",
                     help="titles.toml が無い/題未確定のとき原題のまま出力する（目次に「題未確定」を明示）")
     ap.add_argument("--keep-full", action="store_true",
-                    help="章が1つだけの作品でも全文(全文_訳文.md・全文_対訳.md)を出力する"
-                         "（既定は重複を避けて章ファイルのみ）")
+                    help="全文(全文_訳文.md・全文_対訳.md)を出力する（既定で有効。互換のため受理）")
+    ap.add_argument("--no-full", action="store_true",
+                    help="全文(全文_訳文.md・全文_対訳.md)を出力しない（章ファイルのみ）")
     args = ap.parse_args()
     with timed_stage(args.work, "assemble"):
         _stage_impl(args)
@@ -204,10 +248,10 @@ def _stage_impl(args: argparse.Namespace) -> None:
     ch_titles = {c.get("id"): c for c in (titles.get("chapters") or []) if c.get("id")}
     out = work / "output"
     allow_src_title = args.allow_src_title
-    # 単章作品の重複解消（レビュー P3）: 章が1つだけなら全文は出さない。
-    # --keep-full で従来どおり両方（既存のテスト・運用が全文を参照する場合の互換）。
-    single_chapter = len(meta["chapters"]) == 1
-    emit_full = args.keep_full or not single_chapter
+    # 全文・対訳は既定で出力する（G25 / G26）。抑制は --no-full / --no-parallel。
+    # --keep-full / --parallel は互換のため受理する（指定しても結果は既定と同じ）。
+    emit_full = not args.no_full
+    make_parallel = not args.no_parallel
     # titles ゲート: 訳題が未確定のまま原題を黙って出さない（レビュー #2 / P0-2）。
     # 通常経路はここで停止し、--allow-src-title の経路だけ原題のまま続行する。
     problems = _titles_gate_problems(work, meta, titles, dst, out, suf)
@@ -229,11 +273,11 @@ def _stage_impl(args: argparse.Namespace) -> None:
         print("[assemble] 参照先の画像を output/images/ に置くか、"
               "訳文の参照を原文に合わせてから再実行してください。")
         sys.exit(1)
-    make_parallel = args.parallel or (work / "analysis" / AGE_REPORT).exists()
     toc = [f"# {tr_title}", "", "# 目次", ""] if tr_title else ["# 目次", ""]
     full_tr: list[str] = []
     full_par: list[str] = []
     done_any = False
+    missing_blocks: list[str] = []  # この実行で出力が無かったブロック（部分組立ての警告用）
     outputs: list[str] = []  # 完成記録に残す出力成果物（work 相対）
 
     for c in meta["chapters"]:
@@ -266,6 +310,7 @@ def _stage_impl(args: argparse.Namespace) -> None:
         for b in blocks:
             f_tr = out / cid / f"{b['id']}{suf}.md"
             if not f_tr.exists():
+                missing_blocks.append(f"{cid}/{b['id']}")
                 continue
             ch_tr.append(f_tr.read_text(encoding="utf-8").strip())
             if make_parallel:
@@ -276,7 +321,9 @@ def _stage_impl(args: argparse.Namespace) -> None:
                     print(f"[assemble] WARN: 対訳がありません(スキップ): {cid}/{b['id']}")
             n_done += 1
             done_any = True
-        if ch_tr:
+        if ch_tr and n_done:
+            # ブロック出力が1つも無い章はファイルを書かない（見出しだけの縮退で
+            # 既存の章ファイルを壊さない。G23/AS-1 の 9B 破壊の再発防止）。
             body = "\n\n".join(ch_tr) + "\n"
             atomic_write_text(out / f"{cid}{suf}.md", retarget_md_images(body))
             outputs.append(f"output/{cid}{suf}.md")
@@ -294,6 +341,12 @@ def _stage_impl(args: argparse.Namespace) -> None:
         c["status"] = "done" if blocks and n_done == len(blocks) else c.get("status", "pending")
 
     if done_any:
+        if missing_blocks:
+            # 部分組立ては妨げない（復旧・部分確認のため）が、完成扱いにはせず警告する。
+            shown_missing = ", ".join(missing_blocks[:8]) + ("…" if len(missing_blocks) > 8 else "")
+            print("[assemble] WARN: 未確定のブロックがあります"
+                  f"（部分組立て・{len(missing_blocks)}件）: {shown_missing}")
+            print("[assemble] WARN: 確定済みブロックのみで組み立てました（purge・完成記録はしません）")
         atomic_write_text(out / "目次.md", "\n".join(toc) + "\n")
         outputs.append("output/目次.md")
         print(f"[assemble] 目次を出力: {out / '目次.md'}")
@@ -305,18 +358,21 @@ def _stage_impl(args: argparse.Namespace) -> None:
             outputs.append("output/全文_訳文.md")
             print(f"[assemble] 全文を出力: {out / '全文_訳文.md'}")
         else:
-            # 単章作品の重複解消（レビュー P3）: 全文は章ファイルと同じ内容になるため出さない。
-            print("[assemble] 章が1つのため全文_訳文.md は省略（--keep-full で出力）")
+            print("[assemble] --no-full: 全文_訳文.md は出力しません")
         if make_parallel and full_par:
             if emit_full:
                 atomic_write_text(out / "全文_対訳.md", retarget_md_images("\n\n".join(full_par) + "\n"))
                 outputs.append("output/全文_対訳.md")
-                why = "--parallel" if args.parallel else f"年齢正規化の記録({AGE_REPORT})"
-                print(f"[assemble] 対訳を出力: {out / '全文_対訳.md'} ({why})")
+                print(f"[assemble] 対訳を出力: {out / '全文_対訳.md'}")
             else:
-                print("[assemble] 章が1つのため全文_対訳.md は省略（--keep-full で出力）")
+                print("[assemble] --no-full: 全文_対訳.md は出力しません")
     else:
-        print("[assemble] 確定済みブロックなし")
+        # 空の組立て: 何も書かず・何も消さずにエラー終了する（G23/AS-1）。
+        print("[assemble] 確定済みブロックなし: 組み立てる対象がありません")
+        print("[assemble] 対処: 各ブロックを saga.py commit で確定してから再実行してください。"
+              "原文は chapters/*.paras.toml に残っており、確定済みドラフトは"
+              " output/_work/done/ から再取得できます。")
+        sys.exit(1)
 
     save_chapters_meta(work, meta)
 
@@ -334,6 +390,15 @@ def _stage_impl(args: argparse.Namespace) -> None:
 
     complete = all_blocks_emitted(work, meta)
     if complete and not args.keep_source:
+        # purge の前に成果物の実在・サイズを確認する（G23/AS-1）。不備があれば
+        # 原文を消さずに停止する（purge 後に空出力へ気づいても原文は戻せない）。
+        problems = _artifact_problems(work, outputs)
+        if problems:
+            print("[assemble] 成果物の確認で停止しました（purge は行いません）:")
+            for p in problems:
+                print(f"[assemble]   - {p}")
+            print("[assemble] 出力を確認して再実行してください（原文・中間物は残っています）。")
+            sys.exit(1)
         removed = purge_source(work, keep_parallel=make_parallel)
         print(f"[assemble] 原文・中間物を削除 ({len(removed)}): " + ", ".join(removed[:12]) + ("…" if len(removed) > 12 else ""))
         # 全ブロック確定の assemble が通った = 「完成・中間物削除済み」。

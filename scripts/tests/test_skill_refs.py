@@ -63,6 +63,55 @@ class TestSkillRefs(unittest.TestCase):
         """templates/*.md への参照が実在する。"""
         self._check_refs(r"templates/([\w.-]+\.md)", prefix="templates")
 
+    # ── 裸コマンドの再発検査（F1-O3） ──────────────────────────────
+
+    _BACKTICK_RE = re.compile(r"`([^`\n]+)`")
+    _FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.S)
+    _PY_NAME_RE = re.compile(r"^[A-Za-z0-9_][\w.-]*\.py$")
+
+    def _bare_commands(self, text):
+        """バッククォート・コードフェンス内の「裸の *.py で始まるコマンド」を集める。
+
+        ファイル名だけの参照（`` `rename_terms.py` ``）や行番号参照
+        （`` saga.py:113 ``）はコマンドではないため対象外。
+        """
+        offenders = []
+        for m in self._BACKTICK_RE.finditer(text):
+            head, _, rest = m.group(1).strip().partition(" ")
+            if self._PY_NAME_RE.match(head) and rest.strip():
+                offenders.append(m.group(1).strip())
+        for m in self._FENCE_RE.finditer(text):
+            for line in m.group(1).splitlines():
+                s = line.strip()
+                head, _, rest = s.partition(" ")
+                if self._PY_NAME_RE.match(head) and rest.strip():
+                    offenders.append(s)
+        return offenders
+
+    def test_skill_no_bare_python_commands(self):
+        """SKILL.md のコマンド例は python3 scripts/ 前置（裸の *.py で始まらない）。"""
+        offenders = self._bare_commands(self.content)
+        self.assertListEqual(offenders, [],
+                             "裸のコマンドが残っている:\n" + "\n".join(offenders))
+
+    def test_templates_no_bare_python_commands(self):
+        """templates/*.md のコマンド例も python3 scripts/ 前置。"""
+        tdir = os.path.join(BASE, "templates")
+        bad = []
+        for name in sorted(os.listdir(tdir)):
+            if not name.endswith(".md"):
+                continue
+            with open(os.path.join(tdir, name), encoding="utf-8") as f:
+                for o in self._bare_commands(f.read()):
+                    bad.append(f"{name}: {o}")
+        self.assertListEqual(bad, [], "裸のコマンドが残っている:\n" + "\n".join(bad))
+
+    def test_translation_input_and_draft_path_documented(self):
+        """手順4にコンテキストのパスとドラフト置き場が明記されている（O1/O2 の再発検査）。"""
+        self.assertIn("translation_input/{ch}_{b}_translation.md", self.content)
+        self.assertIn("output/_work/{ch}_{b}_ja_numbered.md", self.content)
+        self.assertNotIn("ドラフトを _work/ に", self.content)
+
 
 if __name__ == "__main__":
     unittest.main()

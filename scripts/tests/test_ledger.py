@@ -6,7 +6,7 @@
   - ledger-ono の申告・重複拒否・timeline 記録・prepare への注入
   - 台帳が無い work では注入節が出ないこと（後方互換）
   - 再確定（復旧・--revise）が冪等で、消えたルビを削除しないこと
-  - carry_analysis の引き継ぎ（前作の台帳コピー）
+  - carry_analysis の引き継ぎ（用語初出・オノマトペ。ruby_applied は作品単位のため引き継がない）
   - purge_source が台帳を消さないこと
   - status 再開票の台帳1行
 
@@ -259,7 +259,8 @@ class TestCommitLedger(_FixtureBase):
         self.assertIn("[commit] 台帳: ルビ +1件 / 用語初出 +2件", out)
 
     def test_purge_keeps_ledger(self):
-        """台帳は purge 対象外（assemble 後も残る。analysis_edits.jsonl と同列）。"""
+        """台帳は purge 対象外（assemble 後も残る。analysis_edits.jsonl と同列）。
+        G23: 段落原文 chapters/*.paras.toml も purge で消さない。"""
         from _lib import purge_source
         from ledger import load_ledger
         _place_draft(self.work, "ch001", "b1", DRAFT_B1)
@@ -267,7 +268,8 @@ class TestCommitLedger(_FixtureBase):
         self.assertEqual(code, 0, out)
 
         removed = purge_source(self.work)
-        self.assertIn("chapters", removed)
+        self.assertNotIn("chapters", removed)
+        self.assertTrue((self.work / "chapters" / "ch001.paras.toml").is_file())
         self.assertTrue((self.work / "_work" / "ledger.toml").is_file())
         d = load_ledger(self.work)
         self.assertEqual(len(d["ruby_applied"]), 1)
@@ -357,7 +359,7 @@ class TestPrepareInjection(_FixtureBase):
 
         for style in ("compact", "full"):
             text = _run_stage(self.work, "ch001", "b2", "translation", style)
-            self.assertIn("剣", _section(text, "消費済みルビ（再付与不可）"), style)
+            self.assertIn("剣", _section(text, "この作品で消費済みルビ（再付与不可）"), style)
             self.assertIn("ドキドキ（鼓動）", _section(text, "使用済みオノマトペ"), style)
             terms = _section(text, "用語の初出済み")
             self.assertIn("剣", terms, style)
@@ -392,7 +394,7 @@ class TestPrepareInjection(_FixtureBase):
             "ono_used": [],
         })
         text = _run_stage(self.work, "ch001", "b1", "translation")
-        sec = _section(text, "消費済みルビ（再付与不可）")
+        sec = _section(text, "この作品で消費済みルビ（再付与不可）")
         self.assertIn("語0", sec)
         self.assertIn("…他2件", sec)
         self.assertNotIn("語8", sec)
@@ -422,8 +424,9 @@ class TestStatusLedgerLine(_FixtureBase):
 class TestCarryLedger(_FixtureBase):
     """carry_analysis の台帳引き継ぎ（連作）。"""
 
-    def test_carry_copies_prev_ledger(self):
-        from ledger import ledger_counts, save_ledger
+    def test_carry_copies_prev_ledger_except_ruby(self):
+        """用語初出・オノマトペは引き継ぎ、ruby_applied は引き継がない（G10 / T12）。"""
+        from ledger import ledger_counts, load_ledger, save_ledger
         prev = _make_work(self.td / "prev")
         cur = _make_work(self.td / "cur")
         save_ledger(prev, {
@@ -435,12 +438,35 @@ class TestCarryLedger(_FixtureBase):
         code, out = _run_cli(["carry_analysis.py", str(cur), "--from", str(prev)])
         self.assertEqual(code, 0, out)
         self.assertIn("[carry] ledger: 前作の台帳を引き継ぎました", out)
+        self.assertIn("ruby_applied は作品単位のため引き継がず", out)
 
         copied = cur / "_work" / "ledger.toml"
         self.assertTrue(copied.is_file(), out)
-        self.assertEqual(copied.read_text(encoding="utf-8"),
-                         (prev / "_work" / "ledger.toml").read_text(encoding="utf-8"))
-        self.assertEqual(ledger_counts(cur), (1, 1, 1))
+        # ルビは0件（作品単位の既定）、用語初出とオノマトペは1件ずつ
+        self.assertEqual(ledger_counts(cur), (0, 1, 1))
+        d = load_ledger(cur)
+        self.assertEqual([t["term"] for t in d["term_first_use"]], ["雪"])
+        self.assertEqual([o["form"] for o in d["ono_used"]], ["ドキドキ"])
+        self.assertEqual(d["ruby_applied"], [])
+
+    def test_carry_keeps_current_ledger_ruby_and_unions_terms(self):
+        """現作に既に台帳がある場合、現作自身のルビは消さず、用語は和集合にする。"""
+        from ledger import load_ledger, save_ledger
+        prev = _make_work(self.td / "prev")
+        cur = _make_work(self.td / "cur")
+        save_ledger(prev, {
+            "term_first_use": [{"term": "雪", "block": "ch001/b1", "paragraph": 2}],
+        })
+        save_ledger(cur, {
+            "ruby_applied": [{"term": "花", "reading": "はな",
+                              "block": "ch001/b1", "paragraph": 1}],
+            "term_first_use": [{"term": "月", "block": "ch001/b1", "paragraph": 1}],
+        })
+        code, out = _run_cli(["carry_analysis.py", str(cur), "--from", str(prev)])
+        self.assertEqual(code, 0, out)
+        d = load_ledger(cur)
+        self.assertEqual([r["term"] for r in d["ruby_applied"]], ["花"])
+        self.assertEqual([t["term"] for t in d["term_first_use"]], ["雪", "月"])
 
     def test_carry_without_prev_ledger(self):
         from carry_analysis import _carry_ledger

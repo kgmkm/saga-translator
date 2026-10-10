@@ -268,8 +268,10 @@ def _entries_from_house_style(work: Path, paths: list[Path]) -> list[VocabEntry]
     """house_style.toml の goi ルール（approved / locked・適用範囲内）を読む。
 
     適用範囲は表示（build_context._fmt_house_style）と同じ基準:
-    scope=global、または scope=work で target がこの作品。series / character は
-    従来どおり対象外（#19 の表示側の課題。探索先の共通化のみ本関数の担当）。
+    scope=global、scope=series（共通探索先に置かれた連作共有ルール。#43。従来は
+    黙って無視されていた。target は記録用）、または scope=work で target が
+    この作品。character は従来どおり対象外（人物単位の裁定は terms / characters
+    側で扱う）。
     """
     work_id = Path(work).name
     out: list[VocabEntry] = []
@@ -283,7 +285,8 @@ def _entries_from_house_style(work: Path, paths: list[Path]) -> list[VocabEntry]
             if r.get("status") not in ("approved", "locked"):
                 continue
             scope = r.get("scope")
-            if scope == "global":
+            if scope in ("global", "series"):
+                # series は連作共有ルール（共通探索先の親 _house に置く）。#43。
                 pass
             elif scope == "work" and r.get("target") == work_id:
                 pass

@@ -26,6 +26,7 @@ proper_noun = "phonetic" # phonetic=音訳 / semantic=意訳 / keep=原語併記
 [context]
 prev_tail_paras = 3      # 前章/前ブロックの訳文末尾を何段落入れるか
 next_head_paras = 2      # 次章/次ブロックの冒頭を何段落入れるか
+plot_budget_chars = 4000 # あらすじの文字数予算(超過分は古い方から1行要約。0=無制限)
 
 [split]
 block_target_chars = 4000  # ブロック分割の目標文字数(段落境界で切る)
@@ -576,6 +577,8 @@ def all_blocks_emitted(work: Path, meta: dict) -> bool:
 def purge_source(work: Path, keep_parallel: bool = False) -> list[str]:
     """全ブロック確定後に原文と中間物を消す。入力元ファイルは触らない。
     残す: 訳文(章/全文/目次)、analysis、manifest、output/images、chapters_meta、logs、
+    chapters/*.paras.toml(assemble 後の改訂路 --revise が使う原文。G23)、
+    単章作品の output/<ch>/(ブロック訳。1章は保持コストが低く、改訂・復元の受け皿。G23)、
     output/_work/done(確定ドラフト)と output/_work/commit(監査記録。#20)。
     keep_parallel=True のときは output/ 直下の対訳(全文_対訳.md・章対訳)も残す。"""
     work = Path(work).resolve()
@@ -593,7 +596,7 @@ def purge_source(work: Path, keep_parallel: bool = False) -> list[str]:
             p.unlink()
         removed.append(rel.replace("\\", "/"))
 
-    for rel in ("originals", "translation_input", "chapters", "output/_work", "output/_done", "output/_qa"):
+    for rel in ("originals", "translation_input", "output/_work", "output/_done", "output/_qa"):
         # commit が確定ドラフトを _work/done/ へアーカイブし、監査記録（commit の
         # 報告・段落対応スナップショット）を _work/commit/ に残す（レビュー P3-2・#20。
         # emit 後の検証・時間分析・復元と、assemble 後の status/prepare/review に使う）。
@@ -616,6 +619,19 @@ def purge_source(work: Path, keep_parallel: bool = False) -> list[str]:
                 shutil.rmtree(keep, ignore_errors=True)
                 continue
         rm(rel)
+
+    # chapters/: 段落原文 *.paras.toml は残す（G23/#59。--revise と調査が原文を要求する）。
+    # 残骸（それ以外のファイル）だけ消す。
+    ch_dir = work / "chapters"
+    if ch_dir.is_dir():
+        for p in sorted(ch_dir.rglob("*")):
+            if not p.is_file():
+                continue
+            if p.name.endswith(".paras.toml") or p.name.endswith(".paras.json"):
+                continue
+            _under_work(work, p).unlink()
+            removed.append(str(p.relative_to(work)).replace("\\", "/"))
+
     out = work / "output"
     if out.exists():
         if not keep_parallel:
@@ -626,11 +642,18 @@ def purge_source(work: Path, keep_parallel: bool = False) -> list[str]:
                 if "parallel" in name.lower() or name == "全文_対訳.md":
                     _under_work(work, p).unlink()
                     removed.append(str(p.relative_to(work)).replace("\\", "/"))
-        for p in list(out.iterdir()):
-            if p.is_dir() and p.name.startswith("ch"):
-                _under_work(work, p)
-                shutil.rmtree(p)
-                removed.append(str(p.relative_to(work)).replace("\\", "/"))
+        # 章別出力の削除。単章作品では output/<ch>/ のブロック訳も残す
+        # （G23/#61: 1章作品は保持コストが低く、改訂・復元の受け皿になる）。
+        try:
+            single_chapter = len(load_chapters_meta(work).get("chapters") or []) == 1
+        except (OSError, TomlSyntaxError):
+            single_chapter = False
+        if not single_chapter:
+            for p in list(out.iterdir()):
+                if p.is_dir() and p.name.startswith("ch"):
+                    _under_work(work, p)
+                    shutil.rmtree(p)
+                    removed.append(str(p.relative_to(work)).replace("\\", "/"))
         # 旧配置の work/images(存在すれば)を output/images へ退避してから消す
         old_imgs = work / "images"
         if old_imgs.is_dir():

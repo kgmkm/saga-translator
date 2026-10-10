@@ -129,11 +129,10 @@ class TestPurgeKeepsAuditRecords(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_purge_keeps_commit_report_and_snapshot(self):
-        # 中間物は消える（原文・章ディレクトリ・作業ドラフト）
+        # 中間物は消える（原文・作業ドラフト）が、監査記録と done は残る
         _write(self.work / "output" / "_work" / "ch001_b1_ja_numbered.md", "一時ドラフト。\n")
         removed = _lib.purge_source(self.work)
         self.assertIn("originals", removed)
-        self.assertIn("chapters", removed)
         snap = self.work / "output" / "_work" / "commit" / SNAP_NAME
         self.assertTrue((snap / "report.json").is_file())
         self.assertTrue((snap / "draft.md").is_file())
@@ -143,9 +142,10 @@ class TestPurgeKeepsAuditRecords(unittest.TestCase):
         self.assertFalse((self.work / "output" / "_work_keep").exists())
         # 中間物は消えた
         self.assertFalse((self.work / "originals").exists())
-        self.assertFalse((self.work / "chapters").exists())
-        self.assertFalse((self.work / "output" / "ch001").exists())
         self.assertFalse((self.work / "output" / "_work" / "ch001_b1_ja_numbered.md").exists())
+        # G23: 段落原文（chapters/*.paras.toml）と単章の章別出力は残す
+        self.assertTrue((self.work / "chapters" / "ch001.paras.toml").is_file())
+        self.assertTrue((self.work / "output" / "ch001" / "b1_ja.md").is_file())
 
     def test_purge_keeps_report_hashes_readable(self):
         _lib.purge_source(self.work)
@@ -205,8 +205,8 @@ class TestAssembleRecordsCompletion(unittest.TestCase):
         self.assertIn("[P001]", (snap / "draft.md").read_text(encoding="utf-8"))
         self.assertTrue((work / "output" / "_work" / "done" / "ch001_b1_ja_numbered.md").is_file())
 
-        # ブロック別出力は削除済み
-        self.assertFalse((work / "output" / "ch001").exists())
+        # ブロック別出力は単章のため残る（G23。監査記録と合わせて復元・改訂の受け皿）
+        self.assertTrue((work / "output" / "ch001" / "b1_ja.md").is_file())
 
     def test_parallel_outputs_kept_and_listed(self):
         work = _make_completed_work(self.tmp)
@@ -319,6 +319,20 @@ class TestReviewAssembledState(unittest.TestCase):
     def test_review_after_assemble_reads_audit_records(self):
         work = _make_completed_work(self.tmp)
         _run_assemble(work)
+        code, out = self._review(work)
+        self.assertEqual(code, 0, out)
+        self.assertIn("assemble 済み", out)
+        rev = work / "_work" / "review_wave1.md"
+        self.assertTrue(rev.is_file())
+        content = rev.read_text(encoding="utf-8")
+        self.assertIn("ch001/b1", content)
+        self.assertIn("confirm未ack", content)
+
+    def test_review_after_assemble_falls_back_to_audit_records(self):
+        """ブロック別出力が無い状態（複数章の purge 相当）では監査記録から読む（#20）。"""
+        work = _make_completed_work(self.tmp)
+        _run_assemble(work)
+        shutil.rmtree(work / "output" / "ch001")  # G23 で単章は残るため、無い状態を作る
         code, out = self._review(work)
         self.assertEqual(code, 0, out)
         self.assertIn("assemble 済み", out)

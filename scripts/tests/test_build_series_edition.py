@@ -257,6 +257,63 @@ class TestCheck(unittest.TestCase):
             self.assertEqual(rc, 0)
 
 
+class TestChapterOnlyWorks(unittest.TestCase):
+    """G25: 全文_訳文.md が無くても、全章の章ファイルが揃っていればビルド対象にする。"""
+
+    def test_list_works_accepts_chapter_files_without_full(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            saga = make_saga(root, works=("11111111",), progress=False)
+            w = saga / "11111111"
+            (w / "output" / "全文_訳文.md").unlink()
+            (w / "output" / "ch001_ja.md").write_text(
+                "# 第1話 テスト1\n\n本文。\n", encoding="utf-8")
+            built, unfinished = bse.list_works(saga)
+            self.assertIn("11111111", built)
+            self.assertEqual(unfinished, [])
+
+    def test_list_works_rejects_partial_chapter_files(self):
+        # chapters_meta が2章を列挙しているのに1章しか無い部分出力は完成扱いしない
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            saga = root / "_saga"
+            saga.mkdir(parents=True)
+            w = saga / "11111111"
+            (w / "output").mkdir(parents=True)
+            (w / "manifest.toml").write_text('title = "x"\n', encoding="utf-8")
+            (w / "chapters_meta.toml").write_text(
+                '[work]\ntitle = "x"\n\n[[chapters]]\nid = "ch001"\n\n[[chapters]]\nid = "ch002"\n',
+                encoding="utf-8")
+            (w / "output" / "ch001_ja.md").write_text("# 一章\n\n本文。\n", encoding="utf-8")
+            built, unfinished = bse.list_works(saga)
+            self.assertEqual(built, {})
+            self.assertEqual(unfinished, ["11111111"])
+
+    def test_build_from_chapter_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            saga = make_saga(root, works=("11111111",), progress=False)
+            w = saga / "11111111"
+            (w / "output" / "全文_訳文.md").unlink()
+            (w / "output" / "ch001_ja.md").write_text(
+                "# 第1話 テスト1\n\n本文その1。11111111\n\n「セリフ」\n\n本文その2。\n"
+                "\n![img](images/11111111-0.png)\n\n![img](images/11111111-1.png)\n",
+                encoding="utf-8")
+            out = root / "out" / "S"
+            args = type("A", (), {
+                "dest": str(out), "title": None, "note": "", "note_hon": None,
+                "footer": "", "works": None, "check": False, "repair": False,
+                "force": False, "eol": "crlf", "no_untranslated": True, "no_verify": False,
+            })()
+            built, un = bse.list_works(saga)
+            infos = [{"wid": "11111111", "work": built["11111111"], "title": "第1話 テスト1",
+                      "title_src": "titles.toml"}]
+            rc = bse.cmd_build(args, saga, built, un, infos, "test", None)
+            self.assertEqual(rc, 0)
+            files = sorted(f for f in os.listdir(out) if os.path.isfile(out / f))
+            self.assertEqual(files, ["01_第1話 テスト1.md", "合本.md", "目次.md"])
+
+
 class TestHelpers(unittest.TestCase):
     def test_sanitize_filename(self):
         self.assertEqual(bse.sanitize_filename('a<b>c:d"e/f\\g|h?i*j'), "a_b_c_d_e_f_g_h_i_j")

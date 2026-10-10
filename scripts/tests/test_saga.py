@@ -372,7 +372,9 @@ class TestTomlAndPurge(unittest.TestCase):
         removed = _lib.purge_source(self.tmp)
         self.assertTrue(any("originals" in r for r in removed))
         self.assertFalse((self.tmp / "originals").exists())
-        self.assertFalse((self.tmp / "chapters").exists())
+        # G23: 段落原文 chapters/*.paras.toml は残す（改訂路 --revise の受け皿）
+        self.assertTrue((self.tmp / "chapters" / "ch001.paras.toml").exists())
+        # chapters_meta が無い work は単章判定できないため章別出力は従来どおり削除
         self.assertFalse((self.tmp / "output" / "ch001").exists())
         self.assertFalse((self.tmp / "output" / "ch001" / "b1_parallel.md").exists())
         self.assertTrue((self.tmp / "output" / "ch001_ja.md").exists())
@@ -493,7 +495,9 @@ class TestAssemble(unittest.TestCase):
         with mock.patch.object(sys, "argv", ["assemble", str(self.tmp), "--keep-full", *extra]):
             main()
 
-    def test_auto_parallel_when_age_report_exists(self):
+    def test_parallel_default_and_purge_keeps_revision_sources(self):
+        """G26: 対訳は既定で出力（年齢記録の有無に依存しない）。
+        G23: purge 後も chapters（段落原文）と単章の output/<ch>/ は残る。"""
         self._setup_work(True)
         self._run()
         self.assertTrue((self.tmp / "output" / "全文_対訳.md").exists())
@@ -502,18 +506,21 @@ class TestAssemble(unittest.TestCase):
         self.assertIn("> [P001] 原一。", par)
         toc = (self.tmp / "output" / "目次.md").read_text(encoding="utf-8")
         self.assertIn("ch001_parallel.md", toc)
-        # 全ブロック確定済みなので purge が走る。対訳は残り、原文・中間物は消える
-        self.assertFalse((self.tmp / "chapters").exists())
+        # 全ブロック確定済みなので purge が走る。対訳は残り、原文は chapters に残る
+        self.assertTrue((self.tmp / "chapters" / "ch001.paras.toml").is_file())
         self.assertTrue((self.tmp / "output" / "全文_対訳.md").exists())
-        self.assertFalse((self.tmp / "output" / "ch001").exists())
+        self.assertTrue((self.tmp / "output" / "ch001" / "b1_ja.md").is_file())
 
-    def test_no_parallel_without_age_report_or_flag(self):
+    def test_no_parallel_flag_suppresses_parallel(self):
+        # G26: 対訳の抑制は --no-parallel
         self._setup_work(False)
-        self._run()
+        self._run("--no-parallel")
         self.assertTrue((self.tmp / "output" / "全文_訳文.md").exists())
         self.assertFalse((self.tmp / "output" / "全文_対訳.md").exists())
+        self.assertFalse((self.tmp / "output" / "ch001_parallel.md").exists())
 
-    def test_parallel_flag_forces_output(self):
+    def test_parallel_flag_still_accepted(self):
+        # 互換: --parallel は受理される（既定と同じ結果）
         self._setup_work(False)
         self._run("--parallel")
         self.assertTrue((self.tmp / "output" / "全文_対訳.md").exists())

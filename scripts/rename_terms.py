@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from datetime import datetime, timezone
@@ -603,6 +604,50 @@ def load_pairs(path: Path) -> list[tuple[str, str]]:
     return pairs
 
 
+def load_pairs_json(path: Path) -> list[tuple[str, str]]:
+    """JSON のペア一覧を読む（F5-H3）。
+
+    形式: [["旧","新"], …] / [{"term":"旧","to":"新"}, …] / {"pairs": [同上]}。
+    不正な形式は位置（1始まり）つきの ValueError。
+    """
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except OSError as e:
+        raise ValueError(f"{path}: 読めません: {e}") from e
+    except ValueError as e:  # JSONDecodeError（ValueError の派生）
+        raise ValueError(f"{path}: JSON として読めません: {e}") from e
+    if isinstance(data, dict):
+        data = data.get("pairs")
+    if not isinstance(data, list):
+        raise ValueError(
+            f"{path}: ペアの配列にしてください"
+            '（[["旧","新"], …] または [{"term":"旧","to":"新"}, …] の形）')
+    pairs: list[tuple[str, str]] = []
+    for i, item in enumerate(data, 1):
+        if (isinstance(item, list) and len(item) == 2
+                and all(isinstance(x, str) and x for x in item)):
+            pairs.append((item[0], item[1]))
+        elif (isinstance(item, dict)
+                and isinstance(item.get("term"), str) and item["term"]
+                and isinstance(item.get("to"), str) and item["to"]):
+            pairs.append((item["term"], item["to"]))
+        else:
+            raise ValueError(
+                f'{path}: {i}件目の形式が不正です'
+                '（["旧","新"] または {"term":"旧","to":"新"}）')
+    return pairs
+
+
+def sort_pairs_longest_first(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """置換前文字列（旧訳）の長い順に並べ替える（F4-B5 / F5-H3）。
+
+    「魔力灌注→魔力注入」を「灌注→注ぎ込む」より先に処理しないと
+    「魔力注ぎ込む」になる等、部分文字列どうしの置換衝突を防ぐ。
+    同じ長さの相対順は入力どおり（安定ソート）。
+    """
+    return sorted(pairs, key=lambda p: len(p[0]), reverse=True)
+
+
 def _fmt_hit(h: dict) -> str:
     """正本ヒットの（ブロック・段落）表記。"""
     bits: list[str] = []
@@ -623,6 +668,26 @@ def _fmt_ruby_item(it: dict) -> str:
     if it.get("kind") == "vfm":
         return f"{it['before']} → {it['after']}（読みの要確認）{where}"
     return f"{it['before']}（全体保護のため未変更。手当ての要確認）{where}"
+
+
+def _run_batch(work: Path, pairs: list[tuple[str, str]], apply: bool,
+               source: str) -> int:
+    """複数ペアを長い旧訳から順に一括適用する（F4-B5 / F5-H3）。
+
+    部分文字列の衝突（「魔力灌注→…」を「灌注→…」より先に処理しないと
+    「魔力注ぎ込む」になる等）を防ぐため、置換前文字列の長い順に
+    自動ソートしてから 1 ペアずつ処理する（同長は入力順の安定ソート）。
+    """
+    pairs = sort_pairs_longest_first(pairs)
+    print(f"[rename] 一括: {len(pairs)} ペア（{source}）"
+          + ("（適用）" if apply else "（影響表示のみ）"))
+    print("[rename] 処理順（長い旧訳から。部分文字列の衝突を避ける）: "
+          + " → ".join(old for old, _ in pairs))
+    reports = [_run_one(work, old, new, apply) for old, new in pairs]
+    save_json(work / "logs" / "rename_last.json",
+              {"pairs": reports,
+               "applied": any(bool(r.get("applied")) for r in reports)})
+    return 0
 
 
 def _run_one(work: Path, old: str, to: str, apply: bool) -> dict:
@@ -716,43 +781,51 @@ def main() -> int:
     utf8()
     ap = argparse.ArgumentParser(description="訳語変更の伝播")
     ap.add_argument("work")
-    ap.add_argument("--term", default=None, help="旧訳語")
-    ap.add_argument("--to", default=None, help="新訳語")
+    ap.add_argument("--term", action="append", default=None,
+                    help="旧訳語（複数回指定可。--to と順番に対応。F5-H3）")
+    ap.add_argument("--to", action="append", default=None,
+                    help="新訳語（--term と同数。複数回指定可）")
     ap.add_argument("--pairs-file", type=Path, default=None,
                     help="'旧<TAB>新' を並べた一括置換ファイル（空行・# 始まりは無視。P1-6）")
+    ap.add_argument("--pairs-json", type=Path, default=None,
+                    help="JSON のペア一覧（[['旧','新'], …] / [{'term':…,'to':…}, …]。F5-H3）")
     ap.add_argument("--apply", action="store_true", help="実際に置換する(未指定は影響表示のみ)")
     args = ap.parse_args()
 
     work = Path(args.work)
 
-    if args.pairs_file is not None:
-        if args.term or args.to:
-            print("[rename] エラー: --pairs-file と --term/--to は同時に指定できません",
-                  file=sys.stderr)
-            return 1
+    terms = list(args.term or [])
+    tos = list(args.to or [])
+    modes = [args.pairs_file is not None, args.pairs_json is not None, bool(terms or tos)]
+    if sum(1 for m in modes if m) > 1:
+        print("[rename] エラー: --pairs-file / --pairs-json / --term(--to) は"
+              "同時に指定できません", file=sys.stderr)
+        return 1
+
+    if args.pairs_file is not None or args.pairs_json is not None:
+        src = args.pairs_file if args.pairs_file is not None else args.pairs_json
         try:
-            pairs = load_pairs(args.pairs_file)
+            pairs = (load_pairs(src) if args.pairs_file is not None
+                     else load_pairs_json(src))
         except (OSError, ValueError) as e:
             print(f"[rename] エラー: {e}", file=sys.stderr)
             return 1
         if not pairs:
-            print(f"[rename] ペアがありません（変更なし）: {args.pairs_file}")
+            print(f"[rename] ペアがありません（変更なし）: {src}")
             return 0
-        print(f"[rename] 一括: {len(pairs)} ペア（{args.pairs_file}）"
-              + ("（適用）" if args.apply else "（影響表示のみ）"))
-        reports = [_run_one(work, old, new, args.apply) for old, new in pairs]
-        save_json(work / "logs" / "rename_last.json",
-                  {"pairs": reports,
-                   "applied": any(bool(r.get("applied")) for r in reports)})
-        return 0
+        return _run_batch(work, pairs, args.apply, str(src))
 
-    if not (args.term and args.to):
-        print("[rename] エラー: --term と --to（または --pairs-file）が必要です",
+    if (not terms or not tos or len(terms) != len(tos)
+            or any(not t for t in terms) or any(not t for t in tos)):
+        print("[rename] エラー: --term と --to を同数（各1回以上・空文字なし）で"
+              "指定してください（または --pairs-file / --pairs-json）",
               file=sys.stderr)
         return 1
-    report = _run_one(work, args.term, args.to, args.apply)
-    save_json(work / "logs" / "rename_last.json", report)
-    return 0
+    if len(terms) == 1:
+        report = _run_one(work, terms[0], tos[0], args.apply)
+        save_json(work / "logs" / "rename_last.json", report)
+        return 0
+    return _run_batch(work, list(zip(terms, tos)), args.apply, "--term/--to")
 
 
 if __name__ == "__main__":

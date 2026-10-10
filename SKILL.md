@@ -81,7 +81,7 @@ python3 scripts/split_chapters.py <workdir>
 python3 scripts/lock_prep.py <workdir>
 ```
 
-`_work/lock_prep.md` を読み、主要人物・用語を決める。
+`_work/lock_prep.md` を読み、主要人物・用語を決める（命名方針は `house_style.toml` に記録する。雛形: `templates/house_style.toml`）。
 
 ### 3. 分析（ローリング）
 
@@ -96,28 +96,29 @@ python3 scripts/carry_analysis.py <workdir> --from <前作のworkdir>
 以下を章/ブロック単位で先頭から1周:
 
 ```
-saga.py prepare <workdir> --mode analysis
+python3 scripts/saga.py prepare <workdir> --mode analysis
 # LLM を読ませて分析
-saga.py analyze-commit <workdir> --delta <差分TOML>
+python3 scripts/saga.py analyze-commit <workdir> --delta <差分TOML>
 ```
 
-- 分析の前の点検: `saga.py lint <workdir>`（分析 TOML の日本語フィールド残渣を事前一覧。読み取り専用。差分 TOML は `--delta` で追加検査）
-- 記述系キー（memo / role / appearance / relationships / note）の明示上書き: `saga.py analyze-commit … --allow-protected-overwrite`（`_work/analysis_edits.jsonl` に監査記録。name_ja / term_ja は対象外＝`rename_terms.py` の領分）
+- 分析の前の点検: `python3 scripts/saga.py lint <workdir>`（分析 TOML の日本語フィールド残渣を事前一覧。読み取り専用。差分 TOML は `--delta` で追加検査）。差分の未知キー・必須キーは `python3 scripts/check_src_keys.py <workdir> --delta _work/chNNN_bN_delta.toml` でも事前検査できる（work 相対可）
+- 記述系キー（memo / role / appearance / relationships / note）の明示上書き: `python3 scripts/saga.py analyze-commit … --allow-protected-overwrite`（`_work/analysis_edits.jsonl` に監査記録。name_ja / term_ja は対象外＝`rename_terms.py` の領分）
 
 1周し終わったら `analysis/titles.toml` を作って章題と作品題を確定する（`title_src`/`title_ja` と `[[chapters]]` の `id`/`src`/`ja`）。assemble はこれが無いと止まる（原題のまま出す場合は `--allow-src-title`）。
 
 ### 4. 翻訳
 
 ```
-saga.py prepare <workdir> --chapter chNNN [--block bN]
-# LLM がドラフトを _work/ に
-saga.py commit <workdir> --chapter chNNN --block bN
+python3 scripts/saga.py prepare <workdir> --chapter chNNN [--block bN]
+# コンテキスト: <workdir>/translation_input/{ch}_{b}_translation.md（このファイルだけを LLM に読ませる）
+# LLM がドラフトを output/_work/{ch}_{b}_ja_numbered.md に（ja→zh は _zh）
+python3 scripts/saga.py commit <workdir> --chapter chNNN --block bN
 ```
 
 - commit は字形整形→段落対応(align)→QA→残渣検査→確定を一括。失敗理由だけ返す。
-- 文字数比の要確認は `align.py ack` で裁定記録を残して通す。
-- コンテキストは既定で compact（対象に必要な分だけの人物表・用語集）。全件を出すには `saga.py prepare … --full`（分析モードは full 固定）。
-- 確定時に `_work/ledger.toml` へ台帳を追記する（ルビ適用・用語初出は自動、使用済みオノマトペは `saga.py ledger-ono <workdir> --form <表記> --block chNNN/bM [--para N]` で申告）。prepare は「消費済みルビ（再付与不可）・使用済みオノマトペ・用語の初出済み」を注入するので、消費済みの再使用は避ける。台帳は purge 対象外で、連作では carry で引き継ぐ。
+- 文字数比の要確認は `python3 scripts/align.py ack` で裁定記録を残して通す。
+- コンテキストは既定で compact（対象に必要な分だけの人物表・用語集）。全件を出すには `python3 scripts/saga.py prepare … --full`（分析モードは full 固定）。
+- 確定時に `_work/ledger.toml` へ台帳を追記する（ルビ適用・用語初出は自動、使用済みオノマトペは `python3 scripts/saga.py ledger-ono <workdir> --form <表記> --block chNNN/bM [--para N]` で申告）。prepare は「消費済みルビ（再付与不可）・使用済みオノマトペ・用語の初出済み」を注入するので、消費済みの再使用は避ける。台帳は purge 対象外で、連作では carry で引き継ぐ。
 - 語彙 candidates の裁定記録（`vocab:<原語>`）に CLI はない。一時 .py ファイルで `rulings.add_ruling` を呼ぶ（8キー全一致。原文・ドラフトを変えたら無効になり再記録が必要）。ハッシュは手計算せず `align` / `rulings` の関数で求める:
   ```python
   import sys; sys.path.insert(0, "scripts")
@@ -150,7 +151,7 @@ saga.py commit <workdir> --chapter chNNN --block bN
 ### 5. 進捗確認
 
 ```
-saga.py status <workdir>
+python3 scripts/saga.py status <workdir>
 ```
 
 フラグと実体の突き合わせ。次にやることも出す。proposed 滞留（訳語変更の候補）も表示する（承認後は `rename_terms.py` で本採用）。
@@ -158,7 +159,7 @@ saga.py status <workdir>
 ### 6. 検収
 
 ```
-saga.py review <workdir>
+python3 scripts/saga.py review <workdir>
 ```
 
 機械指摘＋リスク箇所＋抜き取りのリストを `_work/review_waveN.md` に出力。
@@ -167,8 +168,8 @@ saga.py review <workdir>
 
 1. `_work/review_waveN.md` を検証者（人間または別エージェント）が全件照合する
 2. 指摘の修正を '旧<TAB>新' の一覧（fixes.txt）にまとめる
-3. `rename_terms.py <workdir> --pairs-file fixes.txt --apply` で一括適用する
-4. `saga.py status <workdir>` で再 assemble の要否を確認する
+3. `python3 scripts/rename_terms.py <workdir> --pairs-file fixes.txt --apply` で一括適用する
+4. `python3 scripts/saga.py status <workdir>` で再 assemble の要否を確認する
 5. assemble（手順 7）を実行する
 
 ### 7. 全ブロック確定後
@@ -177,7 +178,7 @@ saga.py review <workdir>
 python3 scripts/assemble.py <workdir>
 ```
 
-assemble の入力は**確定済みのブロック**に限る（commit を経ない出力は渡さない）。章が1つの作品では全文_訳文.md を省略する（合本の素材にする場合は `--keep-full` で全文も出力）。完了時に「残る中間物」の一覧を出す。
+assemble の入力は**確定済みのブロック**に限る（commit を経ない出力は渡さない）。全文（全文_訳文.md）と対訳（章対訳・全文_対訳.md）は既定で出力する（抑制は `--no-full` / `--no-parallel`）。完了時に成果物のバイト数と「残る中間物」の一覧を出す。空の組立て（確定済みブロックなし）は exit 1。改訂予定なら `--keep-source` 推奨（originals・translation_input・output/_work も残す）。assemble 後の改訂手順（chapters・ドラフトの復旧）は `references/troubleshooting.md` の「assemble 後の改訂路」を参照。
 
 ## 鉄則（仕組みで担保できないもののみ）
 
@@ -191,12 +192,12 @@ assemble の入力は**確定済みのブロック**に限る（commit を経な
 
 ## 後からの修正
 
-- 訳語修正: `characters-[ネタバレあり].toml` 編集 → `rename_terms.py <workdir> --term 旧訳 --to 新訳` → `--apply`（複数ペアは `--pairs-file fixes.txt`。'旧<TAB>新' の一覧）
+- 訳語修正: `characters-[ネタバレあり].toml` 編集 → `python3 scripts/rename_terms.py <workdir> --term 旧訳 --to 新訳` → `--apply`（複数ペアは `--term`/`--to` の繰り返し・`--pairs-file fixes.txt`（'旧<TAB>新'）・`--pairs-json`。長い旧訳から自動処理される）
 - 改名の監査は `_work/renames.jsonl` が正（commit のスナップショットと不一致になってよい）
 - 章のやり直し: 該当ブロックの _work ドラフトを削除 → 手順 4 再実行
 - 再分析: 該当章の分析を削除 → 手順 3 再実行
 - モデル変更: 常時可能。`record_meta.py` が品質記録
-- レイアウト修正: `fix_layout.py <workdir>` → `--fix`
+- レイアウト修正: `python3 scripts/fix_layout.py <workdir>` → `--fix`
 
 ## よくある指示への応答
 
@@ -208,7 +209,7 @@ assemble の入力は**確定済みのブロック**に限る（commit を経な
 | 「○○の訳語を△△にして」 | rename_terms で伝播 |
 | 「登場人物表見せて」 | analysis/characters-[ネタバレあり].toml を要約表示 |
 | 「続きを翻訳して」 | 未完了ブロックを検出して続行 |
-| 「対訳で出力して」 | `assemble.py --parallel`（年齢正規化記録がある作品は自動） |
+| 「対訳で出力して」 | `python3 scripts/assemble.py`（対訳は既定。不要なら `--no-parallel`） |
 | 「画像が無い」 | output/images/ へ ID 入り画像を置くよう案内。assemble 再実行 |
 | 「成人向け作品を訳したい」 | 本体非対応。拡張スキル `saga-translator-spicy` があればそれに従う |
 | 「全体を一気に訳して」 | 1M 以上の context モデルなら例外許可。ただし章単位を推奨 |
@@ -217,9 +218,10 @@ assemble の入力は**確定済みのブロック**に限る（commit を経な
 ## 出力スタイル（既定）
 
 - 文体は訳文言語の常体。翻訳調・説明過多・評価語の連発を避ける。
-- ルビは人名・固有名詞の初出のみ `{訳語|よみ}`（VFM）。設定で always/none に切替可。ja→zh では使わない。
+- ルビは人名・固有名詞の初出のみ `{訳語|よみ}`（VFM）。設定 `[translation] ruby`（first / always / none）は翻訳コンテキスト冒頭に「ルビ方針」として注入される。ja→zh では使わない。旧形式 `親{読み}` は台帳・review の初出検査に載らない（commit 時に警告）。コードネームにはルビを振らない。（言語別の詳細: `references/lang_<src>2<dst>.md`「ジャンル別命名慣行」）
+- コードネーム（代号: 魔法少女・変身名など）はジャンル慣行に従う（魔法少女ものはカタカナ英語）。人名は字面＋初出ルビ。判定は `house_style.toml` の `[naming_policy] codename`（katakana / sinitic / keep）または `[[rules]] kind="naming"` で登録する。
 - 感覚表現は直訳せず訳文言語で実感のある表現に置き換える。
 - 不確実な箇所は推測で埋めず、`[要確認: …]` を本文に残さない。作業後に確認を取る。
 - 段落は原文と 1 対 1。結合・分割はマーカー振り直しを伴う場合のみ。
-- レイアウトは全行の間に空行を 1 つ（改行 2 回）。セリフ行の前後も同様。確定出力（saga.py commit）が機械的に整形する。
+- レイアウトは全行の間に空行を 1 つ（改行 2 回）。セリフ行の前後も同様。確定出力（`python3 scripts/saga.py commit`）が機械的に整形する。
 - 台詞の括弧は訳文言語による（zh→ja は `「」` / ja→zh は `" "`）。原語の引用符は訳出時に置換。

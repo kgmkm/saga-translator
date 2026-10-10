@@ -16,13 +16,16 @@ sys.path.insert(0, str(Path(__file__).parent))
 from _lib import (  # noqa: E402
     acquire_lock,
     atomic_write_text,
+    block_paras,
     character_aliases,
     direction,
     find_non_jis_han,
     load_chapters_meta,
     load_characters,
+    load_config,
     load_json,
     load_paras,
+    load_terms,
     load_toml,
     release_lock,
     save_chapters_meta,
@@ -52,6 +55,160 @@ def parse_draft(text: str) -> tuple[list[tuple[int, str]], list[str]]:
     if cur_num is not None:
         items.append((cur_num, "\n".join(cur_text).strip()))
     return items, problems
+
+
+# ── ルビ検査（G8/G11。zh→ja の訳文はルビが付いているべき側） ──────────────
+# 旧形式 親{読み} の検出器は ledger.VFM_RE の近傍（ledger.find_old_style_ruby）が正本。
+# ここでは VFM の記法異常と、宣言済みルビの未適用を検出する。
+
+_RUBY_CJK = re.compile(r"[\u4e00-\u9fff]")                     # 表記に漢字を含むか
+_QA_VFM_TIGHT = re.compile(r"\{([^{}|]+)\|([^{}|]+)\}")        # 正常な VFM {親|読み}
+_QA_VFM_LOOSE = re.compile(r"\{([^{}\n|]*)\|[^{}\n]*\}")       # 波括弧内に | がある束（親側を捕捉）
+_QA_VFM_UNCLOSED = re.compile(r"\{[^{}\n]*\|[^{}\n]*")         # 閉じないまま行末
+_QA_RB = re.compile(r"\[\[rb:([^>\]\n]*)(?:>[^\]\n]*)?\]\]")   # [[rb:親>読み]] / [[rb:親]]
+
+
+def _ruby_declarations(work: Path) -> list[dict]:
+    """ルビ宣言（terms / characters の ruby 欄）を返す。
+
+    ``[{ja, src, ruby, kind}]``。表記に漢字を含まない宣言（カタカナ名など）は
+    ルビの対象外として落とす（振っても意味が無く、未適用の誤報になるため）。
+    """
+    out: list[dict] = []
+    try:
+        terms = load_terms(work).get("terms") or []
+    except Exception:
+        terms = []
+    for t in terms:
+        if not isinstance(t, dict):
+            continue
+        src = str(t.get("term_src") or "").strip()
+        ja = str(t.get("term_ja") or "").strip() or src
+        ruby = str(t.get("ruby") or "").strip()
+        if ja and ruby and _RUBY_CJK.search(ja):
+            out.append({"ja": ja, "src": src or ja, "ruby": ruby, "kind": "term"})
+    try:
+        chars = load_characters(work).get("characters") or []
+    except Exception:
+        chars = []
+    for c in chars:
+        if not isinstance(c, dict):
+            continue
+        src = str(c.get("name_src") or "").strip()
+        ja = str(c.get("name_ja") or "").strip() or src
+        ruby = str(c.get("ruby") or "").strip()
+        if ja and ruby and _RUBY_CJK.search(ja):
+            out.append({"ja": ja, "src": src or ja, "ruby": ruby, "kind": "character"})
+    return out
+
+
+def _ruby_first_blocks(work: Path, words: list[dict]) -> dict[str, str]:
+    """各語の原文初出ブロック（"chNNN/bN"）を章順・ブロック順の走査で返す。
+
+    原文のどこにも現れない語は含めない（初出を判定できないため検査側で外す）。
+    """
+    remaining = {w["src"] for w in words if w["src"]}
+    first: dict[str, str] = {}
+    if not remaining:
+        return first
+    try:
+        meta = load_chapters_meta(work)
+    except Exception:
+        return first
+    for c in meta.get("chapters") or []:
+        cid = str(c.get("id") or "")
+        try:
+            paras_data = load_paras(work, cid)
+        except Exception:
+            continue
+        for b in c.get("blocks") or []:
+            if not remaining:
+                return first
+            text = "\n".join(str(p.get("text") or "") for p in block_paras(paras_data, b))
+            for src_form in list(remaining):
+                if src_form in text:
+                    first[src_form] = f"{cid}/{b.get('id')}"
+                    remaining.discard(src_form)
+    return first
+
+
+def _ruby_applied_bases(text: str, rest: str) -> list[str]:
+    """本文中のルビ親文字を列挙する（適用済み判定用）。
+
+    VFM / 壊れた VFM（未閉じ含む）/ [[rb:]] の親側。壊れた記法でも親側が一致
+    すれば「記法異常」側の1件に集約する（未適用との二重報告を避ける）。
+    """
+    bases = [m.group(1).strip() for m in _QA_VFM_LOOSE.finditer(text)]
+    bases += [m.group(0)[1:].split("|", 1)[0].strip()
+              for m in _QA_VFM_UNCLOSED.finditer(rest)]
+    bases += [m.group(1).strip() for m in _QA_RB.finditer(text)]
+    return [b for b in bases if b]
+
+
+def find_ruby_issues(work: Path, text: str, cid: str, bid: str,
+                     cfg: dict | None = None) -> dict:
+    """zh→ja 訳文のルビ検査（G8）。未適用・旧形式・記法異常を検出する。
+
+    戻り値 ``{not_applied, old_style, malformed, note}``:
+
+    - ``not_applied``: ruby を宣言した語（terms / characters）が原文初出ブロックで
+      VFM / [[rb:]] 無しに現れる（台帳の消費済み・旧形式での付与は「付いている」側に
+      倒す）。初出ブロック以外では初出のみの方針によりルビ無しが正なので検査しない。
+    - ``old_style``: 旧形式 親{読み}（台帳・review の初出検査に載らない。警告のみ）。
+    - ``malformed``: ``{親|}`` ``{|読み}`` ``{親|読み|…}`` ``{親|読み`` などの壊れた記法。
+    - ``note``: 検査を省略した理由（設定 ruby="none"）。
+    """
+    from ledger import find_old_style_ruby  # noqa: E402
+    old = find_old_style_ruby(text)
+
+    malformed: list[str] = []
+    for m in _QA_VFM_LOOSE.finditer(text):
+        if not _QA_VFM_TIGHT.fullmatch(m.group(0)):
+            malformed.append(m.group(0))
+    rest = _QA_VFM_LOOSE.sub("", text)  # 閉じた束を除いた残りから未閉じを探す
+    for m in _QA_VFM_UNCLOSED.finditer(rest):
+        malformed.append(m.group(0))
+
+    mode = "first"
+    tr = (cfg or {}).get("translation")
+    if isinstance(tr, dict):
+        v = str(tr.get("ruby") or "first").strip().lower()
+        if v in ("first", "always", "none"):
+            mode = v
+
+    note = ""
+    not_applied: list[dict] = []
+    if mode == "none":
+        note = "設定 ruby=none のため未適用検査は省略"
+    else:
+        words = _ruby_declarations(work)
+        if words:
+            first_blocks = _ruby_first_blocks(work, words)
+            try:
+                from ledger import load_ledger  # noqa: E402
+                consumed = [str(r.get("term") or "")
+                            for r in (load_ledger(work).get("ruby_applied") or [])]
+            except Exception:
+                consumed = []
+            bases = _ruby_applied_bases(text, rest)
+            cur = f"{cid}/{bid}"
+            for w in words:
+                ja = w["ja"]
+                if ja not in text:
+                    continue
+                first = first_blocks.get(w["src"])
+                if first is None or first != cur:
+                    continue  # 原文初出ブロック以外はルビ無しが正（初出のみの方針）
+                if any(ja == b or ja in b for b in bases):
+                    continue  # VFM / [[rb:]] で付いている
+                if any(ja == t or ja in t or t in ja for t in consumed):
+                    continue  # 台帳で消費済み（前のブロックで付与済み）
+                if any(ja == e["base"] or ja in e["base"] or e["base"] in ja for e in old):
+                    continue  # 旧形式で付いている（記法の警告側で知らせる）
+                not_applied.append({"kind": w["kind"], "term": ja,
+                                    "ruby": w["ruby"], "first_block": first})
+    return {"not_applied": not_applied, "old_style": old,
+            "malformed": malformed, "note": note}
 
 
 def run_qa(work: Path, cid: str, bid: str, draft: Path, strict: bool = True) -> tuple[dict, list]:
@@ -97,7 +254,13 @@ def run_qa(work: Path, cid: str, bid: str, draft: Path, strict: bool = True) -> 
         candidates = [src_name] + parts if len(src_name) >= 2 else parts
         # aliases（別名・愛称・原文の異表記）の各形も照合対象にする（P0-4）。
         # 別名が訳文に原語のまま残るのを検出する。
-        candidates += [a for a in character_aliases(c) if a not in candidates]
+        # G42: かなを含む別名は「訳文に残す日本語名」の誤登録の疑いが濃い
+        # （実害2作）。原文照合から外す（定義は references/data-schema.md）。
+        alias_forms = [a for a in character_aliases(c) if a not in candidates]
+        if dst == "ja":
+            alias_forms = [a for a in alias_forms
+                           if not re.search(r"[\u3040-\u30ff]", a)]
+        candidates += alias_forms
         for name in candidates:
             if name in ja:
                 continue  # 訳語にそのまま含まれる漢字(例: 白狼→暗影団の頭目・白狼)は残留扱いしない
@@ -149,6 +312,26 @@ def run_qa(work: Path, cid: str, bid: str, draft: Path, strict: bool = True) -> 
         report["checks"]["non_jis_han"] = {"pass": not non_jis, "found": non_jis}
         if non_jis:
             ok = False
+
+        if dst == "ja":
+            # ルビ検査（G8: 従来は if dst=="zh" 内にあり zh→ja では走らなかった）。
+            # 宣言済みルビの未適用・旧形式・記法異常を検出する。
+            # 旧形式は警告のみ（台帳・review に載らない旨を commit 側が知らせる）。
+            ruby = find_ruby_issues(work, "\n".join(t for _, t in qa_items),
+                                    cid, bid, cfg=load_config())
+            na = {"pass": not ruby["not_applied"], "found": ruby["not_applied"]}
+            if ruby["note"]:
+                na["note"] = ruby["note"]
+            report["checks"]["ruby_not_applied"] = na
+            if ruby["not_applied"]:
+                ok = False
+            report["checks"]["ruby_notation"] = {
+                "pass": not ruby["malformed"],
+                "old_style": ruby["old_style"],
+                "malformed": ruby["malformed"],
+            }
+            if ruby["malformed"]:
+                ok = False
 
     # [Pn] の境界を1つでも消す融合は原文と1対1の原則を壊すため、全て fatal にする
     # （2段落の融合も通過させない）。同一 [Pn] 内の複数行（歌・詩・折り返し）は
@@ -320,7 +503,13 @@ def _stage_impl(args: argparse.Namespace) -> None:
     save_json(work / "output" / "_work" / f"{cid}_{bid}_qa.json", report)
 
     for k, v in report["checks"].items():
-        print(f"[qa] {k}: {'PASS' if v['pass'] else 'FAIL'} {'' if v['pass'] else v}")
+        extra = ""
+        if k == "ruby_notation" and v.get("old_style"):
+            forms = "、".join(e["form"] for e in v["old_style"][:5])
+            extra = f" 旧形式(警告): {forms}"
+        if k == "ruby_not_applied" and v.get("note"):
+            extra = f" {v['note']}"
+        print(f"[qa] {k}: {'PASS' if v['pass'] else 'FAIL'} {'' if v['pass'] else v}{extra}")
     print(f"[qa] result: {'PASS' if report['pass'] else 'FAIL'}")
     sys.exit(0 if report["pass"] else 1)
 

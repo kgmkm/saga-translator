@@ -1,6 +1,6 @@
 # データスキーマ
 
-作業中と完了後で残るファイルが違う。構造化データは TOML（旧JSONも読む）。対訳（原文＋訳文の対照）は `--parallel`、または年齢正規化の記録（`analysis/age_policy_report-[ネタバレあり].md`）がある作品で出力する。
+作業中と完了後で残るファイルが違う。構造化データは TOML（旧JSONも読む）。対訳（原文＋訳文の対照）は既定で出力する（`assemble.py --no-parallel` で抑制。旧仕様の `--parallel`・年齢正規化の記録による自動有効化も互換で受理）。
 
 ## 翻訳方向
 
@@ -18,7 +18,7 @@
 ├── manifest.toml
 ├── originals/source.md      # 完了後に削除
 ├── chapters/
-│   └── chNNN.paras.toml     # 完了後に削除
+│   └── chNNN.paras.toml     # 段落原文。完了後も残す（改訂路 --revise の受け皿）
 ├── chapters_meta.toml
 ├── analysis/
 │   ├── characters-[ネタバレあり].toml
@@ -28,10 +28,10 @@
 ├── translation_input/       # 完了後に削除
 ├── output/
 │   ├── images/              # 画像置き場。訳文からは常に images/… で参照
-│   ├── chNNN/bY_<dst>.md     # 完了後に章ファイルへ吸収して削除（訳文言語により _ja / _zh）
-│   ├── chNNN/bY_parallel.md # 対訳の中間物。assemble が章・全文対訳を作る
+│   ├── chNNN/bY_<dst>.md     # 完了後に章ファイルへ吸収（単章作品は復元用に残す）
+│   ├── chNNN/bY_parallel.md # 対訳の中間物。assemble が章・全文対訳を作る（単章作品は残す）
 │   ├── chNNN_<dst>.md        # 同上
-│   ├── chNNN_parallel.md    # --parallel、または年齢正規化の記録がある作品で出力
+│   ├── chNNN_parallel.md    # 対訳（既定で出力。--no-parallel で抑制）
 │   ├── 全文_訳文.md
 │   ├── 全文_対訳.md         # 同上。> [Pnnn] 付きで原文と訳文を対にする
 │   ├── 目次.md
@@ -39,7 +39,9 @@
 └── logs/
 ```
 
-完了後（assemble 既定）: 原文・段落・中間コンテキスト・ブロック訳は無い。対訳（`全文_対訳.md`・章対訳）は `--parallel`、または年齢正規化の記録がある作品でのみ残る。残るのは訳文・output/images・分析・manifest・目次。入力元ファイルは触らない。`--keep-source` で作業中のまま残せる。旧配置 `work/images/` があれば assemble が output/images/ へ移動する。
+完了後（assemble 既定）: 入力元（originals）・翻訳入力（translation_input）・ブロック訳は無い（単章作品の `output/<ch>/` ブロック訳だけは残す＝復元・改訂の受け皿。G23）。**`chapters/*.paras.toml`（段落原文）は残す**（assemble 後の改訂路 `commit --revise` と調査が原文を要求するため。G23）。対訳（`全文_対訳.md`・章対訳）は既定で出力・保持する（`--no-parallel` で抑制）。残るのは訳文・output/images・分析・manifest・目次。入力元ファイルは触らない。
+
+`assemble.py --keep-source` は手順7（全ブロック確定後の assemble）のオプションで、作業中のまま（originals・translation_input・output/_work・章別出力を含めて）全部残す。**後から `commit --revise` → 再 assemble で改訂する予定があるなら `--keep-source` を推奨**（既定の assemble は原文と中間物を消すため、改訂は `chapters/*.paras.toml` と `output/_work/done/` の残存物に頼ることになる）。旧配置 `work/images/` があれば assemble が output/images/ へ移動する。
 
 ※ 旧 `.json` / 旧 `characters.toml` も読む。新規は TOML。JSONテンプレは置かない。
 
@@ -71,6 +73,9 @@ proposed = ""
 ```
 
 - `name_ja` は訳語の固定表記。以後の翻訳・QA・置換の基準になる
+- `aliases` は**原文に現れる別表記**（同じ人物を指す原文中の呼び方の揺れ・別名・愛称。例: 王五/小王、张三/三儿）。**訳語の別名や、訳文に残す日本語名を書く欄ではない**。近い表記の候補（`variant_candidates`）は、同一人物なら `aliases` へ追記し、別人なら `dismiss_variant` で棄却してから確定する
+- 訳文にそのまま残す日本語名は、独立エントリとして `name_src` と `name_ja` を同じ表記にして登録する（`name_src == name_ja` のエントリは QA の残留照合の対象外）
+- QA（`leftover_source_names`）は `name_src` に加えて `aliases` の各形も「訳文に原語が残っていないか」の照合対象にする。訳文に残す日本語名を `aliases` に入れると、訳文に正しく現れていても残留と誤判定され commit が止まる（対処: `references/troubleshooting.md` の「aliases で QA が落ちたとき」）
 - セリフの声は欄を分ける。`tone` に口調・一人称・呼び方を混ぜない（旧ファイルの `tone` は `speech_style` が空のときだけ読む）
   - `first_person` / `second_person`: 一人称と二人称の既定
   - `address`: 相手別の呼び方。翻訳時はこちらを `second_person` より優先
@@ -174,7 +179,7 @@ paras = [13, 40]
 - `build_context.py` は characters/terms/plot + 前章末尾 + 次章冒頭 + 対象ブロックを1つの md に束ねる
 - `qa_translation.py` は段落整合（連番一致・段落数一致）と訳語残留（登場人物表の原語が訳文に残っていないか）を検証する
 - `rename_terms.py` は旧訳語→新訳語の機械置換。影響箇所を一覧化し、確認のうえ適用する
-- `assemble.py` は全ブロック確定後に章訳文・全文・目次を統合し、原文と中間物を消す。対訳（章対訳・`全文_対訳.md`）は `--parallel`、または年齢正規化の記録がある作品で出力する（`> [Pnnn]` 付き）
+- `assemble.py` は全ブロック確定後に章訳文・全文・目次を統合し、原文と中間物を消す（`chapters/*.paras.toml` と単章作品の `output/<ch>/` は残す。`--keep-source` で全部残す）。全文（`全文_訳文.md`）と対訳（章対訳・`全文_対訳.md`）は既定で出力する（全文は `--no-full`、対訳は `--no-parallel` で抑制。対訳は `> [Pnnn]` 付き）
 
 ## 分析の記録（stage3 / P0-2 前半）
 

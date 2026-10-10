@@ -32,6 +32,21 @@ from _lib import atomic_write_text, dump_toml, load_terms, load_toml  # noqa: E4
 #: VFM ルビ {親文字|読み}。rename_terms と同じ形（読み側の保護対象と同じ書式）。
 VFM_RE = re.compile(r"\{([^{}|]*)\|([^{}|]*)\}")
 
+#: 旧形式のルビ 親{読み}（例: 戦鎧{せんがい}）。VFM ではないため VFM_RE では拾えず、
+#: 台帳にも review の初出検査にも載らない（G11/T20）。親側は漢字連・読み側は仮名類に
+#: 限定する（VFM は読み側の直前が `{` でなく `|` なのでこの形には当たらない）。
+OLD_RUBY_RE = re.compile(r"([\u4e00-\u9fff々〆ヶ]{1,6})\{([ぁ-ゖァ-ヺー・]{1,20})\}")
+
+
+def find_old_style_ruby(text: str) -> list[dict]:
+    """旧形式ルビ 親{読み} を検出する（commit 時の警告用。自動変換はしない）。
+
+    戻り値: ``[{"form": 原文どおり, "base": 親側, "reading": 読み側}]``。
+    正常な VFM ``{親|読み}`` や、読みが仮名でない波括弧書きは対象外。
+    """
+    return [{"form": m.group(0), "base": m.group(1), "reading": m.group(2)}
+            for m in OLD_RUBY_RE.finditer(text)]
+
 LEDGER_VERSION = 1
 
 

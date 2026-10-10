@@ -38,6 +38,10 @@ saga-translator は、**あなたが所持する小説ファイルを、個人�
 
 詳細は `SKILL.md` と `references/prompt-design.md` を参照。
 
+## 設定
+
+`~/.config/saga-translator/config.toml`。`[translation] ruby`（`first`=人名・固有名詞の初出のみ / `always` / `none`）は翻訳コンテキストの「ルビ方針」として注入される。`[context]` の前後ブロック参照段落数と `[split] block_target_chars` は各工程が読み込む。
+
 ## テスト
 
 ```bash

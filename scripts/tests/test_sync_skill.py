@@ -136,6 +136,53 @@ class TestNewlineNormalization(unittest.TestCase):
         self.assertFalse(sync_skill.files_equal(src / "SKILL.md", dest / "SKILL.md"))
 
 
+class TestDistributionExclusions(unittest.TestCase):
+    """G46: tests/ は既定で配布外（--with-tests で任意化）。G45: .hermes-tmp* は常に除外。"""
+
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.src = _make_source(self.td)
+        _write(self.src / "scripts" / "tests" / "test_x.py", "import unittest\n")
+        _write(self.src / "scripts" / "tools" / "tests" / "test_tool.py", "import unittest\n")
+        _write(self.src / "scripts" / ".hermes-tmp-1234" / "junk.py", "x = 1\n")
+        _write(self.src / "scripts" / ".hermes-tmp-plan.md", "tmp\n")
+        self.dest = self.td / "dest"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_tests_and_hermes_tmp_excluded_by_default(self):
+        rc = sync_skill.sync(self.src, self.dest, check=False)
+        self.assertEqual(rc, 0)
+        self.assertFalse((self.dest / "scripts" / "tests").exists())
+        self.assertFalse((self.dest / "scripts" / "tools" / "tests").exists())
+        self.assertFalse((self.dest / "scripts" / ".hermes-tmp-1234").exists())
+        self.assertFalse((self.dest / "scripts" / ".hermes-tmp-plan.md").exists())
+        # 通常のスクリプトは配布される
+        self.assertTrue((self.dest / "scripts" / "run.py").exists())
+
+    def test_with_tests_includes_tests_but_not_hermes_tmp(self):
+        rc = sync_skill.sync(self.src, self.dest, check=False, with_tests=True)
+        self.assertEqual(rc, 0)
+        self.assertTrue((self.dest / "scripts" / "tests" / "test_x.py").exists())
+        self.assertTrue((self.dest / "scripts" / "tools" / "tests" / "test_tool.py").exists())
+        # .hermes-tmp* は --with-tests でも除外したまま
+        self.assertFalse((self.dest / "scripts" / ".hermes-tmp-1234").exists())
+        self.assertFalse((self.dest / "scripts" / ".hermes-tmp-plan.md").exists())
+
+    def test_check_ignores_stale_tests_dir_by_default(self):
+        # 配布先に残る tests/ の残骸は既定の --check では差分にしない（除外扱い）
+        _write(self.dest / "scripts" / "tests" / "old.py", "x\n")
+        sync_skill.sync(self.src, self.dest, check=False)
+        self.assertEqual(sync_skill.sync(self.src, self.dest, check=True), 0)
+
+    def test_check_with_tests_sees_tests_diffs(self):
+        _write(self.dest / "scripts" / "tests" / "old.py", "x\n")
+        sync_skill.sync(self.src, self.dest, check=False)
+        self.assertEqual(sync_skill.sync(self.src, self.dest, check=True, with_tests=True), 1)
+
+
 class TestSyncCLI(unittest.TestCase):
     """CLI 経由の --check 終了コードを検証する。"""
 
@@ -165,6 +212,13 @@ class TestSyncCLI(unittest.TestCase):
         self.assertIn("copied", p.stdout)
         p2 = self._run("--source", str(self.src), "--dest", str(self.dest), "--check")
         self.assertEqual(p2.returncode, 0)
+
+    def test_cli_with_tests_flag(self):
+        _write(self.src / "scripts" / "tests" / "test_x.py", "import unittest\n")
+        p = self._run("--source", str(self.src), "--dest", str(self.dest), "--with-tests")
+        self.assertEqual(p.returncode, 0)
+        self.assertIn("with_tests=true", p.stdout)
+        self.assertTrue((self.dest / "scripts" / "tests" / "test_x.py").exists())
 
 
 if __name__ == "__main__":

@@ -157,13 +157,14 @@ class TestCompactTerms(unittest.TestCase):
         self.assertIn("magic", srcs)
         self.assertNotIn("sword", srcs)
 
-    def test_term_ja_in_prev(self):
-        """前ブロック訳文に term_ja が出る用語も載る"""
+    def test_term_ja_only_in_prev_is_excluded(self):
+        """前ブロック訳文に term_ja が出るだけの用語は載せない（G21: 対象本文の出現語に限定）"""
         body = ["Some scene."]
         prev = "彼は剣を抜いた。"
         result = _compact_terms(self.terms, body, prev)
         srcs = [t["term_src"] for t in result]
-        self.assertIn("sword", srcs)
+        self.assertNotIn("sword", srcs)
+        self.assertNotIn("magic", srcs)
 
     def test_core_always_included(self):
         """core=True の用語は常に載る"""

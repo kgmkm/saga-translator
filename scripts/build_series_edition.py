@@ -134,6 +134,62 @@ def looks_like_work(d: Path) -> bool:
     return any((d / m).exists() for m in WORK_MARKERS)
 
 
+# 章ファイル（全文の代替素材。ch001_ja.md / ch001_zh.md。_parallel は含めない）
+CHAPTER_FILE_RE = re.compile(r"^ch(\d+)_(?:ja|zh)\.md$")
+
+
+def _meta_chapter_ids(work: Path) -> list[str]:
+    """chapters_meta.toml が列挙する章ID（読めなければ空リスト）。"""
+    p = work / "chapters_meta.toml"
+    if not p.exists():
+        return []
+    try:
+        import tomllib  # Python 3.11+
+        data = tomllib.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    return [str(c.get("id")) for c in (data.get("chapters") or [])
+            if isinstance(c, dict) and c.get("id")]
+
+
+def work_body(work: Path):
+    """合本の素材になる作品本文を返す: (本文, 由来)。無ければ None（G25）。
+
+    全文_訳文.md を優先し、無ければ章ファイル（output/chNNN_<dst>.md）を章番号順に
+    結合する。単章作品が全文を出していない場合（--no-full 運用・旧成果物）も
+    連作に収録できるようにするための判定。chapters_meta が章を列挙しているときは
+    全章が揃っていることを要求する（途中の部分出力を完成扱いしない）。
+    """
+    full = work / "output" / "全文_訳文.md"
+    if full.exists():
+        return read_text(full), "全文_訳文.md"
+    out_dir = work / "output"
+    if not out_dir.is_dir():
+        return None
+    found: dict[str, Path] = {}
+    for f in sorted(out_dir.iterdir()):
+        if not f.is_file():
+            continue
+        m = CHAPTER_FILE_RE.match(f.name)
+        if m:
+            found[m.group(1)] = f
+    if not found:
+        return None
+    expected = _meta_chapter_ids(work)
+    if expected:
+        # IDの表記ゆれ（ch001 / 001 / 1）を吸収して突き合わせる
+        def _norm(cid: str) -> int | str:
+            s = cid[2:] if cid.startswith("ch") else cid
+            return int(s) if s.isdigit() else cid
+        have = {_norm(k) for k in found}
+        if any(_norm(c) not in have for c in expected):
+            return None  # 章の欠けがある部分出力はビルド対象にしない
+    order = list(found)
+    order.sort(key=lambda k: int(k) if k.isdigit() else 1 << 62)
+    text = "\n\n".join(read_text(found[k]).strip() for k in order)
+    return (text + "\n" if text else ""), "章ファイル結合"
+
+
 def find_saga(root: Path) -> Path:
     root = root.resolve()
     if not root.is_dir():
@@ -154,11 +210,12 @@ def find_saga(root: Path) -> Path:
 
 
 def list_works(saga: Path):
+    """ビルド対象（全文_訳文.md、または全章の章ファイルがある作品）と未完成を分ける（G25）。"""
     built, unfinished = {}, []
     for d in sorted(saga.iterdir(), key=lambda p: p.name):
         if not d.is_dir() or d.name.startswith("_") or not looks_like_work(d):
             continue
-        if (d / "output" / "全文_訳文.md").exists():
+        if work_body(d) is not None:
             built[d.name] = d
         else:
             unfinished.append(d.name)
@@ -474,7 +531,8 @@ def cmd_build(args, saga: Path, built, unfinished, infos, order_src, prog) -> in
     width = max(2, len(str(len(infos))))
     mismatch_ids = {m["wid"] for m in mismatches}
     for i, rec in enumerate(infos, 1):
-        src_text = read_text(rec["work"] / "output" / "全文_訳文.md")
+        body_info = work_body(rec["work"])
+        src_text = body_info[0] if body_info else ""
         replace = rec["wid"] in mismatch_ids
         body, heading, prepended = build_part_body(src_text, rec["title"], replace_heading=replace)
         rec["prepended"] = prepended
@@ -552,7 +610,7 @@ def cmd_build(args, saga: Path, built, unfinished, infos, order_src, prog) -> in
             mark = "見出し既存"
         print(f"  {i:02d} {rec['wid']}  {rec['file']}  訳題={rec['title_src']}  {mark}  画像{rec['n_images']}")
     if unfinished:
-        print(f"skip（全文_訳文.md が無い）: {', '.join(unfinished)}")
+        print(f"skip（全文_訳文.md も章ファイルも無い）: {', '.join(unfinished)}")
     print(f"合本: {len(IMG_RE.findall(read_text(dst / '合本.md')))} 画像参照 ／ images: {len(list(images_dir.iterdir()))} 枚")
     if findings:
         print("非JIS漢字（シリーズ名・未訳原題などの意図的メタデータ以外は要修正）:")
@@ -586,8 +644,11 @@ def verify_build(dst: Path, parts, built, eol):
             problems.append(f"{rec['file']}: 内部足場が残っている")
         if "\n\n\n" in text:
             problems.append(f"{rec['file']}: 空行が3連続")
-        src_text = read_text(built[rec["wid"]] / "output" / "全文_訳文.md")
-        body, _, _ = build_part_body(src_text, rec["title"],
+        src_text = None
+        body_info = work_body(built[rec["wid"]])
+        if body_info:
+            src_text = body_info[0]
+        body, _, _ = build_part_body(src_text or "", rec["title"],
                                      replace_heading=bool(rec.get("heading_replaced")))
         if text != body:
             problems.append(f"{rec['file']}: source と内容が不一致")
@@ -634,7 +695,8 @@ def cmd_check(saga: Path, built, unfinished, infos, order_src, prog) -> int:
     problems = []
     for i, rec in enumerate(infos, 1):
         work, wid = rec["work"], rec["wid"]
-        text = read_text(work / "output" / "全文_訳文.md")
+        body_info = work_body(work)
+        text = body_info[0] if body_info else ""
         refs = [ref_path(r) for r in IMG_RE.findall(text)]
         missing = [r for r in refs if not (work / "output" / r).exists()]
         nj = scan_non_jis(text)
@@ -652,7 +714,7 @@ def cmd_check(saga: Path, built, unfinished, infos, order_src, prog) -> int:
         if rec["title_src"] == "原題（要確認）" or missing:
             problems.append(wid)
     if unfinished:
-        print(f"skip（全文_訳文.md が無い）: {', '.join(unfinished)}")
+        print(f"skip（全文_訳文.md も章ファイルも無い）: {', '.join(unfinished)}")
     if prog:
         untr = [r for r in prog["rows"] if r[1] not in set(built)]
         print(f"未翻訳（進捗表）: {len(untr)}件")
@@ -689,7 +751,7 @@ def main(argv=None) -> int:
         saga = find_saga(Path(args.root))
         built, unfinished = list_works(saga)
         if not built:
-            raise BuildError("ビルド対象（output/全文_訳文.md がある作品）が見つからない")
+            raise BuildError("ビルド対象（output/全文_訳文.md、または全章の章ファイルがある作品）が見つからない")
         prog = parse_progress(saga)
         explicit = [w.strip() for w in args.works.split(",") if w.strip()] if args.works else None
         order, order_src = resolve_order(built, explicit, prog)

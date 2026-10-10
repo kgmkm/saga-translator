@@ -346,7 +346,7 @@ class TestPairsFile(_Base):
         return p
 
     def test_pairs_file_applies_multiple_and_records(self):
-        """複数ペアを順に一括適用し、renames.jsonl にペアごとの行を追記する。"""
+        """複数ペアを長い旧訳から順に一括適用し、renames.jsonl にペアごとの行を追記する。"""
         pf = self._pairs_file("# 修正一覧\n\n旧訳\t新訳\n歩いた\t歩んだ\n")
         code, out = _run(RENAME, [str(self.work), "--pairs-file", str(pf), "--apply"])
         self.assertEqual(code, 0, out)
@@ -358,8 +358,9 @@ class TestPairsFile(_Base):
                  if l.strip()]
         self.assertEqual(len(lines), 2, lines)
         recs = [json.loads(l) for l in lines]
-        self.assertEqual([r["term"] for r in recs], [OLD, "歩いた"])
-        self.assertEqual([r["to"] for r in recs], [NEW, "歩んだ"])
+        # 長い旧訳から自動ソートされる（F4-B5）: 「歩いた」(3) → 「旧訳」(2)
+        self.assertEqual([r["term"] for r in recs], ["歩いた", OLD])
+        self.assertEqual([r["to"] for r in recs], ["歩んだ", NEW])
 
     def test_pairs_file_dry_run_shows_impact_without_change(self):
         """--apply 無しは影響表示のみ（ファイルは変えない）。"""

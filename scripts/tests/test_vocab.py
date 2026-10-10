@@ -167,7 +167,7 @@ class TestPriority(_TempBase):
             self.assertEqual(e.origin, "vocab")
 
     def test_house_style_scope_filter(self) -> None:
-        """scope=global / work(target一致) だけを採用し、他作品・character は採らない。"""
+        """scope=global / series / work(target一致) を採用し、他作品・character は採らない。"""
         work = _make_work(self.td)
         _write(work / "_house" / "house_style.toml", _house_style([
             {"id": "g1", "kind": "goi", "scope": "global",
@@ -180,10 +180,14 @@ class TestPriority(_TempBase):
              "pattern": "合成語D", "replacement": "合成語D", "status": "approved"},
             {"id": "g2", "kind": "goi", "scope": "global",
              "pattern": "消えた語", "replacement": "消えた訳", "status": "candidate"},
+            # series は連作共有ルールとして適用する（#43。従来は黙って無視されていた）
+            {"id": "s1", "kind": "goi", "scope": "series", "target": "シリーズA",
+             "pattern": "連作語", "replacement": "連作訳", "status": "approved"},
         ]))
         v = vocab.load_vocab(work)
         self.assertEqual(v.lookup("合成語B").dst, "合成語B石")
         self.assertEqual(v.lookup("合成語C").dst, "合成訳C")
+        self.assertEqual(v.lookup("連作語").dst, "連作訳")   # series は採用
         self.assertIsNone(v.lookup("幽鏡"))    # 別作品の scope=work は対象外
         self.assertIsNone(v.lookup("合成語D"))    # character は対象外（既存の表示と同じ）
         self.assertIsNone(v.lookup("消えた語"))  # candidate は未承認
@@ -448,11 +452,14 @@ class TestCommitVocab(_TempBase):
         self.assertIn("合成語C", text)
         self.assertIn("合成訳C", text)
         self.assertFalse(self._emitted().exists())
-        # report.json にも辞書の検査結果が残る
+        # report.json にも辞書の検査結果が残る（#73: stops は検出語の明細配列）
         snap_dirs = sorted((self.work / "output" / "_work" / "commit").iterdir())
         import json
         report = json.loads((snap_dirs[-1] / "report.json").read_text(encoding="utf-8"))
-        self.assertEqual(report["stages"]["residue"]["vocab"]["stops"], 1)
+        stops = report["stages"]["residue"]["vocab"]["stops"]
+        self.assertIsInstance(stops, list)
+        self.assertEqual([s["value"] for s in stops], ["合成語C"])
+        self.assertEqual(stops[0]["kind"], "candidates")
 
     def test_ja_ok_excluded(self) -> None:
         """ja_ok: 日本語としても正当な語は検査から除外。"""

@@ -1,15 +1,16 @@
 #!python3
-"""lock_prep.py — 初期訳語ロック：固有名詞・自称二人称・非JIS字の候補を機械集計し、
-固有名の扱い（命名方針）の一覧を出す。
+"""lock_prep.py — 初期訳語ロック：固有名詞・自称二人称・非JIS字・コードネームの候補を
+機械集計し、固有名の扱い（命名方針）の一覧を出す。
 
 Usage:
     python3 scripts/lock_prep.py <work> [--output-md <path>] [--output-toml <path>] [--top-n N]
 
 入力: <work>/manifest.toml, chapters_meta.toml, chapters/chNNN.paras.toml
       <work>/_house/house_style.toml / <work.parent>/_house/house_style.toml (任意。
-      [naming_policy] は命名方針として表示する)
+      [naming_policy] は命名方針として表示する。codename はコードネームの扱い)
       <work>/analysis/characters-[ネタバレあり].toml / terms.toml (任意)
-出力: _work/lock_prep.md / lock_prep.toml (デフォルト)
+出力: _work/lock_prep.md / lock_prep.toml (デフォルト。コードネーム候補は
+      独立節「コードネーム候補」と [[codenames]] に出す)
 """
 from __future__ import annotations
 
@@ -66,6 +67,41 @@ CJK_RUN = re.compile(r"[\u4e00-\u9fff]{2,6}")
 # 非漢字で区切ってから CJK_RUN でマッチするための分割文字
 _NON_HAN_SPLIT = re.compile(r"[^\u4e00-\u9fff]+")
 
+# ── 中国語ストップリスト（G18 / T10 / F7-C4） ──────────────────────
+# 2〜6字の全部分文字列を数える抽出方式では、機能語の N-gram（我的・一个・
+# 她的・了一 等）が上位を占有し、固有名が50件の枠に入らない（実測 recall 10%）。
+# 「全字が機能語字」の語と定型の機能語を候補から除外する。
+# 人名・固有名に現れる字（美・香・花 等）は入れないこと。
+ZH_STOPWORD_CHARS = frozenset(
+    "的了着过地得之我你您他她它们咱这那哪此是有在说要会能可去来到让被把给"
+    "对想不没无未别和与及或而也都就还又再很太更最才只已并且但因所如若则从"
+    "向往于将为以个们些点时上下里中外前后左右大小多少好一什么怎么呢吗吧啊"
+    "呀哦么嗯谁"
+)
+
+#: 全字が機能語字でない場合でも除外する定型の機能語
+ZH_STOPWORDS_EXACT = frozenset({
+    "我们", "你们", "他们", "她们", "咱们", "什么", "怎么", "这么", "那么",
+    "为什么", "的话", "一样", "一起", "现在", "已经", "可以", "因为", "所以",
+    "但是", "然后", "如果", "不是", "没有", "只是", "还是", "就是", "这是",
+    "那是", "自己", "大家", "人家",
+    # 抽出マーカー語（固有名ではない。コードネームは _gather_codenames が見る）
+    "代号", "代號",
+})
+
+
+def _is_stopword(word: str) -> bool:
+    """中国語の機能語・N-gram ノイズか（固有名詞候補から除外する）。"""
+    return word in ZH_STOPWORDS_EXACT or all(ch in ZH_STOPWORD_CHARS for ch in word)
+
+
+# 代号（コードネーム）の明示抽出（G13 / T2）。固有名詞抽出の頻度・長さの
+# 足切り（2字以上・freq>=3・top_n）の外にコードネームがあるため、専用に拾う。
+# 例: 代号"猩红" / 代号：零 / 代号是“白夜” / 代號「银月」
+CODENAME_RE = re.compile(
+    r"(?:代号|代號)[：:]?\s*(?:是|为|為)?\s*[「“\"'（(]?([^\s、。，,；;！!？?」”\"'）)]{1,12})"
+)
+
 
 def _load_house_style(work: Path) -> dict | None:
     """house_style.toml を共通探索先から読む（任意。#19 の house_style_paths）。
@@ -119,7 +155,11 @@ def _gather_proper_nouns(
     src: str,
     top_n: int,
 ) -> list[dict]:
-    """2〜6字漢字連続で top_n 件の頻出語を返す。既存分析ファイルは呼び出し側でマージ。"""
+    """2〜6字漢字連続で top_n 件の頻出語を返す。既存分析ファイルは呼び出し側でマージ。
+
+    中国語の機能語 N-gram（我的・一个・她的 等）はストップリストで除外する
+    （G18。除外しないと top_n の枠を機能語が占有し、固有名が入らない）。
+    """
     counter: Counter[str] = Counter()
     for _cid, _pn, text in paras:
         # 非漢字で分割 → 各断片は漢字のみのランになる
@@ -132,7 +172,10 @@ def _gather_proper_nouns(
             for i in range(len(fragment)):
                 for j in range(2, max_len + 1):
                     if i + j <= len(fragment):
-                        counter[fragment[i:i+j]] += 1
+                        cand = fragment[i:i + j]
+                        if _is_stopword(cand):
+                            continue
+                        counter[cand] += 1
     # 頻度でソート、top_n 件
     results: list[dict] = []
     for word, freq in counter.most_common(top_n):
@@ -145,6 +188,28 @@ def _gather_proper_nouns(
             "first": first or "",
         })
     return results
+
+
+def _gather_codenames(paras: list[tuple[str, int, str]]) -> list[dict]:
+    """代号（コードネーム）を明示抽出する（G13 / T2）。
+
+    固有名詞抽出と違い、頻度・長さの足切りはしない（1字も・freq<3 も拾う。
+    top_n の外でも独立の節に出す）。戻り値は [{word, freq, first}]（頻度降順）。
+    """
+    counter: Counter[str] = Counter()
+    first: dict[str, str] = {}
+    for cid, pn, text in paras:
+        for m in CODENAME_RE.finditer(text):
+            w = (m.group(1) or "").strip().strip("「」『』\"'“”()（）")
+            if not w:
+                continue
+            counter[w] += 1
+            if w not in first:
+                first[w] = f"{cid} [P{pn}]"
+    out: list[dict] = []
+    for word, freq in counter.most_common():
+        out.append({"word": word, "freq": freq, "first": first.get(word, "")})
+    return out
 
 
 def _gather_pronouns(
@@ -305,6 +370,13 @@ NAMING_CATEGORIES = (
     NAMING_CATEGORY_OTHER,
 )
 
+#: [naming_policy].codename の表示（G14 / T3。katakana / sinitic / keep）
+_CODENAME_POLICY_LABELS = {
+    "katakana": "カタカナ英語",
+    "sinitic": "漢語のまま",
+    "keep": "原語のまま",
+}
+
 _KATAKANA_RE = re.compile(r"[\u30a1-\u30ff\u31f0-\u31ff]")
 _HAN_RE = re.compile(r"[\u4e00-\u9fff]")
 
@@ -331,7 +403,8 @@ def _load_naming_policy(work: Path) -> dict | None:
     """house_style.toml の [naming_policy] を共通探索先から読む（無ければ None）。
 
     探索先は #19 の house_style_paths（work/_house → work.parent/_house）。
-    最初に見つかった、style を持つ方針を返す。
+    最初に見つかった、style か codename を持つ方針を返す（codename は
+    コードネーム専用キー。style が無くても方針として扱う）。
     """
     from vocab import house_style_paths
 
@@ -341,7 +414,8 @@ def _load_naming_policy(work: Path) -> dict | None:
         except Exception:
             continue
         pol = data.get("naming_policy")
-        if isinstance(pol, dict) and str(pol.get("style") or "").strip():
+        if isinstance(pol, dict) and (str(pol.get("style") or "").strip()
+                                      or str(pol.get("codename") or "").strip()):
             return pol
     return None
 
@@ -390,23 +464,32 @@ def _fmt_naming_md(items: list[dict], policy: dict | None) -> list[str]:
     if policy:
         style = str(policy.get("style") or "").strip()
         scope = str(policy.get("scope") or "").strip()
+        codename = str(policy.get("codename") or "").strip()
         decided = str(policy.get("decided_at") or "").strip()
         note = str(policy.get("note") or "").strip()
         detail = ", ".join(x for x in (
             f"scope={scope}" if scope else "",
+            f"codename={codename}" if codename else "",
             f"decided_at={decided}" if decided else "",
         ) if x)
-        line = f"- 命名方針: {style}" + (f"（{detail}）" if detail else "")
-        if note:
-            line += f" — note: {note}"
-        lines.append(line)
+        if style:
+            line = f"- 命名方針: {style}" + (f"（{detail}）" if detail else "")
+            if note:
+                line += f" — note: {note}"
+            lines.append(line)
+        else:
+            lines.append(f"- 命名方針: style 未記録（codename={codename} のみ記録）")
+        if codename:
+            label = _CODENAME_POLICY_LABELS.get(codename, codename)
+            lines.append(f"- コードネーム: {label}（codename={codename}。人名の style とは別キー）")
     else:
         lines.append(
             "- 命名方針: 未決定（house_style.toml の [naming_policy] で決める。"
+            "style は人名、codename はコードネーム＝katakana/sinitic/keep。"
             "人名の裁定は両作品に同時適用される前提のため series スコープを推奨）"
         )
     if mixed and policy:
-        lines.append(f"- 混在: あり（方針記録済み: {style}）")
+        lines.append(f"- 混在: あり（方針記録済み: {style or codename}）")
     elif mixed:
         present = "と".join(c for c in NAMING_CATEGORIES if groups.get(c))
         lines.append(
@@ -436,6 +519,30 @@ def _fmt_naming_md(items: list[dict], policy: dict | None) -> list[str]:
     return lines
 
 
+def _fmt_codenames_md(codenames: list[dict]) -> list[str]:
+    """「コードネーム候補」節（独立節。G13 / T2）の Markdown 行を作る。"""
+    lines: list[str] = ["## コードネーム候補"]
+    if codenames:
+        lines.append("| コードネーム | 頻度 | 初出 |")
+        lines.append("|---|---|---|")
+        for item in codenames:
+            suffix = f"（既訳: {item['existing']}）" if "existing" in item else ""
+            lines.append(
+                f"| {item['word']} | {item['freq']} | {item['first']} {suffix}|"
+            )
+        lines.append("")
+        lines.append(
+            "- コードネームの扱いは house_style.toml の [naming_policy] に "
+            "`codename = \"katakana\" | \"sinitic\" | \"keep\"` で宣言する"
+            "（人名の style とは別キー。katakana=カタカナ英語が既定の推奨）。"
+            "個別ルールは `[[rules]]` の `kind = \"naming\"` でも登録できる"
+        )
+    else:
+        lines.append("（該当なし: 原文に「代号」の明示がありません）")
+    lines.append("")
+    return lines
+
+
 # ── 出力フォーマット ──────────────────────────────────────────────
 
 
@@ -451,6 +558,7 @@ def _fmt_md(
     existing: list[dict],
     naming_items: list[dict],
     naming_policy: dict | None,
+    codenames: list[dict] | None = None,
 ) -> str:
     """lock_prep.md を生成。"""
     lines: list[str] = [
@@ -470,6 +578,9 @@ def _fmt_md(
     else:
         lines.append("（該当なし）")
     lines.append("")
+
+    # コードネーム候補（独立節。G13 / T2）
+    lines.extend(_fmt_codenames_md(codenames or []))
 
     # 固有名の扱い（命名方針。P0-5）
     lines.extend(_fmt_naming_md(naming_items, naming_policy))
@@ -530,10 +641,12 @@ def _fmt_toml(
     existing: list[dict],
     naming_items: list[dict],
     naming_policy: dict | None,
+    codenames: list[dict] | None = None,
 ) -> str:
     """lock_prep.toml を生成。"""
     data: dict = {
         "proper_nouns": proper_nouns,
+        "codenames": codenames or [],
         "pronouns": pronouns,
         "non_jis": undecided + [{"char": r["char"], "freq": r["freq"], "replacement": r["replacement"]} for r in resolved],
         "existing": existing,
@@ -585,6 +698,10 @@ def main(argv: list[str] | None = None) -> int:
     proper_nouns = _gather_proper_nouns(all_paras, src, args.top_n)
     proper_nouns = _mark_existing(proper_nouns, existing)
 
+    # 1b. コードネーム候補（「代号」の明示抽出。頻度・長さの足切りなし。G13）
+    codenames = _gather_codenames(all_paras)
+    codenames = _mark_existing(codenames, existing)
+
     # 2. 自称・二人称
     pronouns = _gather_pronouns(all_paras, src, args.top_n)
     pronouns = _mark_existing_pronouns(pronouns, existing)
@@ -609,10 +726,10 @@ def main(argv: list[str] | None = None) -> int:
     md_content = _fmt_md(
         work_id, src, dst, para_count,
         proper_nouns, pronouns, undecided, resolved, existing,
-        naming_items, naming_policy,
+        naming_items, naming_policy, codenames,
     )
     toml_content = _fmt_toml(proper_nouns, pronouns, undecided, resolved, existing,
-                             naming_items, naming_policy)
+                             naming_items, naming_policy, codenames)
 
     md_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(md_path, md_content)
@@ -625,6 +742,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"[lock_prep] 作品ID={work_id}, 段落数={para_count}")
     print(f"  固有名詞候補: {total_proper}件（要決定: {to_decide}件、既訳あり: {has_existing}件）")
+    print(f"  コードネーム候補: {len(codenames)}件（「代号」の明示抽出。頻度・長さの足切りなし）")
     print(f"  自称候補: {len(pronouns)}件 / 非JIS字: 要決定{len(undecided)}字、代用字表解決{len(resolved)}字")
     groups = _naming_groups(naming_items)
     mixed = _naming_is_mixed(naming_items)
@@ -637,7 +755,12 @@ def main(argv: list[str] | None = None) -> int:
     if naming_policy:
         style = str(naming_policy.get("style") or "").strip()
         scope = str(naming_policy.get("scope") or "").strip()
-        print(f"  命名方針: {style}" + (f"（scope={scope}）" if scope else ""))
+        codename = str(naming_policy.get("codename") or "").strip()
+        bits = ", ".join(x for x in (
+            f"scope={scope}" if scope else "",
+            f"codename={codename}" if codename else "",
+        ) if x)
+        print(f"  命名方針: {style or '(style 未記録)'}" + (f"（{bits}）" if bits else ""))
     else:
         print("  命名方針: 未決定（house_style.toml の [naming_policy] で決める。series スコープ推奨）")
     print("  人物表: 本文で名前が伏せられるキャラは core = true を推奨（compact から落ちない。P1-4）")

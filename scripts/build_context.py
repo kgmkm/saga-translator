@@ -117,11 +117,53 @@ def fmt_terms(terms: dict) -> str:
     return "\n".join(rows) if len(rows) > 2 else "(未登録)"
 
 
-def fmt_plot(plot: dict, tail: int = 20) -> str:
+# ── あらすじの文字数予算（G20 / F4-A1 / F5-B1） ────────────────────────
+# あらすじはブロックごとに累積し、実測では本文の3倍超（b10 で 12,159ch）に
+# 達した。予算（文字数）を超えたら古い側を1行の要約に畳んでコンテキストを
+# 抑える。要約は機械的な圧縮（件数＋冒頭の抜粋）で、内容は消さない。
+
+#: 予算の既定値（config `[context].plot_budget_chars` / --plot-budget の既定）。
+#: 0 で無制限（従来挙動）。
+DEFAULT_PLOT_BUDGET = 4000
+
+#: 1行要約に残す冒頭の文字数
+PLOT_SUMMARY_HEAD = 80
+
+
+def _condense_to_budget(texts: list[str], budget: int) -> tuple[list[str], int]:
+    """あらすじ本文（古い順）を予算内に収める。落とした古い側は1行に畳む。
+
+    新しい側から積み、予算を超える古い分を落とす（最新の1件は常に残す）。
+    落とした分は「（以前の経過N件を1行に省略: 冒頭「…」）」の1行になる。
+    budget<=0 は無制限（素通し）。戻り値: (表示行, 省略件数)。
+    """
+    if budget <= 0 or not texts:
+        return list(texts), 0
+    kept: list[str] = []
+    total = 0
+    for t in reversed(texts):
+        cost = len(t) + 2  # "- " の分
+        if kept and total + cost > budget:
+            break
+        kept.append(t)
+        total += cost
+    kept.reverse()
+    dropped = len(texts) - len(kept)
+    if dropped <= 0:
+        return list(texts), 0
+    head = str(texts[0]).strip().replace("\n", " ")
+    if len(head) > PLOT_SUMMARY_HEAD:
+        head = head[:PLOT_SUMMARY_HEAD] + "…"
+    summary = f"（以前の経過{dropped}件を1行に省略: 冒頭「{head}」）"
+    return [summary] + kept, dropped
+
+
+def fmt_plot(plot: dict, tail: int = 20, budget: int = 0) -> str:
     lines = [e.get("text", "") for e in plot.get("entries", [])]
     if not lines:
         return "(未記録)"
-    return "\n".join(f"- {l}" for l in lines[-tail:])
+    lines, _ = _condense_to_budget(lines[-tail:], budget)
+    return "\n".join(f"- {l}" for l in lines)
 
 
 def prev_tail_text(work: Path, chapters: list[dict], ci: int, bi: int, k: int) -> str:
@@ -253,6 +295,12 @@ def _compact_arcs(
                 continue
             at_block = a.get("at_block", "")
             if not at_block:
+                continue
+            if at_block == "carry":
+                # carry_analysis が書く引き継ぎの目印（G22 / CA-2）。作品開始時点の
+                # 起点なので常に適用する。声の欄は基底側に畳み込み済みで、ここでは
+                # note を「注記」として残す（従来は不正値として警告・スキップ）。
+                applicable.append(((0, 0), at_block, a))
                 continue
             parsed = _parse_at_block(at_block)
             if parsed is None:
@@ -401,18 +449,22 @@ def _compact_terms(
     body_texts: list[str],
     prev_translation: str,
 ) -> list[dict]:
-    """compact モード: 用語を絞り込む。"""
+    """compact モード: 用語を絞り込む（G21 / F4-A2 / F5-B2）。
+
+    対象本文に原文形（term_src）が出現する語と core だけを載せる。従来の
+    「前ブロック訳文に term_ja が出る語」も載せる条件（in_prev）は、前ブロック
+    の訳文が全登録語を含むため用語集が本文と同量まで膨らむ原因だった
+    （実測 b10 で 3,594ch）。prev_translation は互換のため受け取るが使わない。
+    """
     result = []
     seen = set()
     for t in terms.get("terms", []):
         term_src = t.get("term_src") or ""
-        term_ja = t.get("term_ja") or ""
         is_core = bool(t.get("core"))
 
         in_src = bool(term_src) and any(term_src in bt for bt in body_texts)
-        in_prev = bool(term_ja) and term_ja in prev_translation
 
-        if is_core or in_src or in_prev:
+        if is_core or in_src:
             tid = id(t)
             if tid not in seen:
                 seen.add(tid)
@@ -424,8 +476,9 @@ def _compact_plot(
     plot: dict,
     cid: str, bid: str,
     default_tail: int = 20,
+    budget: int = 0,
 ) -> tuple[list[str], bool]:
-    """compact モード: 対象ブロックより前の plot entries のみ。"""
+    """compact モード: 対象ブロックより前の plot entries のみ（予算で古い側を1行化）。"""
     target = _block_address(cid, bid)
     entries = plot.get("entries", [])
     if not entries:
@@ -447,9 +500,12 @@ def _compact_plot(
                 filtered.append(e)
 
     if not all_have_block:
-        return [e.get("text", "") for e in entries[-default_tail:]], False
+        texts, _ = _condense_to_budget(
+            [e.get("text", "") for e in entries[-default_tail:]], budget)
+        return texts, False
 
-    texts = [e.get("text", "") for e in filtered[-default_tail:]]
+    texts, _ = _condense_to_budget(
+        [e.get("text", "") for e in filtered[-default_tail:]], budget)
     return texts, True
 
 
@@ -470,6 +526,24 @@ def _load_house_style_rules(work: Path) -> list[dict]:
         except Exception:
             pass
     return rules
+
+
+def _load_house_style_policy(work: Path) -> dict | None:
+    """house_style.toml（共通探索先）の [naming_policy] を読む（無ければ None）。
+
+    探索先は _load_house_style_rules と同じ house_style_paths。先に見つかった
+    方針を返す（work 側 → 親側）。
+    """
+    from vocab import house_style_paths
+    for p in house_style_paths(work):
+        try:
+            data = load_toml(p)
+        except Exception:
+            continue
+        pol = data.get("naming_policy") if isinstance(data, dict) else None
+        if isinstance(pol, dict):
+            return pol
+    return None
 
 
 def _fmt_vocab_selection(work: Path, body_texts: list[str]) -> list[str]:
@@ -528,7 +602,9 @@ def _fmt_ledger_consumed(work: Path) -> list[str]:
         if t and t not in ruby_terms:
             ruby_terms.append(t)
     if ruby_terms:
-        out += ["## 消費済みルビ（再付与不可）", _fmt_capped(ruby_terms), ""]
+        # 見出しは「この作品で」を明示する（G10 / T13）。台帳は作品ごとに独立で、
+        # 前作の消費済みルビは carry で引き継がない（初出ルビは作品単位）。
+        out += ["## この作品で消費済みルビ（再付与不可）", _fmt_capped(ruby_terms), ""]
 
     ono_items: list[str] = []
     for o in data.get("ono_used", []):
@@ -566,15 +642,60 @@ _kind_map = {
 }
 
 
-def _fmt_house_style(rules: list[dict], work_id: str) -> str:
-    """approved/locked かつ該当 scope のルールを整形。"""
-    lines = []
+#: [naming_policy].codename の表示（G14 / T3。値は katakana / sinitic / keep）
+_CODENAME_LABELS = {
+    "katakana": "カタカナ英語",
+    "sinitic": "漢語のまま",
+    "keep": "原語のまま",
+}
+
+
+def _fmt_naming_policy(policy: dict | None) -> list[str]:
+    """[naming_policy] をコンテキストへ描画する（G15 / T6）。
+
+    人間が house_style.toml に書いた命名方針は rules と違い従来どこにも
+    描画されず、翻訳コンテキストへ届かなかった（dead config）。style は
+    人名、codename はコードネーム（代号）の扱いで、別キーとして出す。
+    """
+    if not isinstance(policy, dict):
+        return []
+    style = str(policy.get("style") or "").strip()
+    scope = str(policy.get("scope") or "").strip()
+    codename = str(policy.get("codename") or "").strip()
+    decided = str(policy.get("decided_at") or "").strip()
+    note = str(policy.get("note") or "").strip()
+    if not style and not codename:
+        return []
+    out: list[str] = []
+    if style:
+        details = ", ".join(x for x in (
+            f"scope={scope}" if scope else "",
+            f"decided_at={decided}" if decided else "",
+        ) if x)
+        out.append(f"- 命名方針: {style}" + (f"（{details}）" if details else ""))
+    if codename:
+        label = _CODENAME_LABELS.get(codename, codename)
+        out.append(f"- コードネーム: {label}（codename={codename}）")
+    if note:
+        out.append(f"- 命名方針の根拠: {note}")
+    return out
+
+
+def _fmt_house_style(rules: list[dict], work_id: str,
+                     naming_policy: dict | None = None) -> str:
+    """approved/locked かつ該当 scope のルールと [naming_policy] を整形する。
+
+    scope=series は共通探索先（work/_house → work.parent/_house）に置かれた
+    連作共有ルールとして適用する（#43。従来は黙って無視されていた。target は
+    記録用で、配下の作品へ共通適用される）。[naming_policy] は先頭に描画する。
+    """
+    lines = _fmt_naming_policy(naming_policy)
     for r in rules:
         status = r.get("status", "")
         if status not in ("approved", "locked"):
             continue
         scope = r.get("scope", "")
-        if scope == "global":
+        if scope in ("global", "series"):
             pass
         elif scope == "work" and r.get("target") == work_id:
             pass
@@ -595,6 +716,21 @@ def _fmt_house_style(rules: list[dict], work_id: str) -> str:
 
 def get_work_id(work: Path) -> str:
     return work.name
+
+
+#: ルビ方針（設定 [translation].ruby）の説明（G9: dead config のコンテキスト注入への接続）。
+RUBY_MODES = {
+    "first": "人名・固有名詞の初出のみ",
+    "always": "初出に限らず付与",
+    "none": "ルビを振らない",
+}
+
+
+def ruby_mode(cfg: dict) -> str:
+    """設定 [translation].ruby を解釈する（欠落・未知値は first=既定）。"""
+    tr = (cfg or {}).get("translation")
+    v = str((tr if isinstance(tr, dict) else {}).get("ruby") or "first").strip().lower()
+    return v if v in RUBY_MODES else "first"
 
 
 def _warn_unnormalized_images(work: Path) -> None:
@@ -624,6 +760,10 @@ def main() -> None:
     ap.add_argument("--block", default=None, help="例: b1(未指定=未完了の先頭)")
     ap.add_argument("--mode", choices=["analysis", "translation"], default="translation")
     ap.add_argument("--full", action="store_true", help="compact モードでも全件出力")
+    ap.add_argument("--plot-budget", type=int, default=None,
+                    help="あらすじの文字数予算。超過分は古い側を1行に省略（0=無制限。"
+                         "既定: config [context].plot_budget_chars、無ければ "
+                         f"{DEFAULT_PLOT_BUDGET}）")
     args = ap.parse_args()
 
     work = Path(args.work)
@@ -650,12 +790,14 @@ def main() -> None:
         context_style = "full" if args.full else "compact"
 
     with timed_stage(work, "build_context", chapter=cid, block=bid):
-        _stage_impl(work, cid, bid, args.mode, context_style)
+        _stage_impl(work, cid, bid, args.mode, context_style,
+                    plot_budget=args.plot_budget)
 
 
 def _stage_impl(
     work: Path, cid: str, bid: str, mode: str,
     context_style: str = "compact",
+    plot_budget: int | None = None,
 ) -> None:
     if mode == "analysis":
         _warn_unnormalized_images(work)
@@ -666,6 +808,10 @@ def _stage_impl(
     cfg = load_config()
     k_prev = int(cfg.get("context", {}).get("prev_tail_paras", 3))
     k_next = int(cfg.get("context", {}).get("next_head_paras", 2))
+    if plot_budget is None:
+        # あらすじ予算（G20）: --plot-budget > config [context].plot_budget_chars > 既定。
+        # saga.py prepare は config 経由で受ける（フラグを渡さない呼び出しでも有効）。
+        plot_budget = int(cfg.get("context", {}).get("plot_budget_chars", DEFAULT_PLOT_BUDGET))
 
     ci = next((i for i, c in enumerate(chapters) if c["id"] == cid), None)
     if ci is None:
@@ -710,6 +856,11 @@ def _stage_impl(
         pair = f"{lang}2{dst}"
         lang_line += f" / 訳文言語: {dst} / 言語tips: references/lang_{pair}.md （ファイルがあれば読め。無ければ汎用プロンプトのみ）"
     lines += [lang_line, ""]
+
+    if mode == "translation" and dst == "ja":
+        # ルビ方針（設定 [translation].ruby を翻訳コンテキストへ注入。G9: dead config の接続）
+        rm = ruby_mode(cfg)
+        lines += [f"ルビ方針: {rm}（{RUBY_MODES[rm]}）", ""]
 
     compact = (context_style == "compact")
     work_id = get_work_id(work)
@@ -758,12 +909,10 @@ def _stage_impl(
             # 台帳の「消費済み」節（レビュー提案1。データが無ければ出ない）
             lines += _fmt_ledger_consumed(work)
 
-        # plot 時点解決 (E)
-        plot_texts, plot_resolved = _compact_plot(plot, cid, bid)
+        # plot 時点解決 (E) + 文字数予算（G20: 超過分は古い側を1行に省略）
+        plot_texts, plot_resolved = _compact_plot(plot, cid, bid, budget=plot_budget)
         if not plot_texts:
             plot_display = "(未記録)"
-        elif not plot_resolved:
-            plot_display = "\n".join(f"- {l}" for l in plot_texts)
         else:
             plot_display = "\n".join(f"- {l}" for l in plot_texts)
         lines += [
@@ -772,9 +921,10 @@ def _stage_impl(
             "",
         ]
 
-        # house_style 差し込み (F)
+        # house_style 差し込み (F): rules と [naming_policy] の両方を届ける（G15）
         house_rules = _load_house_style_rules(work)
-        house_text = _fmt_house_style(house_rules, work_id)
+        house_policy = _load_house_style_policy(work)
+        house_text = _fmt_house_style(house_rules, work_id, house_policy)
         if house_text:
             lines += ["## ハウススタイル(既決事項)", house_text, ""]
 
@@ -793,11 +943,12 @@ def _stage_impl(
         n_terms_shown = len(compact_terms_list)
         plot_count = len(plot_texts)
         house_count = len([r for r in house_rules if r.get("status") in ("approved", "locked")])
+        policy_part = "+命名方針" if house_policy else ""
         omitted = _omitted_character_names(chars, compact_chars)
         omitted_part = f"（省略: {', '.join(omitted)}）" if omitted else ""
         print(
             f"[context] compact: 人物 {n_chars_shown}/{total_chars}{omitted_part} / 用語 {n_terms_shown}/{total_terms} "
-            f"/ arcs {arc_count}件 / plot {plot_count}件 / house_style {house_count}件",
+            f"/ arcs {arc_count}件 / plot {plot_count}件 / house_style {house_count}件{policy_part}",
             file=sys.stderr,
         )
 
@@ -814,7 +965,7 @@ def _stage_impl(
             fmt_terms(terms),
             "",
             "## これまでのあらすじ(ネタバレ/翻訳用の内部情報)",
-            fmt_plot(plot),
+            fmt_plot(plot, budget=plot_budget),
             "",
             f"## 前ブロックの訳文末尾({k_prev}段落)",
             prev_tail_text(work, chapters, ci, bi, k_prev),

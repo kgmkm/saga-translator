@@ -306,6 +306,28 @@ def cmd_validate(args: Namespace) -> int:
         if has_rep and has_pref:
             errors.append(f"rules[{i}]: 'replacement' と 'preference' の両方は指定できません（二者択一）")
 
+    # [naming_policy]（任意。G14 / T3）: codename はコードネームの扱いで
+    # katakana / sinitic / keep。style は人名用の既存キー。
+    pol = data.get("naming_policy")
+    if pol is not None:
+        if not isinstance(pol, dict):
+            errors.append("[naming_policy]: テーブルであるべきです")
+        else:
+            for key, allowed in (("style", ("transliterate", "sinitic", "mixed")),
+                                 ("scope", ("work", "series")),
+                                 ("codename", ("katakana", "sinitic", "keep"))):
+                v = pol.get(key)
+                if v is None:
+                    continue
+                if not isinstance(v, str):
+                    errors.append(f"[naming_policy]: '{key}' は文字列であるべきです (実際: {type(v).__name__})")
+                elif v not in allowed:
+                    errors.append(f"[naming_policy]: 未知の {key} '{v}'（許容: {', '.join(allowed)}）")
+            for key in ("note", "decided_at"):
+                v = pol.get(key)
+                if v is not None and not isinstance(v, str):
+                    errors.append(f"[naming_policy]: '{key}' は文字列であるべきです (実際: {type(v).__name__})")
+
     if errors:
         for e in errors:
             print(e, file=sys.stderr)

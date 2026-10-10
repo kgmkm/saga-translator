@@ -26,6 +26,7 @@ from _lib import (  # noqa: E402
     stale_after_rename_blocks, target_suffix,
     timed_stage, utf8, variant_candidates_of, voice_description_present, voice_status_of,
 )
+from check_src_keys import resolve_delta_path  # noqa: E402  # --delta の work 相対解決（G43）
 
 PLOT_RE = re.compile(r'^block = "([^"]+)"', re.M)
 
@@ -156,7 +157,8 @@ def _naming_policy_of(work: Path) -> dict | None:
         if not isinstance(data, dict):
             continue
         pol = data.get("naming_policy")
-        if isinstance(pol, dict) and str(pol.get("style") or "").strip():
+        if isinstance(pol, dict) and (str(pol.get("style") or "").strip()
+                                      or str(pol.get("codename") or "").strip()):
             return pol
     return None
 
@@ -1680,7 +1682,9 @@ def _cmd_analyze_commit_impl(work: Path, delta_path: Path,
         # 受入検証（_merge_delta の前に実施。拒否時は一切書かない）
         ok, reason, has_changes = validate_analysis_delta(meta, delta)
         if not ok:
-            print(f"[analyze-commit] エラー: 拒否しました: {reason}", file=sys.stderr)
+            print(f"[analyze-commit] エラー: 拒否しました: {reason}。"
+                  f"次の一手: delta の block・キー・値を修正して再実行してください"
+                  f"（この時点では何も保存されません）", file=sys.stderr)
             return 1
 
         # 反映後の仮の全体を組み立てる（書き込みはまだ行わない）。
@@ -1701,7 +1705,11 @@ def _cmd_analyze_commit_impl(work: Path, delta_path: Path,
             if payloads is None:
                 for e in errors:
                     print(f"[analyze-commit] エラー: {e}", file=sys.stderr)
-                print("[analyze-commit] エラー: マージ検証失敗、何も書きませんでした", file=sys.stderr)
+                det = _fmt_items([str(e) for e in errors]) if errors else ""
+                print(f"[analyze-commit] エラー: マージ検証失敗、何も書きませんでした。"
+                      + (f"検出: {det}。" if det else "")
+                      + f"次の一手: delta の記述を修正して再実行してください"
+                      f"（何も保存されていません）", file=sys.stderr)
                 return 1
             # 確認の候補（話者・異表記）: 差分適用後のデータと対象ブロックの
             # 原文から抽出して記録する（確定はしない。P0-4・#7）
@@ -1721,9 +1729,14 @@ def _cmd_analyze_commit_impl(work: Path, delta_path: Path,
                 if len(residue) > 20:
                     print(f"[analyze-commit] … 他 {len(residue) - 20} 件")
                 if not force_residue:
+                    det = _fmt_items([
+                        (f"{r_name}:{r_line}" if r_line else r_name)
+                        for r_name, r_line, _k, _rs, _c in residue])
                     print(
                         f"[analyze-commit] エラー: 分析 TOML の対象欄に中国語の残渣が "
-                        f"{len(residue)} 件あります。修正するか --force-residue を明示してください"
+                        f"{len(residue)} 件あります: {det}。"
+                        f"日本語フィールド（訳語側）を修正して再実行するか、"
+                        f"承知の上で通す場合だけ --force-residue を明示してください"
                         f"（保存しません）",
                         file=sys.stderr,
                     )
@@ -1738,7 +1751,12 @@ def _cmd_analyze_commit_impl(work: Path, delta_path: Path,
         if has_changes or candidates_changed:
             write_errors = _commit_analysis_payloads(payloads, work)
             if write_errors:
-                print("[analyze-commit] エラー: マージ検証失敗、何も書きませんでした", file=sys.stderr)
+                for e in write_errors:
+                    print(f"[analyze-commit] エラー: {e}", file=sys.stderr)
+                det = _fmt_items([str(e) for e in write_errors])
+                print(f"[analyze-commit] エラー: マージ検証失敗、何も書きませんでした。"
+                      f"検出: {det}。次の一手: delta の記述を修正して再実行してください"
+                      f"（何も保存されていません）", file=sys.stderr)
                 return 1
             # 監査記録（P1-5）: 保護キーの明示上書き・plot 置換を保存成功後に1行ずつ残す
             for e in edits:
@@ -1832,6 +1850,20 @@ def _similar_names(a: str, b: str) -> bool:
         return sum(1 for x, y in zip(a, b) if x != y) <= 1
     short, longer = (a, b) if len(a) < len(b) else (b, a)
     return len(longer) - len(short) <= 1 and short in longer
+
+
+#: 異表記候補にしないノイズ片（G38: 见时/小腹/小心/的时 などが人物として
+#: 登録された実害）。追加は templates/brief_analyze.md「variant登録基準」に従う。
+_VARIANT_NOISE_FORMS = frozenset({"见时", "小腹", "小心", "的时"})
+#: 機能字のみで成る片は異表記候補にしない（付属語・量詞・方位詞の断片）。
+_VARIANT_FUNC_CHARS = frozenset("的了是在和与或个一种每这那哪何大小多少时分年日月人中上下来去出入好坏新老我你她他其所另")
+
+
+def _is_noise_variant(t: str) -> bool:
+    """work レベルの異表記候補から外す片か（G38 の除外条件）。"""
+    if t in _VARIANT_NOISE_FORMS:
+        return True
+    return len(t) >= 2 and all(ch in _VARIANT_FUNC_CHARS for ch in t)
 
 
 def _near_quote_hits(text: str, name: str) -> int:
@@ -1974,6 +2006,8 @@ def _record_voice_candidates(work: Path, block_key: str, meta: dict,
                 t = text[i:i + length]
                 if t == n or t in seen_t or t in known or not t.isalnum():
                     continue
+                if _is_noise_variant(t):
+                    continue  # G38: 一般名詞断片を人物候補にしない
                 if not _similar_names(n, t):
                     continue
                 if t in _dismissed_variants_of(_c):
@@ -2036,10 +2070,21 @@ COMMIT_FAIL_REASONS = (
 )
 
 
+def _report_count(value) -> int:
+    """report.json の検出件数を読む（#73: 明細配列と旧形式の件数値の両対応）。"""
+    if isinstance(value, (list, tuple)):
+        return len(value)
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _classify_commit_failure(snap_dir: Path) -> str:
     """commit 失敗時の理由を種類別に分類する。
 
-    検査ごとの検出数を記録した report.json を優先して読み、無ければ None。
+    検査ごとの検出を記録した report.json を優先して読み、無ければ "other"。
+    件数の欄は明細配列（新形式・#73）と数値（旧形式）の両方を読める。
     分類記号は COMMIT_FAIL_REASONS のいずれか。
     """
     report_p = Path(snap_dir) / "report.json"
@@ -2051,12 +2096,12 @@ def _classify_commit_failure(snap_dir: Path) -> str:
         return "other"
     stages = report.get("stages", {})
     align = stages.get("align", {})
-    if isinstance(align, dict) and int(align.get("fatal", 0) or 0) > 0:
+    if isinstance(align, dict) and _report_count(align.get("fatal")) > 0:
         return "align"
-    if isinstance(align, dict) and int(align.get("confirm_unacked", 0) or 0) > 0:
+    if isinstance(align, dict) and _report_count(align.get("confirm_unacked")) > 0:
         return "confirm_unacked"
     qa = stages.get("qa")
-    if isinstance(qa, dict) and not qa.get("pass", True):
+    if isinstance(qa, dict) and qa.get("pass") is False:
         checks = qa.get("checks", {})
         if isinstance(checks, dict):
             if checks.get("merged_paragraphs") is False:
@@ -2067,9 +2112,9 @@ def _classify_commit_failure(snap_dir: Path) -> str:
     residue = stages.get("residue", {})
     if isinstance(residue, dict):
         vocab = residue.get("vocab", {})
-        vocab_stops = int(vocab.get("stops", 0) or 0) if isinstance(vocab, dict) else 0
-        if (int(residue.get("errors", 0) or 0) > 0
-                or int(residue.get("candidates", 0) or 0) > 0
+        vocab_stops = _report_count(vocab.get("stops")) if isinstance(vocab, dict) else 0
+        if (_report_count(residue.get("errors")) > 0
+                or _report_count(residue.get("candidates")) > 0
                 or vocab_stops > 0):
             return "residue"
     return "other"
@@ -2934,6 +2979,7 @@ def _finalize_block(work: Path, chapter: str, block: str,
 
     snap_dir: Path | None = None
     report: dict | None = None
+    tee_token = None  # B1b: stdout/stderr のログ複製（finally で必ず止める）
     try:
         # 1) 正規化は検査前に一括適用し、その結果をスナップショットにする（#16）
         text = draft_p.read_text(encoding="utf-8")
@@ -2965,8 +3011,17 @@ def _finalize_block(work: Path, chapter: str, block: str,
         out["snap_dir"] = snap_dir
         print(f"[commit] スナップショット: {snap_draft}  commit_id={draft_hash}")
 
+        # #73: 検出の明細（語・段落）を配列で残す節。失敗して途中で止まった場合も
+        # 節が欠けないよう、先に空の形で作って以降の工程で更新する。
         report = {"commit_id": draft_hash, "snapshot": str(snap_draft),
-                  "chapter": cid, "block": bid, "revise": bool(revise), "stages": {}}
+                  "chapter": cid, "block": bid, "revise": bool(revise), "stages": {
+                      "align": {"fatal": [], "confirm_unacked": []},
+                      "qa": {"pass": None, "checks": {}, "failures": []},
+                      "residue": {"errors": [], "candidates": []},
+                  }}
+        # #73(B1b): 以降の stdout/stderr 明細をスナップショット配下の stdout.log にも
+        # 残す（子エージェントの要約で消えても後から追える）。失敗しても本処理は止めない。
+        tee_token = _start_output_tee(snap_dir / "stdout.log")
 
         # 2) align 検査（会話頭・欠落・重複マーカー）と未裁定ゲート（S3）
         # 旧 acks.jsonl は一回きり取り込み、裁定記録（rulings・全キー一致）で照合する。
@@ -2976,22 +3031,31 @@ def _finalize_block(work: Path, chapter: str, block: str,
         fatals = [f for f in findings if f.severity == "fatal"]
         # 裁定記録で抑制されなかった confirm（文字数比等）は未裁定として確定を止める
         unacked_confirms = [f for f in findings if f.severity == "confirm"]
-        report["stages"]["align"] = {"fatal": len(fatals), "confirm_unacked": len(unacked_confirms)}
+        report["stages"]["align"]["fatal"] = _align_finding_items(fatals)
+        report["stages"]["align"]["confirm_unacked"] = _align_finding_items(unacked_confirms)
 
         if fatals:
             for f in fatals:
                 print(f"[commit] fatal: P{f.para or '?'} {f.kind}: {f.detail}")
+            det = _fmt_items([(f"P{f.para}" if f.para else "全体") + f" {f.kind}"
+                              for f in fatals])
             _write_commit_report(snap_dir, report)
-            print(f"[commit] 中止。ドラフトを直して再実行。", file=sys.stderr)
+            print(f"[commit] 中止。align fatal {len(fatals)} 件: {det}。"
+                  f"次の一手: 該当段落を原文と突き合わせてドラフト（{snap_draft}）を"
+                  f"修正し、commit を再実行してください", file=sys.stderr)
             out["reason"] = "align"
             return 1
 
         if unacked_confirms:
             for f in unacked_confirms:
                 print(f"[commit] confirm(未裁定): P{f.para or '?'} {f.kind}: {f.detail}")
-            print(f"[commit] 失敗: confirm {len(unacked_confirms)} 件が未裁定です。"
-                  f"本文を修正するか、align.py ack で裁定記録（ハッシュ紐づけ）を残してください。",
-                  file=sys.stderr)
+            det = _fmt_items([(f"P{f.para}" if f.para else "全体") + f" {f.kind}"
+                              for f in unacked_confirms])
+            print(f"[commit] 失敗: confirm {len(unacked_confirms)} 件が未裁定です: {det}。"
+                  f"次の一手: 本文を直して再実行するか、問題ない箇所は裁定記録で"
+                  f"通過させてください: python3 scripts/align.py ack <work> --block {bid}"
+                  f" --para <P番号> --reason \"確認理由\"（ack はドラフトのハッシュに"
+                  f"紐づき、本文を変えると無効になります）", file=sys.stderr)
             _write_commit_report(snap_dir, report)
             out["reason"] = "confirm_unacked"
             return 1
@@ -3001,19 +3065,45 @@ def _finalize_block(work: Path, chapter: str, block: str,
         # 3) QA（非JIS・段落整合など）。検査対象はスナップショットと同じバイト列。
         from qa_translation import run_qa
         qa_report, items = run_qa(work, cid, bid, snap_draft)
-        report["stages"]["qa"] = {"pass": qa_report["pass"],
-                                  "checks": {k: v["pass"] for k, v in qa_report["checks"].items()}}
+        qa_stage = report["stages"]["qa"]
+        qa_stage["pass"] = qa_report["pass"]
+        qa_stage["checks"] = {k: v["pass"] for k, v in qa_report["checks"].items()}
+        qa_stage["failures"] = _qa_failure_items(qa_report["checks"])
 
         if not qa_report["pass"]:
+            fail_briefs = []
             for k, v in qa_report["checks"].items():
                 if not v["pass"]:
                     print(f"[commit] QA FAIL: {k}: {v}")
+                    fail_briefs.append(f"{k}{_qa_brief(v)}")
             _write_commit_report(snap_dir, report)
-            print(f"[commit] 中止。QA 不合格。", file=sys.stderr)
+            print(f"[commit] 中止。QA 不合格 {len(fail_briefs)} 件: "
+                  f"{' / '.join(fail_briefs)}。次の一手: ドラフトを修正して再実行してください。"
+                  f"事前確認は python3 scripts/qa_translation.py {work}"
+                  f" --chapter {cid} --block {bid}", file=sys.stderr)
             out["reason"] = "qa"
             return 1
 
         print(f"[commit] QA: PASS")
+
+        # 3.5) 旧形式ルビ 親{読み} の警告（G11/T20）。VFM {親|読み} ではないため
+        #      台帳にも review の初出検査にも載らない。自動変換はしない（語中ルビの
+        #      判定が要るため）。確定は止めない（警告のみ）。
+        if dst == "ja":
+            try:
+                from ledger import find_old_style_ruby
+                old_ruby = find_old_style_ruby("\n".join(t for _, t in items))
+            except Exception:
+                old_ruby = []
+            if old_ruby:
+                forms = "、".join(e["form"] for e in old_ruby[:5])
+                if len(old_ruby) > 5:
+                    forms += f" ほか{len(old_ruby) - 5}件"
+                print(f"[commit] 警告: 旧形式のルビが {len(old_ruby)} 件あります（{forms}）。"
+                      f"{{訳語|よみ}} に変換してください"
+                      f"（旧形式は台帳・review の初出検査に載りません）")
+                if isinstance(report.get("stages", {}).get("qa"), dict):
+                    report["stages"]["qa"]["old_style_ruby"] = len(old_ruby)
 
         # 4) 残渣検査（zh→ja 方向のみ）
         if src == "zh" and dst == "ja":
@@ -3040,16 +3130,19 @@ def _finalize_block(work: Path, chapter: str, block: str,
             # safe_fix があるものを「候補」として表示
             residue_candidates = [f for f in residue_findings if f.safe_fix]
             residue_errors = [f for f in residue_findings if not f.safe_fix]
-            report["stages"]["residue"] = {"candidates": len(residue_candidates),
-                                           "errors": len(residue_errors)}
+            report["stages"]["residue"]["candidates"] = _residue_finding_items(residue_candidates)
+            report["stages"]["residue"]["errors"] = _residue_finding_items(residue_errors)
 
             if residue_errors:
                 for f in residue_errors:
                     sf = f" → {f.safe_fix}" if f.safe_fix else ""
                     ctx = f.context[:40]
                     print(f"[commit] 残渣: 「{f.value}」{sf} (L{f.line}: {ctx})")
+                det = _fmt_items([f.value for f in residue_errors])
                 _write_commit_report(snap_dir, report)
-                print(f"[commit] 中止。残渣 {len(residue_errors)} 件を修正してください。", file=sys.stderr)
+                print(f"[commit] 中止。残渣エラー {len(residue_errors)} 件: {det}。"
+                      f"次の一手: 各行の指摘箇所（L 行番号）を日本語の訳語へ直して"
+                      f"再実行してください", file=sys.stderr)
                 out["reason"] = "residue"
                 return 1
 
@@ -3060,10 +3153,12 @@ def _finalize_block(work: Path, chapter: str, block: str,
                 # 確定するのはレビュー完了条件「既知パターンの機械検査の未解決エラー
                 # 0件（emit 時）」に反する。候補が残る場合は確定を止め、修正か
                 # house_style.toml の known_terms 登録を促す。
+                det = _fmt_items([f.value for f in residue_candidates])
                 _write_commit_report(snap_dir, report)
-                print(f"[commit] 中止。残渣候補 {len(residue_candidates)} 件が残っています。"
-                      f"修正するか house_style.toml の residue.known_terms に登録してください。",
-                      file=sys.stderr)
+                print(f"[commit] 中止。残渣候補 {len(residue_candidates)} 件: {det}。"
+                      f"次の一手: 各行の修正案（→ の訳語）へ直して再実行するか、"
+                      f"一般語として許容するなら house_style.toml の residue.known_terms へ"
+                      f"登録してください", file=sys.stderr)
                 out["reason"] = "residue"
                 return 1
 
@@ -3091,16 +3186,23 @@ def _finalize_block(work: Path, chapter: str, block: str,
                 "fixed": sum(1 for f in v_findings if f.kind == "fixed"),
                 "candidates": sum(1 for f in v_findings if f.kind == "candidates"),
                 "ruled": v_ruled,
-                "stops": len(v_stops),
+                "stops": _vocab_stop_items(v_stops),
             }
             if v_stops:
                 for vf in v_stops:
                     where = f"P{vf.paragraph:03d}" if vf.paragraph else "ブロック全体"
                     print(f"[commit] 残渣({vf.kind}): {vf.detail} ({where})")
+                det = _fmt_items([
+                    f"{vf.form}({vf.kind})"
+                    + (f" P{vf.paragraph:03d}" if vf.paragraph else "")
+                    for vf in v_stops])
                 _write_commit_report(snap_dir, report)
-                print(f"[commit] 中止。辞書の残渣 {len(v_stops)} 件。fixed は本文修正、"
-                      f"candidates は本文修正か裁定記録（rulings.py。dict_version="
-                      f"{vocab.dict_version()}）で通せます。", file=sys.stderr)
+                print(f"[commit] 中止。辞書の残渣 {len(v_stops)} 件: {det}。"
+                      f"登録済みの原語を訳文に使うと止まります（規定訳は terms.toml の"
+                      f" term_ja。house_style / 拡張語彙も同様）。"
+                      f"次の一手: fixed は本文を規定訳へ修正、candidates は本文修正か"
+                      f"裁定記録（rulings.py、dict_version={vocab.dict_version()}）で"
+                      f"通せます", file=sys.stderr)
                 out["reason"] = "residue"
                 return 1
             if v_ruled:
@@ -3113,12 +3215,15 @@ def _finalize_block(work: Path, chapter: str, block: str,
             from detect.ja2zh import find_ja_residue
             body_text = "\n".join(t for _, t in items)
             ja_residue = find_ja_residue(body_text)
-            report["stages"]["residue"] = {"errors": len(ja_residue)}
+            report["stages"]["residue"]["errors"] = _residue_finding_items(ja_residue)
             if ja_residue:
                 for f in ja_residue[:20]:
                     print(f"[commit] 残渣: {f}")
+                det = _fmt_items([str(f.value) for f in ja_residue])
                 _write_commit_report(snap_dir, report)
-                print(f"[commit] 中止。残渣 {len(ja_residue)} 件を修正してください。", file=sys.stderr)
+                print(f"[commit] 中止。残渣 {len(ja_residue)} 件: {det}。"
+                      f"次の一手: 該当箇所を中国語の訳文へ直して再実行してください",
+                      file=sys.stderr)
                 out["reason"] = "residue"
                 return 1
             print(f"[commit] 残渣検査: PASS")
@@ -3173,11 +3278,8 @@ def _finalize_block(work: Path, chapter: str, block: str,
         n_residue = 0
         r_stage = report["stages"].get("residue", {})
         if isinstance(r_stage, dict):
-            cnt = r_stage.get("candidates", 0)
-            n_residue = len(cnt) if isinstance(cnt, list) else int(cnt)
-        if src == "ja" and dst == "zh":
-            cnt = r_stage.get("errors", 0)
-            n_residue = len(cnt) if isinstance(cnt, list) else int(cnt)
+            key = "errors" if (src == "ja" and dst == "zh") else "candidates"
+            n_residue = _report_count(r_stage.get(key))
 
         verb = "改訂" if revise else "確定"
         print(f"[commit] {cid}/{bid} を{verb} (commit_id={draft_hash}, {elapsed:.1f}s)")
@@ -3194,6 +3296,9 @@ def _finalize_block(work: Path, chapter: str, block: str,
             _write_commit_report(snap_dir, report)
         out["reason"] = "exception"
         return 1
+    finally:
+        # B1b: ログ複製を止め、stdout/stderr を元へ戻す（例外時も必ず）。
+        _stop_output_tee(tee_token)
 
 
 def _generate_next_context(work: Path, dst: str) -> None:
@@ -3223,6 +3328,135 @@ def _write_commit_report(snap_dir: Path, report: dict) -> None:
     import json
     report_p = snap_dir / "report.json"
     report_p.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# commit 失敗明細の可観測性（#73: report.json の明細配列 / #74: 中止メッセージ）
+# ---------------------------------------------------------------------------
+
+
+def _align_finding_items(findings: list) -> list[dict]:
+    """align の fatal / confirm を report.json に残す明細（段落付き）へ変換する（#73）。"""
+    return [{"kind": f.kind, "paragraph": f.para, "detail": f.detail}
+            for f in findings]
+
+
+def _residue_finding_items(findings: list) -> list[dict]:
+    """残渣検査の検出を report.json に残す明細（語・行・修正案）へ変換する（#73）。"""
+    return [{"value": f.value, "rule": f.rule, "line": f.line,
+             "context": f.context[:80], "fix": f.safe_fix or ""}
+            for f in findings]
+
+
+def _vocab_stop_items(findings: list) -> list[dict]:
+    """辞書検査（vocab）で停止した検出語の明細へ変換する（#73）。"""
+    return [{"value": f.form, "kind": f.kind, "paragraph": f.paragraph,
+             "detail": f.detail} for f in findings]
+
+
+def _qa_failure_items(checks: dict) -> list[dict]:
+    """QA の不合格チェックを、検出語（found 配列）付きの明細へ変換する（#73）。"""
+    items: list[dict] = []
+    for k, v in checks.items():
+        if v.get("pass"):
+            continue
+        item: dict = {"check": k}
+        found = v.get("found")
+        if isinstance(found, list):
+            item["found"] = found
+        others = {kk: vv for kk, vv in v.items() if kk not in ("pass", "found")}
+        if others:
+            item["detail"] = others
+        items.append(item)
+    return items
+
+
+def _fmt_items(values: list[str], limit: int = 12) -> str:
+    """検出語・段落の一覧を「「A」、「B」ほかN件」の形にする（#74）。"""
+    shown = "、".join(f"「{v}」" for v in values[:limit])
+    if len(values) > limit:
+        shown += f" ほか{len(values) - limit}件"
+    return shown
+
+
+def _qa_brief(check: dict) -> str:
+    """QA 不合格チェックの検出語要約「（「A」、「B」…）」。found が無ければ空。"""
+    found = check.get("found")
+    if not isinstance(found, list) or not found:
+        return ""
+    words: list[str] = []
+    for x in found:
+        if isinstance(x, dict):
+            for key in ("value", "char", "name_src", "form", "text"):
+                if x.get(key):
+                    words.append(str(x[key]))
+                    break
+            else:
+                if x.get("para"):
+                    words.append(f"P{x['para']}")
+                elif "first" in x and "last" in x:
+                    words.append(f"P{x['first']}〜P{x['last']}")
+                else:
+                    words.append(str(x))
+        else:
+            words.append(str(x))
+    return f"（{_fmt_items(words)}）"
+
+
+class _TeeStream:
+    """write/flush を元のストリームとログファイルの両方へ流すラッパ（#73 B1b）。"""
+
+    def __init__(self, stream, fh):
+        self._stream = stream
+        self._fh = fh
+
+    def write(self, s):
+        try:
+            self._fh.write(s)
+        except Exception:
+            pass
+        return self._stream.write(s)
+
+    def flush(self):
+        for obj in (self._fh, self._stream):
+            try:
+                obj.flush()
+            except Exception:
+                pass
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _start_output_tee(path: Path):
+    """stdout/stderr の出力を path にも複製し始める（#73 B1b）。
+
+    戻り値は _stop_output_tee に渡すトークン。開けなければ None（本処理は続行）。
+    """
+    try:
+        fh = open(path, "a", encoding="utf-8")
+    except OSError:
+        return None
+    orig_out, orig_err = sys.stdout, sys.stderr
+    sys.stdout = _TeeStream(orig_out, fh)
+    sys.stderr = _TeeStream(orig_err, fh)
+    return (orig_out, orig_err, fh)
+
+
+def _stop_output_tee(token) -> None:
+    """_start_output_tee の複製を止め、ログファイルを閉じる（例外時も必ず呼ぶ）。"""
+    if not token:
+        return
+    orig_out, orig_err, fh = token
+    if isinstance(sys.stdout, _TeeStream):
+        sys.stdout = orig_out
+    if isinstance(sys.stderr, _TeeStream):
+        sys.stderr = orig_err
+    try:
+        fh.flush()
+        fh.close()
+    except Exception:
+        pass
 
 
 def _load_toml_safe(path: Path) -> dict | None:
@@ -3310,38 +3544,52 @@ def _list_audited_blocks(work: Path) -> list[tuple[str, str]]:
 
 
 def _scrape_commit_reports(work: Path, blocks: list[tuple[str, str]]) -> list[dict]:
-    """各確定ブロックの report.json を _work/commit/ から収集。"""
+    """各確定ブロックの report.json を _work/commit/ から収集する。
+
+    ブロックごとに**最新タイムスタンプのスナップショット1件のみ**を読む（#75）。
+    スナップショット名は <timestamp>_<cid>_<bid>（timestamp は %Y%m%d_%H%M%S_%f の
+    固定幅）なので、名前の辞書順最大＝最新。過去の失敗スナップショットを拾い続けると
+    解消済みの指摘が review に残り続けるため、最新以外は参照しない。
+    """
     reports: list[dict] = []
     commit_dir = work / "output" / "_work" / "commit"
     if not commit_dir.is_dir():
         return reports
     for cid, bid in blocks:
-        # 命名パターン: <timestamp>_<cid>_<bid> を含むサブディレクトリを検索
-        for entry in sorted(commit_dir.iterdir()):
+        # 命名パターン: <timestamp>_<cid>_<bid> のサブディレクトリのうち最新のみ
+        latest: Path | None = None
+        for entry in commit_dir.iterdir():
             if not entry.is_dir():
                 continue
             if not entry.name.endswith(f"_{cid}_{bid}"):
                 continue
-            rp = entry / "report.json"
-            if rp.is_file():
-                try:
-                    data = json.loads(rp.read_text(encoding="utf-8"))
-                    data["_block"] = f"{cid}/{bid}"
-                    reports.append(data)
-                except Exception:
-                    pass
+            if latest is None or entry.name > latest.name:
+                latest = entry
+        if latest is None:
+            continue
+        rp = latest / "report.json"
+        if rp.is_file():
+            try:
+                data = json.loads(rp.read_text(encoding="utf-8"))
+                data["_block"] = f"{cid}/{bid}"
+                reports.append(data)
+            except Exception:
+                pass
     return reports
 
 
 def _extract_machine_findings(reports: list[dict]) -> list[dict]:
-    """report.json の stages から確認履歴（confirm / residue）を抽出。"""
+    """report.json の stages から確認履歴（confirm / residue）を抽出。
+
+    件数の欄は明細配列（新形式・#73）と数値（旧形式）の両方を読める。
+    """
     findings: list[dict] = []
     for r in reports:
         stages = r.get("stages", {})
         align = stages.get("align", {})
         if isinstance(align, dict):
-            confs = align.get("confirm_unacked", 0)
-            if isinstance(confs, int) and confs > 0:
+            confs = _report_count(align.get("confirm_unacked"))
+            if confs > 0:
                 findings.append({
                     "block": r.get("_block", ""),
                     "kind": "confirm未ack",
@@ -3349,15 +3597,15 @@ def _extract_machine_findings(reports: list[dict]) -> list[dict]:
                 })
         residue = stages.get("residue", {})
         if isinstance(residue, dict):
-            cands = residue.get("candidates", 0)
-            if isinstance(cands, int) and cands > 0:
+            cands = _report_count(residue.get("candidates"))
+            if cands > 0:
                 findings.append({
                     "block": r.get("_block", ""),
                     "kind": "残渣候補",
                     "count": cands,
                 })
-            errs = residue.get("errors", 0)
-            if isinstance(errs, int) and errs > 0:
+            errs = _report_count(residue.get("errors"))
+            if errs > 0:
                 findings.append({
                     "block": r.get("_block", ""),
                     "kind": "残渣エラー",
@@ -3917,9 +4165,9 @@ def main() -> None:
     if args.command == "status":
         raise SystemExit(cmd_status(work))
     elif args.command == "lint":
-        raise SystemExit(cmd_lint(work, Path(args.delta) if args.delta else None))
+        raise SystemExit(cmd_lint(work, resolve_delta_path(work, args.delta) if args.delta else None))
     elif args.command == "analyze-commit":
-        raise SystemExit(cmd_analyze_commit(work, Path(args.delta),
+        raise SystemExit(cmd_analyze_commit(work, resolve_delta_path(work, args.delta),
                                             force_residue=args.force_residue,
                                             allow_protected_overwrite=args.allow_protected_overwrite))
     elif args.command == "prepare":

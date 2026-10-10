@@ -36,3 +36,19 @@ updated_at = "2026-10-03T12:00:00Z"
 # status = "candidate"
 # version = 1
 # evidence = ["ch001/b2"]
+
+# === 命名方針（[naming_policy]。任意） ===
+# 固有名の扱いを1箇所に記録する（lock_prep の「要確認」はここが記録されると消える）。
+#   style      — transliterate（音訳・カタカナ）/ sinitic（漢語のまま）/ mixed（併用）。人名用
+#   codename   — katakana（カタカナ英語）/ sinitic（漢語のまま）/ keep（原語のまま）。
+#                コードネーム（原文の「代号」）専用。style とは別キー
+#   scope      — work / series（人名の裁定は両作品に同時適用される前提のため series を推奨）
+#   decided_at — 決定日時（ISO 8601 UTC）
+#   note       — 理由・言語圏の系統
+#
+# [naming_policy]
+# style = "mixed"
+# codename = "katakana"
+# scope = "series"
+# decided_at = "2026-10-10T00:00:00Z"
+# note = "人名は字面+初出ルビ、コードネームはカタカナ英語（魔法少女ものの慣行）"

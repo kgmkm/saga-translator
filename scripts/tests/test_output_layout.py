@@ -70,7 +70,8 @@ def _run_assemble(work: Path, *extra: str) -> str:
 
 
 class TestSingleChapterOutputLayout(unittest.TestCase):
-    """①②③④⑥: 単章は全文を出さず、複数章は従来どおり両方、--keep-full で互換。目次は常に生成。"""
+    """①②③④⑥: 全文・対訳は単章でも既定で出力（G25/G26）。--no-full / --no-parallel で
+    抑制でき、--keep-full / --parallel は互換のため受理（結果は既定と同じ）。目次は常に生成。"""
 
     def setUp(self):
         self.td = Path(tempfile.mkdtemp())
@@ -78,18 +79,28 @@ class TestSingleChapterOutputLayout(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.td, ignore_errors=True)
 
-    def test_single_chapter_skips_full_and_keeps_chapter(self):
-        # ① 単章: ch001_ja.md のみ。全文_訳文.md は出ず、完成記録にも載らない
+    def test_single_chapter_emits_full_by_default(self):
+        # ① 単章: 既定で章ファイルと全文の両方が出る（G25。旧仕様は章ファイルのみ）
         work = _make_work(self.td)
         out = _run_assemble(work)
         o = work / "output"
         self.assertTrue((o / "ch001_ja.md").is_file())
-        self.assertFalse((o / "全文_訳文.md").exists())
-        self.assertIn("--keep-full", out)
+        self.assertTrue((o / "全文_訳文.md").is_file())
         man = _lib.load_structured(work / "manifest")
         outputs = list(man.get("assembled_outputs") or [])
         self.assertIn("output/ch001_ja.md", outputs)
-        self.assertNotIn("output/全文_訳文.md", outputs)
+        self.assertIn("output/全文_訳文.md", outputs)
+
+    def test_no_full_suppresses_full_for_single_chapter(self):
+        # ①' --no-full: 単章は全文を出さない（章ファイルのみ。重複回避の逃げ道）
+        work = _make_work(self.td)
+        out = _run_assemble(work, "--no-full")
+        o = work / "output"
+        self.assertTrue((o / "ch001_ja.md").is_file())
+        self.assertFalse((o / "全文_訳文.md").exists())
+        self.assertIn("--no-full", out)
+        man = _lib.load_structured(work / "manifest")
+        self.assertNotIn("output/全文_訳文.md", list(man.get("assembled_outputs") or []))
 
     def test_multi_chapter_outputs_chapters_and_full(self):
         # ② 複数章: 従来どおり章ファイルと全文の両方（全文には両章が入る）
@@ -108,8 +119,8 @@ class TestSingleChapterOutputLayout(unittest.TestCase):
         man = _lib.load_structured(work / "manifest")
         self.assertIn("output/全文_訳文.md", list(man.get("assembled_outputs") or []))
 
-    def test_keep_full_restores_both_for_single_chapter(self):
-        # ③ --keep-full: 単章でも従来どおり両方（全文を参照する既存の運用・テストの互換）
+    def test_keep_full_flag_still_accepted_for_compat(self):
+        # ③ --keep-full: 互換のため受理（既定で全文が出るため結果は同じ）
         work = _make_work(self.td)
         _run_assemble(work, "--keep-full")
         o = work / "output"
@@ -129,17 +140,24 @@ class TestSingleChapterOutputLayout(unittest.TestCase):
         self.assertIn("# 合成作品（改題）", toc)
         self.assertIn("[訳題ch001](ch001_ja.md)", toc)
 
-    def test_parallel_single_chapter_skips_full_parallel(self):
-        # ⑥ 対訳も同方針: 単章は ch001_parallel.md のみで全文_対訳.md は出ない
+    def test_single_chapter_parallel_full_by_default(self):
+        # ⑥ 対訳は既定で章対訳＋全文対訳の両方（G26。旧仕様は --parallel か年齢記録でのみ）
         work = _make_work(self.td)
-        out = _run_assemble(work, "--parallel")
+        out = _run_assemble(work)
         o = work / "output"
         self.assertTrue((o / "ch001_parallel.md").is_file())
+        self.assertTrue((o / "全文_対訳.md").is_file())
+
+    def test_no_parallel_suppresses_parallel_for_single_chapter(self):
+        # ⑥' --no-parallel: 対訳を出さない（抑制の逃げ道）
+        work = _make_work(self.td)
+        _run_assemble(work, "--no-parallel")
+        o = work / "output"
+        self.assertFalse((o / "ch001_parallel.md").exists())
         self.assertFalse((o / "全文_対訳.md").exists())
-        self.assertIn("--keep-full", out)
 
     def test_parallel_keep_full_for_single_chapter(self):
-        # ⑥ --keep-full 併用で全文対訳も従来どおり（対訳の互換）
+        # ⑥ 互換フラグ（--parallel）併用でも既定と同じ（対訳の互換）
         work = _make_work(self.td)
         _run_assemble(work, "--parallel", "--keep-full")
         o = work / "output"
