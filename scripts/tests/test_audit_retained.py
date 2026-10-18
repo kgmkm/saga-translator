@@ -249,10 +249,10 @@ class TestStatusAssembledState(unittest.TestCase):
         _run_assemble(work)
         code, out = _call_cmd(_cmd_status(), work)
         self.assertEqual(code, 0)
-        self.assertIn("完成（assemble 済み・中間物削除済み）", out)
+        self.assertIn("出力済み（assemble 済み・機械検査のみ。検収は未実施）", out)
         self.assertIn("assembled_at", out)
         self.assertIn("output/全文_訳文.md", out)
-        self.assertIn("次の作業: なし", out)
+        self.assertIn("次の作業: 検収", out)
         # 未完了 n ブロックの誤認を起こさない
         self.assertNotIn("翻訳 0/", out)
 

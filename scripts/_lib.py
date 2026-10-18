@@ -33,6 +33,11 @@ block_target_chars = 4000  # ブロック分割の目標文字数(段落境界�
 
 [qa]
 strict_paragraph = true    # 段落数不一致を不合格にする
+copy_check = "fatal"       # 未翻訳コピーの検査: fatal / warn / off
+copy_kana_min = 0.10       # 段落のカナ比率の下限（原文20字以上の段落のみ）
+copy_ngram_max = 0.50      # 原文4-gramの含有率の上限
+copy_min_src_chars = 20    # 判定する原文段落の最小文字数
+copy_block_kana_min = 0.25 # ブロック全体のカナ比率の下限
 """
 
 
@@ -921,15 +926,31 @@ def compile_chapter_re(lang: str | None = None) -> re.Pattern:
 CHAPTER_RE = compile_chapter_re(None)
 
 
-def find_chapters(paras: list[str], lang: str | None = None) -> list[tuple[str | None, int, int]]:
+def find_chapters(paras: list[str], lang: str | None = None,
+                  numeric: str = "auto") -> list[tuple[str | None, int, int]]:
     """段落列から章の区間を検出。戻り値: [(タイトル, 開始idx, 終了idx)]
-    lang を渡すとその言語packの見出しだけ足す。未指定なら全packを足す(後方互換)。"""
+
+    lang を渡すとその言語packの見出しだけ足す。未指定なら全packを足す(後方互換)。
+    numeric は数字だけの行（"1" "2" …）の扱い:
+      auto    — 他に章見出しが無いときだけ章見出しとみなす（既定。節番号の誤分割を防ぐ）
+      chapter — 常に章見出しとみなす（旧挙動）
+      section — 常に章見出しとみなさない
+    """
     heading = compile_chapter_re(lang)
-    heads: list[tuple[str, int]] = []
+    real: list[tuple[str, int]] = []
+    numeric_heads: list[tuple[str, int]] = []
     for i, p in enumerate(paras):
         first_line = p.split("\n", 1)[0]
-        if heading.match(first_line) or NUM_LINE.match(first_line):
-            heads.append((first_line.strip(), i))
+        if heading.match(first_line):
+            real.append((first_line.strip(), i))
+        elif NUM_LINE.match(first_line):
+            numeric_heads.append((first_line.strip(), i))
+    if numeric == "chapter":
+        heads = sorted(real + numeric_heads, key=lambda x: x[1])
+    elif numeric == "section":
+        heads = real
+    else:  # auto
+        heads = real if real else numeric_heads
     if not heads:
         return [(None, 0, len(paras))]
     chapters = []
@@ -939,6 +960,73 @@ def find_chapters(paras: list[str], lang: str | None = None) -> list[tuple[str |
     if heads[0][1] > 0:
         chapters.insert(0, (None, 0, heads[0][1]))
     return chapters
+
+
+def _para_hash(text: str) -> str:
+    """重複判定用の段落ハッシュ（空白差を無視。短すぎる段落は空文字で除外）。"""
+    import hashlib
+    norm = "".join(text.split())
+    if len(norm) < 10:
+        return ""
+    return hashlib.sha1(norm.encode("utf-8")).hexdigest()
+
+
+def detect_duplicate_work(paras: list[str],
+                          chapters: list[tuple[str | None, int, int]],
+                          min_ratio: float = 0.10,
+                          contain_min: float = 0.80,
+                          min_paras: int = 20) -> dict:
+    """本文の二重取り込み（有挿絵版と無挿絵版の連結など）を検出する。
+
+    戻り値の dict:
+      duplicate     — 重複ありと判定したか
+      ratio         — 段落ハッシュの重複率（0.0〜1.0）
+      cut_para      — 後半の重複を落とす場合の段落 index（None なら自動切断しない）
+      cut_chapter   — 切断点の章 index（None なら自動切断しない）
+      repeated      — 反復している章題のリスト
+      containment   — 後半のうち前半に存在した段落の割合
+      reason        — 人が読む短い理由
+
+    章題の並びが「前半の繰り返し」になっていて、かつ後半の段落の contain_min
+    以上が前半にも存在するときだけ cut_para を返す（誤切断を避ける）。
+    """
+    total = [_para_hash(p) for p in paras]
+    total = [h for h in total if h]
+    if len(total) < min_paras:
+        return {"duplicate": False, "ratio": 0.0, "cut_para": None,
+                "cut_chapter": None, "repeated": [], "containment": 0.0, "reason": ""}
+    ratio = 1.0 - (len(set(total)) / len(total))
+
+    titled = [(i, (c[0] or "").strip()) for i, c in enumerate(chapters) if (c[0] or "").strip()]
+    titles = [t for _i, t in titled]
+    cut_para = cut_chapter = None
+    repeated: list[str] = []
+    containment = 0.0
+    if len(titles) >= 2:
+        for k in range(1, len(titles)):
+            if titles[k:] != titles[:len(titles) - k]:
+                continue
+            head_start = chapters[titled[0][0]][1]
+            cut = chapters[titled[k][0]][1]
+            head = {_para_hash(p) for p in paras[head_start:cut]} - {""}
+            tail = {_para_hash(p) for p in paras[cut:]} - {""}
+            if not tail:
+                continue
+            containment = len(head & tail) / len(tail)
+            if containment >= contain_min:
+                cut_para, cut_chapter = cut, titled[k][0]
+                repeated = titles[:k]
+                break
+
+    duplicate = ratio >= min_ratio
+    reason = ""
+    if duplicate:
+        reason = f"段落の重複率 {ratio:.0%}"
+        if cut_para is not None:
+            reason += f"・後半の {containment:.0%} が前半と同一"
+    return {"duplicate": duplicate, "ratio": ratio, "cut_para": cut_para,
+            "cut_chapter": cut_chapter, "repeated": repeated,
+            "containment": containment, "reason": reason}
 
 
 def make_blocks(paras: list[str], target_chars: int) -> list[tuple[int, int]]:

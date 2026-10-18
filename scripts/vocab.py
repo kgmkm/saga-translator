@@ -40,6 +40,7 @@ __all__ = [
     "VocabEntry",
     "VocabFinding",
     "check_draft",
+    "house_style_misplaced",
     "house_style_paths",
     "load_vocab",
 ]
@@ -58,6 +59,19 @@ _IMAGE_LINK = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 
 
 # ── 探索先 ──────────────────────────────────────────────────────────────
+
+def house_style_misplaced(work) -> Path | None:
+    """`<work>/house_style.toml` 直下にだけ存在する誤配置を検出する。
+
+    ツールが読むのは `<work>/_house/house_style.toml` と親の `_house` だけ。
+    直下のファイルは黙って無視されるため、呼び出し側が警告を出すための判定。
+    誤配置が無ければ None。
+    """
+    root = Path(work) / "house_style.toml"
+    if root.is_file() and not house_style_paths(work):
+        return root
+    return None
+
 
 def house_style_paths(work) -> list[Path]:
     """house_style.toml の共通探索先（#19）。

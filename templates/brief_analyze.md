@@ -12,6 +12,8 @@
    ```toml
    block = "{{chapter}}/{{block}}"
 
+   # 新規の人物は全欄を書く。既存の人物は「変える欄だけ」を書き、
+   # 値が変わらない欄は書かない（同じ値の再送は無視される）
    [[characters_delta]]
    match_key = "name_src"
    match_value = "{{character_name_src}}"
@@ -42,6 +44,7 @@
 
 ## ルール
 - 既存の訳語（name_ja / term_ja）は変えない。変更したい場合は `proposed` に記す
+- 既存エントリには、変える欄だけを書く（同じ値の再送は無視され、差分が空になる）
 - 新規キャラ・用語は `proposed` を使わず直接 `updates` に書く
 - arcs は既存キャラの声の変化だけを書く（変化のない欄は省略）
 - 差分ファイルは `_work/` に置き、他の分析と衝突しない

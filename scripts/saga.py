@@ -468,6 +468,112 @@ def cmd_status(work: Path) -> int:
     return rc
 
 
+# ---------------------------------------------------------------------------
+# proposed サブコマンド（訳語変更の候補の一覧・承認・却下）
+# ---------------------------------------------------------------------------
+
+_PROPOSED_LINE_RE = re.compile(
+    r"^(?P<key>[A-Za-z_][A-Za-z0-9_]*): 「(?P<old>.*)」→「(?P<new>.*)」\s*$")
+
+
+def _proposed_entries(work: Path) -> list[tuple[str, dict, str, str]]:
+    """proposed が残っているエントリを (種別, エントリ, 訳語キー, 原語キー) で返す。"""
+    out: list[tuple[str, dict, str, str]] = []
+    for e in load_characters(work).get("characters") or []:
+        if str(e.get("proposed") or "").strip():
+            out.append(("characters", e, "name_ja", "name_src"))
+    for e in load_terms(work).get("terms") or []:
+        if str(e.get("proposed") or "").strip():
+            out.append(("terms", e, "term_ja", "term_src"))
+    return out
+
+
+def _find_proposed_in(data: dict, kind: str, name: str) -> dict | None:
+    """読み込んだ分析データの中から、指定名のエントリを返す（その場で書き換える）。"""
+    arr_key = "characters" if kind == "characters" else "terms"
+    ja_key, src_key = (("name_ja", "name_src") if kind == "characters"
+                       else ("term_ja", "term_src"))
+    for e in data.get(arr_key) or []:
+        if name in (str(e.get(ja_key) or ""), str(e.get(src_key) or "")):
+            return e
+    return None
+
+
+def _proposed_lines(entry: dict) -> list[str]:
+    return [ln for ln in str(entry.get("proposed") or "").splitlines() if ln.strip()]
+
+
+def _load_analysis_data(work: Path, kind: str) -> dict:
+    return load_characters(work) if kind == "characters" else load_terms(work)
+
+
+def _save_analysis_data(work: Path, kind: str, data: dict) -> None:
+    save_toml(_analysis_path(work, kind), data)
+
+
+def cmd_proposed_list(work: Path) -> int:
+    rows = _proposed_entries(work)
+    if not rows:
+        print("[proposed] 滞留なし")
+        return 0
+    for kind, e, ja_key, src_key in rows:
+        name = e.get(ja_key) or e.get(src_key) or "?"
+        print(f"[proposed] {name} ({kind})")
+        for ln in _proposed_lines(e):
+            print(f"[proposed]   {ln}")
+    print("[proposed] 承認: saga.py proposed approve <work> --name <訳語> --key <キー>"
+          " ／ 却下: ... reject ...")
+    return 0
+
+
+def _apply_proposed(work: Path, name: str, key: str, approve: bool, reason: str) -> int:
+    # candidates: proposed を持つエントリだけを対象にする
+    for kind in ("characters", "terms"):
+        data = _load_analysis_data(work, kind)
+        entry = _find_proposed_in(data, kind, name)
+        if entry is not None and str(entry.get("proposed") or "").strip():
+            break
+        entry = None
+    if entry is None:
+        print(f"[proposed] エラー: proposed を持つエントリが見つかりません: {name}", file=sys.stderr)
+        return 1
+    lines = _proposed_lines(entry)
+    idx = None
+    parsed = None
+    for i, ln in enumerate(lines):
+        m = _PROPOSED_LINE_RE.match(ln)
+        if m and m.group("key") == key:
+            idx, parsed = i, m
+    if idx is None or parsed is None:
+        keys = sorted({m.group("key") for ln in lines if (m := _PROPOSED_LINE_RE.match(ln))})
+        print(f"[proposed] エラー: キー '{key}' の提案がありません（候補: {', '.join(keys) or 'なし'}）",
+              file=sys.stderr)
+        return 1
+    old, new = parsed.group("old"), parsed.group("new")
+    if approve:
+        entry[key] = new
+    del lines[idx]
+    if lines:
+        entry["proposed"] = "\n".join(lines)
+    else:
+        entry.pop("proposed", None)
+    _save_analysis_data(work, kind, data)
+    append_jsonl(_analysis_edits_path(work), {
+        "ts": _now_iso(), "via": "proposed-approve" if approve else "proposed-reject",
+        "match": name, "key": key, "old": old, "new": new, "reason": reason,
+    })
+    action = "承認" if approve else "却下"
+    print(f"[proposed] {action}: {name} / {key}")
+    if approve:
+        print(f"[proposed]   {key}: 「{old}」→「{new}」")
+        if key in ("name_ja", "term_ja") and old != new:
+            print(f"[proposed] 訳文へ伝播するには: "
+                  f"python3 scripts/rename_terms.py <work> --term {old} --to {new} --apply")
+    else:
+        print(f"[proposed]   提案を破棄しました（値は変更していません）")
+    return 0
+
+
 def _cmd_status_impl(work: Path) -> int:
     if not work.is_dir():
         print(f"[status] エラー: ディレクトリが見つかりません: {work}", file=sys.stderr)
@@ -485,6 +591,19 @@ def _cmd_status_impl(work: Path) -> int:
         print(f"[status] エラー: chapters が空です", file=sys.stderr)
         return 1
 
+    from vocab import house_style_misplaced
+    _mp = house_style_misplaced(work)
+    if _mp is not None:
+        print(f"[status] 警告: {_mp} は読まれません（探索先は _house/house_style.toml）。"
+              "`python3 scripts/house_style.py init <work>` で正しい場所に作れます")
+
+    # 本文の二重取り込み（split の重複検査）を承知で続行した作品は、毎回出す。
+    # 弱いモデルが「同じ話を2回訳す」事故を再発させないための常設の注意。
+    dup = (meta.get("work") or {}).get("duplicate_check") or {}
+    if dup.get("accepted") and float(dup.get("ratio") or 0) >= 0.10:
+        print(f"[status] 警告: 本文の重複率 {float(dup['ratio']):.0%} を承知で分割されています"
+              "（--accept-duplicate。同じ内容を二重に訳さないか確認）")
+
     assembled_at, assembled_outputs = _assembled_state(work)
     # 改名後の stale（派生物の再生成と検査記録の再検収が必要。P0-6・#22）。
     # 再 assemble の記録が stale より新しければ解消済みとして扱う。
@@ -494,7 +613,7 @@ def _cmd_status_impl(work: Path) -> int:
     if assembled_at:
         # assemble 済み: 中間物は削除済みで、ブロック別出力による進捗数は
         # 未完了に見えてしまう。完成状態を明示して誤認を防ぐ（#20）。
-        print(f"[status] work={work.name}: 完成（assemble 済み・中間物削除済み）")
+        print(f"[status] work={work.name}: 出力済み（assemble 済み・機械検査のみ。検収は未実施）")
         print(f"[status] assembled_at: {assembled_at}")
         if assembled_outputs:
             shown = ", ".join(assembled_outputs[:8]) + ("…" if len(assembled_outputs) > 8 else "")
@@ -505,8 +624,8 @@ def _cmd_status_impl(work: Path) -> int:
                 print(f"[status]   改名 stale ブロック: {_cap_list(stale_blocks)}")
             print("[status] 次の作業: 再 assemble（改名により stale）")
         else:
-            print("[status] 次の作業: なし（完成済み。改訂するには対象ブロックを"
-                  " commit --revise で確定し直して再 assemble）")
+            print("[status] 次の作業: 検収（saga.py review → 修正 → 再 assemble）。"
+                  "機械 PASS は品質の保証ではありません")
         return 0
 
     a_done, a_total, a_warns = _status_analysis(work, chapters)
@@ -1052,6 +1171,8 @@ def _apply_chars_delta(chars: list[dict], delta_list: list[dict],
                     continue
                 existing = entry.get(k)
                 if existing is not None and str(existing).strip() and k in protect_keys:
+                    if str(existing).strip() == str(v).strip():
+                        continue  # 同一値の再送は提案にしない（proposed の空回り防止）
                     if allow_protected_overwrite and k in PROTECTED_OVERWRITABLE_KEYS:
                         # 記述系キーの明示上書き（proposed に退避せず、監査記録に残す。P1-5）
                         _record_protected_overwrite(edits_out, match_value, k, existing, v)
@@ -1126,6 +1247,8 @@ def _apply_terms_delta(terms: list[dict], delta_list: list[dict],
             for k, v in updates.items():
                 existing = entry.get(k)
                 if existing is not None and str(existing).strip() and k in protect_keys:
+                    if str(existing).strip() == str(v).strip():
+                        continue  # 同一値の再送は提案にしない（proposed の空回り防止）
                     if allow_protected_overwrite and k in PROTECTED_OVERWRITABLE_KEYS:
                         # 記述系キーの明示上書き（proposed に退避せず、監査記録に残す。P1-5）
                         _record_protected_overwrite(edits_out, match_value, k, existing, v)
@@ -1693,6 +1816,7 @@ def _cmd_analyze_commit_impl(work: Path, delta_path: Path,
         # 対象の欄を選ぶ（find_cn_residue_fields）。
         check_active = _analysis_phase_active(work)
         payloads: list[tuple[Path, dict]] | None = None
+        content_changed = False
         logs: list[str] = []
         candidate_logs: list[str] = []
         candidates_changed = False
@@ -1711,6 +1835,17 @@ def _cmd_analyze_commit_impl(work: Path, delta_path: Path,
                       + f"次の一手: delta の記述を修正して再実行してください"
                       f"（何も保存されていません）", file=sys.stderr)
                 return 1
+            # 実際に内容が変わるか（同じ差分の再投入を「マージした」と
+            # 誤認させないため、保存前の内容と比較する）
+            content_changed = False
+            for _p, _d in payloads:
+                try:
+                    _old = _p.read_text(encoding="utf-8") if _p.is_file() else None
+                except OSError:
+                    _old = None
+                if _old != dump_toml(_d):
+                    content_changed = True
+                    break
             # 確認の候補（話者・異表記）: 差分適用後のデータと対象ブロックの
             # 原文から抽出して記録する（確定はしない。P0-4・#7）
             candidate_logs, candidates_changed = _record_voice_candidates(
@@ -1748,7 +1883,7 @@ def _cmd_analyze_commit_impl(work: Path, delta_path: Path,
                     file=sys.stderr,
                 )
 
-        if has_changes or candidates_changed:
+        if content_changed or candidates_changed:
             write_errors = _commit_analysis_payloads(payloads, work)
             if write_errors:
                 for e in write_errors:
@@ -1792,7 +1927,13 @@ def _cmd_analyze_commit_impl(work: Path, delta_path: Path,
         n = (len(delta.get("characters_delta", [])) + len(delta.get("terms_delta", []))
              + len(delta.get("plot_delta", [])))
         if has_changes:
-            print(f"[analyze-commit] 完了: {n} 件マージ（{len([l for l in logs if '→proposed' in l])} 件は proposed に退避）")
+            n_prop = len([l for l in logs if "→proposed" in l])
+            if content_changed:
+                print(f"[analyze-commit] 完了: 差分 {n} 件を適用"
+                      f"（{n_prop} 件は proposed に退避）")
+            else:
+                print(f"[analyze-commit] 完了: 差分 {n} 件はすべて既存値と同じでした"
+                      "（内容に変化なし・proposed 追加なし）")
         else:
             print("[analyze-commit] 完了: 差分なし（analysis_no_changes = true を記録）")
         if edits:
@@ -4089,6 +4230,14 @@ def main() -> None:
     p_status = sub.add_parser("status", help="進捗確認")
     p_status.add_argument("work", help="作品ディレクトリ")
 
+    # proposed
+    p_prop = sub.add_parser("proposed", help="訳語変更の候補（proposed）の一覧・承認・却下")
+    p_prop.add_argument("action", choices=("list", "approve", "reject"))
+    p_prop.add_argument("work", help="作品ディレクトリ")
+    p_prop.add_argument("--name", default=None, help="訳語（name_ja/term_ja または原語）")
+    p_prop.add_argument("--key", default=None, help="承認・却下する欄（name_ja, role 等）")
+    p_prop.add_argument("--reason", default="", help="判断理由（監査記録に残す）")
+
     # lint
     p_lint = sub.add_parser("lint", help="分析 TOML の日本語フィールド残渣の事前一覧（読み取り専用）")
     p_lint.add_argument("work", help="作品ディレクトリ")
@@ -4164,6 +4313,15 @@ def main() -> None:
 
     if args.command == "status":
         raise SystemExit(cmd_status(work))
+    elif args.command == "proposed":
+        if args.action == "list":
+            raise SystemExit(cmd_proposed_list(work))
+        if not args.name or not args.key:
+            print("エラー: approve/reject には --name と --key が必要です", file=sys.stderr)
+            raise SystemExit(1)
+        raise SystemExit(_apply_proposed(work, args.name, args.key,
+                                         approve=(args.action == "approve"),
+                                         reason=args.reason))
     elif args.command == "lint":
         raise SystemExit(cmd_lint(work, resolve_delta_path(work, args.delta) if args.delta else None))
     elif args.command == "analyze-commit":

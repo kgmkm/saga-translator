@@ -238,7 +238,7 @@ class TestStaleAndStatus(_Base):
         _set_manifest_field(self.work, "assembled_at", older)
         rcode, sout = _run(SAGA, ["status", str(self.work)])
         self.assertEqual(rcode, 0, sout)
-        self.assertIn("完成（assemble 済み・中間物削除済み）", sout)
+        self.assertIn("出力済み（assemble 済み・機械検査のみ。検収は未実施）", sout)
         self.assertIn("再 assemble が必要（改名により stale）", sout)
 
     def test_status_stale_prompt_cleared_by_newer_assemble(self):
@@ -251,7 +251,7 @@ class TestStaleAndStatus(_Base):
         rcode, sout = _run(SAGA, ["status", str(self.work)])
         self.assertEqual(rcode, 0, sout)
         self.assertNotIn("再 assemble が必要", sout)
-        self.assertIn("次の作業: なし", sout)
+        self.assertIn("次の作業: 検収", sout)
 
 
 # ---------------------------------------------------------------------------

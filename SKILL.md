@@ -1,7 +1,7 @@
 ---
 name: saga-translator
 description: Use when a novel file needs translating into Japanese or Simplified Chinese.
-version: 0.12.0
+version: 0.13.0
 author: saga-translator
 license: MIT
 tags: [translation, novel, japanese, pipeline]
@@ -74,6 +74,7 @@ python3 scripts/split_chapters.py <workdir>
 ```
 
 `chapters/chNNN.paras.toml` + `chapters_meta.toml`。
+本文が2回繰り返されている（挿絵版＋無挿絵版の連結など）と**何も書かずに停止**する（重複率10%以上）。`--dedupe` で後半を削除、`--accept-duplicate` で承知のうえ続行（記録し、status が毎回警告する）。数字だけの行は既定で節番号として扱い章にしない（他に章見出しが無いときだけ章。`--numeric-headings chapter|section` で変更）。
 
 ### 2.5. 初期訳語ロック
 
@@ -81,7 +82,7 @@ python3 scripts/split_chapters.py <workdir>
 python3 scripts/lock_prep.py <workdir>
 ```
 
-`_work/lock_prep.md` を読み、主要人物・用語を決める（命名方針は `house_style.toml` に記録する。雛形: `templates/house_style.toml`）。
+`_work/lock_prep.md` を読み、主要人物・用語を決める（命名方針は `_house/house_style.toml` に記録する。`python3 scripts/house_style.py init <workdir>` で雛形作成。直下の `house_style.toml` は**読まれない**ので init で移す）。
 
 ### 3. 分析（ローリング）
 
@@ -116,6 +117,7 @@ python3 scripts/saga.py commit <workdir> --chapter chNNN --block bN
 ```
 
 - commit は字形整形→段落対応(align)→QA→残渣検査→確定を一括。失敗理由だけ返す。
+- 原文を写しただけの訳文（未翻訳コピー）は commit で止まる（段落のカナ比率・原文4-gramの含有率。緩めるなら config `[qa] copy_check = "warn"/"off"`）。段落内の空行は1つの改行に正規化する（確定後の出力で段落対応が崩れるため）。
 - 文字数比の要確認は `python3 scripts/align.py ack` で裁定記録を残して通す。
 - コンテキストは既定で compact（対象に必要な分だけの人物表・用語集）。全件を出すには `python3 scripts/saga.py prepare … --full`（分析モードは full 固定）。
 - 確定時に `_work/ledger.toml` へ台帳を追記する（ルビ適用・用語初出は自動、使用済みオノマトペは `python3 scripts/saga.py ledger-ono <workdir> --form <表記> --block chNNN/bM [--para N]` で申告）。prepare は「消費済みルビ（再付与不可）・使用済みオノマトペ・用語の初出済み」を注入するので、消費済みの再使用は避ける。台帳は purge 対象外で、連作では carry で引き継ぐ。
@@ -146,7 +148,7 @@ python3 scripts/saga.py commit <workdir> --chapter chNNN --block bN
   voice_status = "confirmed"
   ```
 - 異表記候補の別人棄却: 分析差分に `dismiss_variant = "<相手の原語名>"`（対象キャラの match 指定と併せて。任意で `dismiss_reason`）を入れて `analyze-commit`。該当ペアは status の異表記候補から落ち、再検出しない。監査は `_work/analysis_edits.jsonl`（`via="variant-dismiss"`）。連作では carry で引き継ぐ。
-- 判断記録: 曖昧原文の判断理由は本文に書かず `output/_work/notes.md` へ追記する（任意・追記式。機械は読まない。再開・検収時に親が読む）。
+- 判断記録: 曖昧原文の判断理由は本文に書かず `_work/notes.md` へ追記する（任意・追記式。機械は読まない。purge されず、再開・検収時に親が読む）。
 
 ### 5. 進捗確認
 
@@ -154,7 +156,7 @@ python3 scripts/saga.py commit <workdir> --chapter chNNN --block bN
 python3 scripts/saga.py status <workdir>
 ```
 
-フラグと実体の突き合わせ。次にやることも出す。proposed 滞留（訳語変更の候補）も表示する（承認後は `rename_terms.py` で本採用）。
+フラグと実体の突き合わせ。次にやることも出す。proposed 滞留（訳語変更の候補）も表示する。一覧・承認・却下は `python3 scripts/saga.py proposed list|approve|reject <workdir> --name <訳語> --key <欄>`（承認後は `rename_terms.py` で訳文へ反映）。
 
 ### 6. 検収
 
@@ -162,7 +164,7 @@ python3 scripts/saga.py status <workdir>
 python3 scripts/saga.py review <workdir>
 ```
 
-機械指摘＋リスク箇所＋抜き取りのリストを `_work/review_waveN.md` に出力。
+機械指摘＋リスク箇所＋抜き取りのリストを `_work/review_waveN.md` に出力。**assemble は検収をしない**（機械検査を通っただけで品質は保証されない。status も「検収は未実施」と表示する）。
 
 標準手順:
 
@@ -178,7 +180,7 @@ python3 scripts/saga.py review <workdir>
 python3 scripts/assemble.py <workdir>
 ```
 
-assemble の入力は**確定済みのブロック**に限る（commit を経ない出力は渡さない）。全文（全文_訳文.md）と対訳（章対訳・全文_対訳.md）は既定で出力する（抑制は `--no-full` / `--no-parallel`）。完了時に成果物のバイト数と「残る中間物」の一覧を出す。空の組立て（確定済みブロックなし）は exit 1。改訂予定なら `--keep-source` 推奨（originals・translation_input・output/_work も残す）。assemble 後の改訂手順（chapters・ドラフトの復旧）は `references/troubleshooting.md` の「assemble 後の改訂路」を参照。
+assemble の入力は**確定済みのブロック**に限る（commit を経ない出力は渡さない）。全文（全文_訳文.md）と対訳（章対訳・全文_対訳.md）は既定で出力する（抑制は `--no-full` / `--no-parallel`）。完了時に成果物のバイト数と「残る中間物」の一覧を出す。空の組立て（確定済みブロックなし）は exit 1。原文を写しただけの訳文（未翻訳コピー）が残っていれば止まる（承知で通すなら `--allow-quality "理由"`。manifest に記録）。改訂予定なら `--keep-source` 推奨（originals・translation_input・output/_work も残す）。assemble 後の改訂手順（chapters・ドラフトの復旧）は `references/troubleshooting.md` の「assemble 後の改訂路」を参照。
 
 ## 鉄則（仕組みで担保できないもののみ）
 

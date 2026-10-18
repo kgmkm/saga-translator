@@ -283,9 +283,9 @@ class TestClassificationStability(unittest.TestCase):
         """MANUAL_CHAR の件数が正しい"""
         glyph_chars = [(s, d) for s, d, k in MANUAL_CHAR if k == "glyph"]
         meaning_chars = [(s, d) for s, d, k in MANUAL_CHAR if k == "meaning"]
-        self.assertEqual(len(glyph_chars), 7, f"got {glyph_chars}")
+        self.assertEqual(len(glyph_chars), 8, f"got {glyph_chars}")
         self.assertEqual(len(meaning_chars), 24, f"got {meaning_chars}")
-        self.assertEqual(len(MANUAL_CHAR), 31)
+        self.assertEqual(len(MANUAL_CHAR), 32)
 
 
 if __name__ == "__main__":

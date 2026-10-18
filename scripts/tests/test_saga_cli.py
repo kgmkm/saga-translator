@@ -266,7 +266,7 @@ class TestSagaAnalyzeCommit(unittest.TestCase):
                          plot=[{"block": "ch001/b1", "text": "张三登場。"}])
         code, out = self._run_ac(d)
         self.assertEqual(code, 0)
-        self.assertIn("3 件マージ", out)
+        self.assertIn("差分 3 件を適用", out)
         self._assert_analysis_field("role", "张三", "主人公")
         self._assert_terms_field("term_ja", "合成門派A", "合成門派A")
         self.assertTrue(self._assert_plot_block("ch001/b1"))

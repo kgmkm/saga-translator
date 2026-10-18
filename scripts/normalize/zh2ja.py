@@ -87,6 +87,7 @@ MANUAL_CHAR: list[tuple[str, str, str]] = [
     ("肏", "犯", "meaning"),       # 翻訳的置換
     ("缕", "一筋", "meaning"),     # 翻訳的置換
     ("滩", "水溜まり", "meaning"), # 翻訳的置換
+    ("张", "張", "glyph"),         # 簡体字→JIS字形（一般的な姓・動詞）
 ]
 
 
@@ -98,13 +99,36 @@ def is_jis(ch: str) -> bool:
     return True
 
 
+_OPENCC_NOTICE_SHOWN = False
+
+
+def opencc_available() -> bool:
+    """字形変換に使う opencc のカスタム設定が揃っているか。
+
+    パッケージが入っていても `s2t_custom` / `t2jp_custom` の設定が無い環境が
+    あるため、import だけでなく設定のロードまで確認する。テストのスキップ判定と
+    縮退通知の両方でこの関数を使う。
+    """
+    try:
+        from opencc import OpenCC
+
+        OpenCC("s2t_custom")
+        OpenCC("t2jp_custom")
+        return True
+    except Exception:
+        return False
+
+
 def _load_opencc():
+    global _OPENCC_NOTICE_SHOWN
     try:
         from opencc import OpenCC
 
         return OpenCC("s2t_custom"), OpenCC("t2jp_custom")
     except Exception as exc:  # pragma: no cover - 環境依存
-        print(f"[注意] opencc を使えないため手当て表のみで処理します: {exc}")
+        if not _OPENCC_NOTICE_SHOWN:
+            _OPENCC_NOTICE_SHOWN = True
+            print(f"[注意] opencc の字形変換を使えないため手当て表のみで処理します: {exc}")
         return None, None
 
 

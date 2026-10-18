@@ -65,6 +65,10 @@ class TestShapeGlyphImageProtection(unittest.TestCase):
         OPENCC_AVAILABLE,
         "opencc 任意依存（P1-4）: 恶→悪 は opencc による字形変換のため未導入環境ではスキップ",
     )
+    @unittest.skipUnless(
+        __import__("normalize.zh2ja", fromlist=["x"]).opencc_available(),
+        "opencc 任意依存（P1-4）: カスタム設定が無い環境ではスキップする",
+    )
     def test_image_path_preserved_body_glyph_via_opencc(self):
         """opencc あり: 本文中の簡体字（恶→悪）が整形され、パスは無傷。"""
         from normalize.zh2ja import shape_glyph

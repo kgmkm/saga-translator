@@ -801,6 +801,11 @@ def _stage_impl(
 ) -> None:
     if mode == "analysis":
         _warn_unnormalized_images(work)
+    from vocab import house_style_misplaced
+    _mp = house_style_misplaced(work)
+    if _mp is not None:
+        print(f"[context] 警告: {_mp} は読まれません（探索先は _house/house_style.toml）。"
+              "`python3 scripts/house_style.py init <work>` で正しい場所に作れます")
     _, dst = direction(work)
     suf = target_suffix(dst)
     meta_all = load_chapters_meta(work)

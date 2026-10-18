@@ -690,6 +690,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # house_style.toml (任意。共通探索先)
     hs = _load_house_style(work)
+    from vocab import house_style_misplaced
+    _mp = house_style_misplaced(work)
+    if _mp is not None:
+        print(f"[lock_prep] 警告: {_mp} は読まれません（探索先は _house/house_style.toml）。"
+              "`python3 scripts/house_style.py init <work>` で正しい場所に作れます")
 
     # 既存訳語
     existing = _build_existing_map(work)

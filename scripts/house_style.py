@@ -236,9 +236,11 @@ def cmd_build(args: Namespace) -> int:
 
 def cmd_validate(args: Namespace) -> int:
     """スキーマ適合を検査し、違反を行番号付きで報告。"""
-    path = Path(args.toml_path)
-    if not path.exists():
-        print(f"エラー: ファイルが見つかりません: {path}", file=sys.stderr)
+    path = _resolve_style_path(Path(args.toml_path))
+    if not path.is_file():
+        print(f"エラー: house_style.toml が見つかりません: {path}", file=sys.stderr)
+        print("ヒント: `python3 scripts/house_style.py init <work>` で作成できます。",
+              file=sys.stderr)
         return 1
 
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -295,7 +297,8 @@ def cmd_validate(args: Namespace) -> int:
             errors.append(f"rules[{i}]: 未知の status '{status}'（許容: {', '.join(sorted(VALID_STATUSES))}）")
         # scope が global 以外で target 必須
         if scope and scope != "global" and "target" not in rule:
-            errors.append(f"rules[{i}]: scope='{scope}' の場合 target が必須です")
+            errors.append(f"rules[{i}]: scope='{scope}' の場合 target が必須です"
+                          "（作品スコープなら作品 ID。例: target = \"<work_id>\"）")
         # evidence は配列
         ev = rule.get("evidence")
         if ev is not None and not isinstance(ev, list):
@@ -339,11 +342,68 @@ def cmd_validate(args: Namespace) -> int:
 
 # ── get ────────────────────────────────────────────────────────────────
 
+def _resolve_style_path(path: Path) -> Path:
+    """ファイルでも作品ディレクトリでも house_style.toml のパスを返す。
+
+    作品ディレクトリを渡された場合は `<work>/_house/house_style.toml` を優先し、
+    無ければ直下の `<work>/house_style.toml` を返す（後者は読まれない誤配置だが、
+    validate で中身を検査できるようにする）。
+    """
+    if path.is_dir():
+        for c in (path / "_house" / "house_style.toml", path / "house_style.toml"):
+            if c.is_file():
+                return c
+        return path / "_house" / "house_style.toml"
+    return path
+
+
+def cmd_init(args: Namespace) -> int:
+    """`<work>/_house/house_style.toml` を作る（直下の誤配置があれば中身を移す）。"""
+    work = Path(args.work).resolve()
+    if not work.is_dir():
+        print(f"エラー: 作品ディレクトリが見つかりません: {work}", file=sys.stderr)
+        return 1
+    dest = work / "_house" / "house_style.toml"
+    if dest.exists():
+        print(f"[house_style] 既にあります: {dest}", file=sys.stderr)
+        return 1
+    root = work / "house_style.toml"
+    if root.is_file():
+        text = root.read_text(encoding="utf-8")
+        src_label = f"{root}（直下の誤配置。内容を引き継ぎました）"
+    else:
+        tpl = Path(__file__).resolve().parent.parent / "templates" / "house_style.toml"
+        text = tpl.read_text(encoding="utf-8")
+        src_label = "テンプレート"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(text, encoding="utf-8")
+    print(f"[house_style] 作成: {dest}")
+    print(f"[house_style] 元: {src_label}")
+    try:
+        has_rules = "rules" in tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        print(f"[house_style] 作成しましたが、TOML として読めません: {e}", file=sys.stderr)
+        return 0
+    if not has_rules:
+        print("[house_style] ルールは未記入です（雛形のみ）。"
+              "[[rules]] を足してから validate してください。")
+        return 0
+    if cmd_validate(Namespace(toml_path=str(dest))) != 0:
+        print("[house_style] 作成は完了しましたが、スキーマ違反があります"
+              "（house_style.py validate で確認してください）", file=sys.stderr)
+        if root.is_file():
+            print(f'[house_style] ヒント: scope="work" のルールには '
+                  f'target = "{work.name}" を足してください', file=sys.stderr)
+    return 0
+
+
 def cmd_get(args: Namespace) -> int:
     """フィルタ抽出。マッチしたルールを TOML 形式で stdout に。"""
-    path = Path(args.toml_path)
-    if not path.exists():
-        print(f"エラー: ファイルが見つかりません: {path}", file=sys.stderr)
+    path = _resolve_style_path(Path(args.toml_path))
+    if not path.is_file():
+        print(f"エラー: house_style.toml が見つかりません: {path}", file=sys.stderr)
+        print("ヒント: `python3 scripts/house_style.py init <work>` で作成できます。",
+              file=sys.stderr)
         return 1
 
     data = tomllib.loads(path.read_bytes().decode("utf-8"))
@@ -379,6 +439,10 @@ def build_parser() -> ArgumentParser:
     bp.add_argument("saga_root", help="saga_root ディレクトリ（例: _saga/）")
     bp.add_argument("--output", "-o", help="出力先ファイル（省略時は stdout）")
 
+    # init
+    ip = sub.add_parser("init", help="<work>/_house/house_style.toml を作る")
+    ip.add_argument("work", help="作品ディレクトリ（manifest のある場所）")
+
     # validate
     vp = sub.add_parser("validate", help="スキーマ適合を検査")
     vp.add_argument("toml_path", help="house_style.toml へのパス")
@@ -399,6 +463,8 @@ def main() -> None:
     args = p.parse_args()
     if args.command == "build":
         sys.exit(cmd_build(args))
+    elif args.command == "init":
+        sys.exit(cmd_init(args))
     elif args.command == "validate":
         sys.exit(cmd_validate(args))
     elif args.command == "get":

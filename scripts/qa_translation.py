@@ -38,6 +38,16 @@ from _lib import (  # noqa: E402
 PMARK = re.compile(r"^\[P(\d+)\]\s*(.*)$")  # 段落番号は1桁から可（1000段未満の作品で [P1] 形式になるため）
 
 
+def _clean_para(lines: list[str]) -> str:
+    """段落本文を整える。
+
+    段落内の空行は、確定後の出力（空行区切りの md）で段落境界になり、
+    原文との1対1対応を壊す（対訳のずれ）。1つの改行に正規化する。
+    """
+    body = "\n".join(lines).strip()
+    return re.sub(r"\n[ \t]*(?:\n[ \t]*)+", "\n", body)
+
+
 def parse_draft(text: str) -> tuple[list[tuple[int, str]], list[str]]:
     """([番号, 訳文]) の列と問題リストを返す。"""
     items: list[tuple[int, str]] = []
@@ -48,12 +58,20 @@ def parse_draft(text: str) -> tuple[list[tuple[int, str]], list[str]]:
         m = PMARK.match(raw.strip())
         if m:
             if cur_num is not None:
-                items.append((cur_num, "\n".join(cur_text).strip()))
+                body = _clean_para(cur_text)
+                raw_body = "\n".join(cur_text).strip()
+                if body != raw_body:
+                    problems.append(f"[P{cur_num}] 段落内の空行を改行に正規化しました")
+                items.append((cur_num, body))
             cur_num, cur_text = int(m.group(1)), [m.group(2)]
         elif cur_num is not None:
             cur_text.append(raw)
     if cur_num is not None:
-        items.append((cur_num, "\n".join(cur_text).strip()))
+        body = _clean_para(cur_text)
+        raw_body = "\n".join(cur_text).strip()
+        if body != raw_body:
+            problems.append(f"[P{cur_num}] 段落内の空行を改行に正規化しました")
+        items.append((cur_num, body))
     return items, problems
 
 
@@ -236,6 +254,10 @@ def run_qa(work: Path, cid: str, bid: str, draft: Path, strict: bool = True) -> 
     if not seq_ok:
         ok = False
 
+    if problems:
+        # 段落内の空行の正規化など、合格は維持するが記録に残す事項。
+        report["checks"]["paragraph_format"] = {"pass": True, "notes": problems}
+
     empties = [n for n, t in items if not t.strip()]
     report["checks"]["empty_paragraphs"] = {"pass": not empties, "empty": empties}
     if empties:
@@ -331,6 +353,34 @@ def run_qa(work: Path, cid: str, bid: str, draft: Path, strict: bool = True) -> 
                 "malformed": ruby["malformed"],
             }
             if ruby["malformed"]:
+                ok = False
+
+    if dst == "ja":
+        # 忠実性: 原文を写しただけの訳文（未翻訳コピー）を検出する。
+        # 既定は fatal。config の [qa] copy_check = "warn" / "off" で緩められる。
+        _cfg_qa = load_config().get("qa") or {}
+        sev = str(_cfg_qa.get("copy_check", "fatal")).lower()
+        if sev != "off":
+            from fidelity import cfg_from, check_block as _fb_block, check_pair as _fb_pair, describe
+            fb = cfg_from(load_config())
+            src_map = {int(p["n"]): str(p.get("text") or "")
+                       for p in (load_paras(work, cid).get("paras") or [])}
+            found: list[dict] = []
+            for n, t in items:
+                r = _fb_pair(src_map.get(n, ""), t, fb)
+                if r["flag"]:
+                    found.append({"para": n, "reasons": r["reasons"],
+                                  "kana": round(r["kana"], 3),
+                                  "contain": round(r["contain"], 3),
+                                  "detail": describe(r),
+                                  "value": f"P{n} {describe(r)}"})
+            blk = _fb_block([(src_map.get(n, ""), t) for n, t in items], fb)
+            entry = {"pass": not found and not blk["flag"], "severity": sev,
+                     "found": found[:20]}
+            if blk["checked"]:
+                entry["block_kana"] = round(blk["kana"], 3)
+            report["checks"]["source_copy"] = entry
+            if (found or blk["flag"]) and sev == "fatal":
                 ok = False
 
     # [Pn] の境界を1つでも消す融合は原文と1対1の原則を壊すため、全て fatal にする

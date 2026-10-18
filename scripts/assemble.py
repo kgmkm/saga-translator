@@ -12,6 +12,7 @@ titles.toml(analysis/)が無い・空のときは停止する。原題のまま�
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from _lib import (  # noqa: E402
     all_blocks_emitted, atomic_write_text, block_paras, chapter_title, direction, load_chapters_meta,
+    load_config,
     load_paras, load_structured, load_titles, purge_source, save_chapters_meta, save_structured,
     target_suffix, target_title, utf8,
 )
@@ -164,6 +166,66 @@ def _titles_gate_problems(work: Path, meta: dict, titles: dict, dst: str, out: P
     return []
 
 
+def _fidelity_problems(work: Path, meta: dict, out: Path, suf: str) -> list[str]:
+    """確定済みブロックの訳文を原文と突き合わせ、未翻訳コピーを検出する。
+
+    ブロック単位の commit で通ったものだけを見る（未確定は対象外）。
+    段落数不一致は注意（訳文の編集で起きうる）にとどめ、コピー疑いだけを返す。
+    """
+    from fidelity import cfg_from, check_block, check_pair, describe
+    cfg = cfg_from(load_config())
+    problems: list[str] = []
+    for c in meta["chapters"]:
+        cid = c["id"]
+        try:
+            src_map = {int(p["n"]): str(p.get("text") or "")
+                       for p in (load_paras(work, cid).get("paras") or [])}
+        except (FileNotFoundError, ValueError):
+            continue  # 原文が無い章（purge 後など）は対象外
+        for b in c.get("blocks") or []:
+            f = out / cid / f"{b['id']}{suf}.md"
+            if not f.is_file():
+                continue
+            text = f.read_text(encoding="utf-8")
+            paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+            s0, s1 = b["paras"]
+            expected = s1 - s0 + 1
+            pairs: list[tuple[str, str]] = []
+            if len(paras) != expected:
+                # マーカー落とし後の再分割は原文の段落構成と一致しないことがある
+                # （原文段落内の改行・空行）。段落対応が崩れるので個別判定はせず、
+                # ブロック全体の判定だけを行う。
+                print(f"[assemble] 注意: {cid}/{b['id']} の段落数が原文と一致しません"
+                      f"（訳文 {len(paras)} / 原文 {expected}）。段落単位の検査は省略します")
+                # ブロック全体の判定には原文の連結を使う（対応は取らない）。
+                pairs = [(src_map.get(s0 + i, ""), t) for i, t in enumerate(paras)]
+            else:
+                for i, t in enumerate(paras):
+                    st = src_map.get(s0 + i, "")
+                    pairs.append((st, t))
+                    r = check_pair(st, t, cfg)
+                    if r["flag"]:
+                        problems.append(f"{cid}/{b['id']} P{s0 + i}: {describe(r)}")
+            blk = check_block(pairs, cfg)
+            if blk["flag"]:
+                problems.append(f"{cid}/{b['id']}: ブロックのカナ比率 {blk['kana']:.2f}"
+                                "（原文を写した疑い）")
+    return problems
+
+
+def _record_quality_waiver(work: Path, reason: str, problems: list[str]) -> None:
+    """--allow-quality の記録を manifest に残す（後から理由を追えるように）。"""
+    try:
+        man = load_structured(work / "manifest")
+    except FileNotFoundError:
+        man = {}
+    items = man.get("quality_waived") or []
+    items.append({"at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                  "reason": reason, "count": len(problems), "examples": problems[:5]})
+    man["quality_waived"] = items
+    save_structured(work / "manifest", man)
+
+
 def _image_ref_names(text: str) -> set[str]:
     """Markdown の画像参照（images/ 配下）からファイル名を集める。"""
     names: set[str] = set()
@@ -226,6 +288,8 @@ def main() -> None:
                     help="対訳を生成する（既定で有効。互換のため受理。抑制は --no-parallel）")
     ap.add_argument("--no-parallel", action="store_true",
                     help="対訳(章対訳・全文_対訳.md)を生成しない")
+    ap.add_argument("--allow-quality", metavar="REASON", default=None,
+                    help="忠実性検査の指摘を承知で続行する（理由を manifest に記録）")
     ap.add_argument("--allow-src-title", action="store_true",
                     help="titles.toml が無い/題未確定のとき原題のまま出力する（目次に「題未確定」を明示）")
     ap.add_argument("--keep-full", action="store_true",
@@ -273,6 +337,25 @@ def _stage_impl(args: argparse.Namespace) -> None:
         print("[assemble] 参照先の画像を output/images/ に置くか、"
               "訳文の参照を原文に合わせてから再実行してください。")
         sys.exit(1)
+    # 忠実性ゲート: 原文を写しただけの訳文を完成物に混ぜない。
+    # 既定は停止。--allow-quality "理由" のときだけ記録して続行する。
+    fid_problems = _fidelity_problems(work, meta, out, suf)
+    if fid_problems:
+        if args.allow_quality:
+            print(f"[assemble] --allow-quality: 忠実性の指摘 {len(fid_problems)} 件を承知で続行します")
+            for fp in fid_problems[:8]:
+                print(f"[assemble]   - {fp}")
+            _record_quality_waiver(work, args.allow_quality, fid_problems)
+        else:
+            print("[assemble] 忠実性検査で停止しました（未翻訳コピーの疑い）:")
+            for fp in fid_problems[:12]:
+                print(f"[assemble]   - {fp}")
+            if len(fid_problems) > 12:
+                print(f"[assemble]   …他 {len(fid_problems) - 12} 件")
+            print("[assemble] 対処: 該当ブロックを commit --revise で訳し直してください。"
+                  "原文が中国語のまま残る正当な段落なら"
+                  " --allow-quality \"理由\" で記録して続行できます。")
+            sys.exit(1)
     toc = [f"# {tr_title}", "", "# 目次", ""] if tr_title else ["# 目次", ""]
     full_tr: list[str] = []
     full_par: list[str] = []

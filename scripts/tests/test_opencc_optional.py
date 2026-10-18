@@ -23,15 +23,21 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPTS))
 
-try:  # opencc があれば字形変換結果を検査できる（導入環境でのみ実行）
+try:  # opencc があれば import 自体は可能（設定の有無は別）
     import opencc  # noqa: F401
     OPENCC_AVAILABLE = True
 except Exception:  # pragma: no cover - 環境依存
     OPENCC_AVAILABLE = False
 
+# パッケージ導入だけでは足りない。s2t_custom / t2jp_custom の設定まで揃って
+# 初めて字形変換の期待値が成立する（P1-4）。
+from normalize.zh2ja import opencc_available  # noqa: E402
+
+OPENCC_GLYPH_AVAILABLE = opencc_available()
+
 _SKIP_OPENCC = (
-    "opencc 任意依存（P1-4）: このテストは opencc の変換結果を検査するため、"
-    "未導入環境ではスキップする"
+    "opencc 任意依存（P1-4）: このテストは opencc の字形変換結果を検査するため、"
+    "カスタム設定が無い環境ではスキップする"
 )
 
 
@@ -77,10 +83,12 @@ class TestLoadOpenccFallback(unittest.TestCase):
         from normalize.zh2ja import _load_opencc
         with _BlockOpencc():
             _load_opencc()
-        if OPENCC_AVAILABLE:
+        if OPENCC_GLYPH_AVAILABLE:
             s2t, t2jp = _load_opencc()
             self.assertIsNotNone(s2t)
             self.assertIsNotNone(t2jp)
+        else:
+            self.skipTest(_SKIP_OPENCC)
 
 
 class TestFallbackGlyphPath(unittest.TestCase):
@@ -126,7 +134,7 @@ class TestFallbackGlyphPath(unittest.TestCase):
         self.assertNotIn("沉", unresolved)
 
 
-@unittest.skipUnless(OPENCC_AVAILABLE, _SKIP_OPENCC)
+@unittest.skipUnless(OPENCC_GLYPH_AVAILABLE, _SKIP_OPENCC)
 class TestOpenccPresentGlyphPath(unittest.TestCase):
     """opencc 導入環境での字形変換（悪 等）。未導入時は明示スキップ。"""
 
