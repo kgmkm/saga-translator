@@ -1,7 +1,7 @@
 ---
 name: saga-translator
 description: Use when a novel file needs translating into Japanese or Simplified Chinese.
-version: 0.15.0
+version: 0.16.0
 author: saga-translator
 license: MIT
 tags: [translation, novel, japanese, pipeline]
@@ -166,7 +166,7 @@ python3 scripts/saga.py status <workdir>
 python3 scripts/saga.py review <workdir>
 ```
 
-機械指摘＋リスク箇所＋抜き取りのリストを `_work/review_waveN.md` に出力。**assemble は検収をしない**（機械検査を通っただけで品質は保証されない。status も「検収は未実施」と表示する）。
+機械指摘＋リスク箇所＋抜き取りのリストを `_work/review_waveN.md` に出力。**assemble は検収をしない**（機械検査を通っただけで品質は保証されない。status は検収の記録が無ければ「検収は未実施」と表示する）。
 
 標準手順:
 
@@ -175,6 +175,7 @@ python3 scripts/saga.py review <workdir>
 3. `python3 scripts/rename_terms.py <workdir> --pairs-file fixes.txt --apply` で一括適用する
 4. `python3 scripts/saga.py status <workdir>` で再 assemble の要否を確認する
 5. assemble（手順 7）を実行する
+6. `python3 scripts/saga.py review <workdir> --wave N --done --note "何を見たか"` で検収の完了を記録する（status が「検収済み: wave N」と表示する。改名が検収より新しければ「再検収が必要」と出る）
 
 ### 7. 全ブロック確定後
 
