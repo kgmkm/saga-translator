@@ -29,6 +29,60 @@ from ingest import (  # noqa: E402
 )
 
 
+# 対訳（`> [Pnnn] 原文` + 空行 + 訳文）から訳文だけを取り出すためのマーカー
+_PAR_MARK = re.compile(r"(?m)^> \[P(\d+)\] ")
+
+
+def _collapse_blank_lines(text: str) -> str:
+    """段落内の空行を捨てて行だけを残す（段落の区切りは呼び出し側の空行2つ）。
+
+    commit の parse_draft は段落内の空行を1つの改行に正規化するが、旧版で確定した
+    ブロックは空行が残っている。全文・章ファイルがそれを段落境界と誤認すると
+    段落数が増える（原文と対応しなくなる）ため、対訳の [Pn] から境界を取り直す。
+    """
+    lines = [ln.rstrip() for ln in text.strip().splitlines()]
+    return "\n".join(ln for ln in lines if ln)
+
+
+def _ja_paragraphs_from_parallel(par_text: str,
+                                 src_by_n: dict[int, str]) -> list[str] | None:
+    """対訳ファイルから訳文を段落単位で取り出す。解釈できなければ None。
+
+    原文側はチャプターの原文と照合して取り除く（原文が空なら最初の空行で分割）。
+    """
+    parts = _PAR_MARK.split(par_text)
+    if len(parts) < 3:
+        return None
+    out: list[str] = []
+    for i in range(1, len(parts), 2):
+        n = int(parts[i])
+        body = parts[i + 1]
+        src = (src_by_n.get(n) or "").strip()
+        if src and body.startswith(src):
+            dst = body[len(src):]
+        else:
+            seg = body.split("\n\n", 1)
+            if len(seg) < 2:
+                return None
+            dst = seg[1]
+        text = _collapse_blank_lines(dst)
+        if not text:
+            return None
+        out.append(text)
+    return out
+
+
+def _block_para_count(block: dict) -> int:
+    """ブロックの段落数（paras 範囲の両端を含む）。"""
+    rng = block.get("paras") or []
+    if not isinstance(rng, (list, tuple)) or len(rng) != 2:
+        return 0
+    try:
+        return int(rng[1]) - int(rng[0]) + 1
+    except (TypeError, ValueError):
+        return 0
+
+
 def _is_toml_table(v) -> bool:
     """dump_toml がテーブル([key]/[[key]])として書く値かどうか。"""
     return isinstance(v, dict) or (
@@ -190,6 +244,15 @@ def _fidelity_problems(work: Path, meta: dict, out: Path, suf: str) -> list[str]
             paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
             s0, s1 = b["paras"]
             expected = s1 - s0 + 1
+            if len(paras) != expected:
+                # 段落内の空行で段落数が増えている場合は、対訳の [Pn] から境界を
+                # 取り直す（取れないときだけ下の注意に落とす）。
+                f_par = out / cid / f"{b['id']}_parallel.md"
+                if f_par.is_file():
+                    got = _ja_paragraphs_from_parallel(
+                        f_par.read_text(encoding="utf-8"), src_map)
+                    if got and len(got) == expected:
+                        paras = got
             pairs: list[tuple[str, str]] = []
             if len(paras) != expected:
                 # マーカー落とし後の再分割は原文の段落構成と一致しないことがある
@@ -368,6 +431,12 @@ def _stage_impl(args: argparse.Namespace) -> None:
         ch_tr: list[str] = []
         ch_par: list[str] = []
         blocks = c.get("blocks") or []
+        # 対訳の原文側を照合して取り除くための段落原文（段落境界の取り直しに使う）
+        try:
+            src_by_n = {int(p.get("n") or 0): str(p.get("text") or "")
+                        for p in (load_paras(work, cid).get("paras") or [])}
+        except (OSError, ValueError, KeyError):
+            src_by_n = {}
         n_done = 0
         # 章題の解決: 訳題が無い章は未確定。原題のまま出すのは --allow-src-title の経路だけ
         # （通常経路の未確定はゲートで停止済みで、残るのは原題を持たない章のみ）。
@@ -395,13 +464,20 @@ def _stage_impl(args: argparse.Namespace) -> None:
             if not f_tr.exists():
                 missing_blocks.append(f"{cid}/{b['id']}")
                 continue
-            ch_tr.append(f_tr.read_text(encoding="utf-8").strip())
+            block_text = f_tr.read_text(encoding="utf-8").strip()
             if make_parallel:
                 f_par = out / cid / f"{b['id']}_parallel.md"
                 if f_par.exists():
-                    ch_par.append(f_par.read_text(encoding="utf-8").strip())
+                    par_text = f_par.read_text(encoding="utf-8")
+                    # 対訳の [Pn] から段落境界を取り直す（段落内の空行で段落数が
+                    # 増えないように）。段落数が合わないときは従来どおり使う。
+                    got = _ja_paragraphs_from_parallel(par_text, src_by_n)
+                    if got and len(got) == _block_para_count(b):
+                        block_text = "\n\n".join(got)
+                    ch_par.append(par_text.strip())
                 else:
                     print(f"[assemble] WARN: 対訳がありません(スキップ): {cid}/{b['id']}")
+            ch_tr.append(block_text)
             n_done += 1
             done_any = True
         if ch_tr and n_done:

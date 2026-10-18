@@ -48,7 +48,13 @@ class TestFindOno(unittest.TestCase):
 
     def test_detects_mixed_katakana_form(self):
         # プ嗤 のような混成（カナ＋漢字1字）も拾う
-        self.assertIn("嗤", ono.find_ono("彼女はプ嗤と笑った"))
+        self.assertEqual(ono.find_ono("彼女はプ嗤と笑った"), ["プ嗤"])
+
+    def test_japanese_kanji_is_not_flagged(self):
+        # 嘶く・嗤う・滋養 は日本語の漢字（誤検出しない）
+        self.assertEqual(ono.find_ono("馬が嘶いた"), [])
+        self.assertEqual(ono.find_ono("彼は嗤った"), [])
+        self.assertEqual(ono.find_ono("滋養強壮"), [])
 
     def test_nested_forms_are_not_double_reported(self):
         self.assertEqual(ono.find_ono("噗嗤"), ["噗嗤"])
@@ -58,7 +64,7 @@ class TestFindOno(unittest.TestCase):
 
     def test_both_positions_are_reported(self):
         # 独立した位置に出ていれば短い形も拾う
-        self.assertEqual(ono.find_ono("噗嗤と嗤った"), ["噗嗤", "嗤"])
+        self.assertEqual(ono.find_ono("噗嗤とプ嗤った"), ["噗嗤", "プ嗤"])
 
 
 class TestCheckParas(unittest.TestCase):
