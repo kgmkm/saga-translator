@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _lib import direction, load_chapters_meta, target_suffix  # noqa: E402
+from _lib import direction, load_chapters_meta, load_paras, target_suffix  # noqa: E402
 
 __all__ = [
     "SIDE_SRC",
@@ -203,7 +203,61 @@ def _block_from_numbered(cid: str, bid: str, path: Path, origin: str) -> list[Bl
     return [BlockText(cid, bid, n, body, origin) for n, body in _numbered_items(text)]
 
 
-def _block_from_emitted(cid: str, bid: str, path: Path, block: dict) -> list[BlockText]:
+# 対訳（`> [Pnnn] 原文` + 空行 + 訳文）のマーカー
+_PAR_MARK = re.compile(r"(?m)^> \[P(\d+)\] ")
+
+
+def _paragraphs_from_parallel(path: Path, src_map: dict[int, str]) -> dict[int, str]:
+    """対訳ファイルから段落番号 → 訳文を取り出す（境界は [Pn] が正）。
+
+    原文側は `chapters` の原文と照合して取り除く（原文が空なら最初の空行で分割）。
+    段落内の空行は 1 つの改行に正規化する。
+    """
+    text = path.read_text(encoding="utf-8")
+    parts = _PAR_MARK.split(text)
+    out: dict[int, str] = {}
+    for i in range(1, len(parts), 2):
+        n = int(parts[i])
+        body = parts[i + 1]
+        src = (src_map.get(n) or "").strip()
+        if src and body.startswith(src):
+            dst = body[len(src):]
+        else:
+            seg = body.split("\n\n", 1)
+            if len(seg) < 2:
+                continue
+            dst = seg[1]
+        dst = "\n".join(ln.rstrip() for ln in dst.strip().splitlines() if ln.strip())
+        if dst:
+            out[n] = dst
+    return out
+
+
+def _recover_from_parallel(cid: str, bid: str, path: Path, lo: int, hi: int,
+                           work) -> list[BlockText] | None:
+    """段落内の空行で段落数が崩れたブロックを、対訳の [Pn] から組み直す。
+
+    段落数が宣言と一致しなければ None（従来どおり呼び出し側が止める）。
+    """
+    par_p = path.parent / f"{bid}_parallel.md"
+    if not par_p.is_file():
+        return None
+    if work is None:
+        work = path.parent.parent.parent  # <work>/output/<ch>/<b>.md
+    try:
+        src_map = {int(p.get("n") or 0): str(p.get("text") or "")
+                   for p in (load_paras(Path(work), cid).get("paras") or [])}
+    except (FileNotFoundError, ValueError, KeyError):
+        src_map = {}
+    got = _paragraphs_from_parallel(par_p, src_map)
+    need = set(range(lo, hi + 1))
+    if set(got) != need:
+        return None
+    return [BlockText(cid, bid, n, got[n], "parallel") for n in range(lo, hi + 1)]
+
+
+def _block_from_emitted(cid: str, bid: str, path: Path, block: dict,
+                        work=None) -> list[BlockText]:
     """確定ブロック出力を BlockText の列にする。
 
     段落番号はファイルに無いため、chapters_meta の宣言（paras 範囲）と
@@ -219,6 +273,10 @@ def _block_from_emitted(cid: str, bid: str, path: Path, block: dict) -> list[Blo
     lo, hi = int(rng[0]), int(rng[1])
     paras = _paragraphs(path.read_text(encoding="utf-8"))
     if len(paras) != hi - lo + 1:
+        # 段落内の空行が残った旧版の確定物。対訳の [Pn] から境界を取り直す。
+        recovered = _recover_from_parallel(cid, bid, path, lo, hi, work)
+        if recovered is not None:
+            return recovered
         raise TextScopeError(
             f"{cid}/{bid}: 段落数が宣言（paras {lo}-{hi}）と一致しない"
             f"（{len(paras)} 段落）: {path}")
@@ -280,7 +338,7 @@ def block_texts(work) -> list[BlockText]:
                     continue
                 emit_p = _emitted_path(work, cid, bid, suf)
                 if emit_p.is_file():
-                    out.extend(_block_from_emitted(cid, bid, emit_p, blk))
+                    out.extend(_block_from_emitted(cid, bid, emit_p, blk, work))
     else:
         done_dir = work / "output" / "_work" / "done"
         for p in sorted(done_dir.glob("*_numbered.md")):

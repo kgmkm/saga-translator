@@ -681,7 +681,16 @@ def _cmd_status_impl(work: Path) -> int:
     if assembled_at:
         # assemble 済み: 中間物は削除済みで、ブロック別出力による進捗数は
         # 未完了に見えてしまう。完成状態を明示して誤認を防ぐ（#20）。
-        print(f"[status] work={work.name}: 出力済み（assemble 済み・機械検査のみ。検収は未実施）")
+        rev = (meta.get("work") or {}).get("review") or {}
+        rev_done = str(rev.get("done_at") or "")
+        if rev_done and not (stale_at and str(stale_at) > rev_done):
+            print(f"[status] work={work.name}: 出力済み（assemble 済み・検収済み:"
+                  f" wave {rev.get('wave', '?')}（{rev_done[:10]}））")
+        elif rev_done:
+            print(f"[status] work={work.name}: 出力済み（assemble 済み・再検収が必要:"
+                  f" 改名が検収より新しい）")
+        else:
+            print(f"[status] work={work.name}: 出力済み（assemble 済み・機械検査のみ。検収は未実施）")
         print(f"[status] assembled_at: {assembled_at}")
         if assembled_outputs:
             shown = ", ".join(assembled_outputs[:8]) + ("…" if len(assembled_outputs) > 8 else "")
@@ -692,8 +701,12 @@ def _cmd_status_impl(work: Path) -> int:
                 print(f"[status]   改名 stale ブロック: {_cap_list(stale_blocks)}")
             print("[status] 次の作業: 再 assemble（改名により stale）")
         else:
-            print("[status] 次の作業: 検収（saga.py review → 修正 → 再 assemble）。"
-                  "機械 PASS は品質の保証ではありません")
+            if rev_done:
+                print("[status] 次の作業: なし（検収済み）。"
+                      "追加の改訂をするときは saga.py prepare/commit から")
+            else:
+                print("[status] 次の作業: 検収（saga.py review → 修正 → 再 assemble）。"
+                      "機械 PASS は品質の保証ではありません")
         return 0
 
     a_done, a_total, a_warns = _status_analysis(work, chapters)
@@ -4079,11 +4092,37 @@ def _canonical_translation_entries_degraded(work: Path) -> list:
     return entries
 
 
+def _mark_review_done(work: Path, wave: int, note: str = "") -> None:
+    """検収の完了を chapters_meta に記録する（status の表示に使う）。
+
+    検収リストの生成だけでは「読んだ」ことにならないため、明示操作のときだけ
+    記録する。改名で派生物が stale になったら status は再検収を促す。
+    """
+    try:
+        meta = load_chapters_meta(work)
+    except FileNotFoundError:
+        return
+    work_t = meta.get("work")
+    if not isinstance(work_t, dict):
+        work_t = {}
+        meta["work"] = work_t
+    work_t["review"] = {
+        "wave": int(wave),
+        "done_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "note": (note or "").strip() or None,
+    }
+    save_chapters_meta(work, meta)
+    print(f"[review] 検収の完了を記録しました（wave {wave}）")
+
+
 def cmd_review(work: Path, wave: int = 1, sample_ratio: float = 0.1,
-               json_output: bool = False) -> int:
-    """検収用の検収リストを生成。"""
+               json_output: bool = False, done: bool = False,
+               note: str = "") -> int:
+    """検収用の検収リストを生成（--done で検収の完了を記録）。"""
     started = time.time()
     rc = _cmd_review_impl(work, wave, sample_ratio, json_output)
+    if rc == 0 and done:
+        _mark_review_done(work, wave, note)
     _record_stage(work, "review", None, None, started, rc,
                   reason="success" if rc == 0 else "other")
     return rc
@@ -4355,6 +4394,9 @@ def main() -> None:
     p_rev.add_argument("--wave", type=int, default=1, help="第N波（既定: 1）")
     p_rev.add_argument("--sample-ratio", type=float, default=0.1, help="抜き取り割合（既定: 0.1）")
     p_rev.add_argument("--json", action="store_true", help="JSON 出力")
+    p_rev.add_argument("--done", action="store_true",
+                       help="検収の完了を記録する（status が「検収済み」と表示する）")
+    p_rev.add_argument("--note", default="", help="完了の記録に残す短いメモ")
 
     # commit
     p_com = sub.add_parser("commit", help="翻訳ブロックの確定")
@@ -4426,7 +4468,8 @@ def main() -> None:
     elif args.command == "review":
         raise SystemExit(cmd_review(work, wave=args.wave,
                                      sample_ratio=args.sample_ratio,
-                                     json_output=args.json))
+                                     json_output=args.json,
+                                     done=args.done, note=args.note))
     elif args.command == "commit":
         raise SystemExit(cmd_commit(work, args.chapter, args.block,
                                      args.model, args.prompt_version,
