@@ -1,7 +1,7 @@
 ---
 name: saga-translator
 description: Use when a novel file needs translating into Japanese or Simplified Chinese.
-version: 0.14.0
+version: 0.15.0
 author: saga-translator
 license: MIT
 tags: [translation, novel, japanese, pipeline]
@@ -83,7 +83,7 @@ python3 scripts/split_chapters.py <workdir>
 python3 scripts/lock_prep.py <workdir>
 ```
 
-`_work/lock_prep.md` を読み、主要人物・用語を決める（命名方針は `_house/house_style.toml` に記録する。`python3 scripts/house_style.py init <workdir>` で雛形作成。直下の `house_style.toml` は**読まれない**ので init で移す）。
+`_work/lock_prep.md` を読み、主要人物・用語を決める（命名方針は `_house/house_style.toml` に記録する。`python3 scripts/house_style.py init <workdir>` で雛形作成。直下の `house_style.toml` は**読まれない**ので init で移す）。候補は2〜6字の全部分文字列なので、等頻度の断片（長い名前の一部）・機能語の端・普通名詞は自動で落とす。作品固有のジャンル語が残る場合は `_house/house_style.toml` の `[naming] stopwords = ["語", …]` に足す。
 
 ### 3. 分析（ローリング）
 
@@ -119,6 +119,7 @@ python3 scripts/saga.py commit <workdir> --chapter chNNN --block bN
 
 - commit は字形整形→段落対応(align)→QA→残渣検査→確定を一括。失敗理由だけ返す。
 - 原文を写しただけの訳文（未翻訳コピー）は commit で止まる（段落のカナ比率・原文4-gramの含有率。緩めるなら config `[qa] copy_check = "warn"/"off"`）。段落内の空行は1つの改行に正規化する（確定後の出力で段落対応が崩れるため）。
+- 擬音が中国語のまま残った箇所（プ嗤・噗嗤 等）は**警告のみ**で commit は止めない（訳し分けは文脈依存で、止めると語の置換で本文が壊れる）。抑制は config `[qa] ono_check = "off"`。
 - 文字数比の要確認は `python3 scripts/align.py ack` で裁定記録を残して通す。
 - コンテキストは既定で compact（対象に必要な分だけの人物表・用語集）。全件を出すには `python3 scripts/saga.py prepare … --full`（分析モードは full 固定）。
 - 確定時に `_work/ledger.toml` へ台帳を追記する（ルビ適用・用語初出は自動、使用済みオノマトペは `python3 scripts/saga.py ledger-ono <workdir> --form <表記> --block chNNN/bM [--para N]` で申告）。prepare は「消費済みルビ（再付与不可）・使用済みオノマトペ・用語の初出済み」を注入するので、消費済みの再使用は避ける。台帳は purge 対象外で、連作では carry で引き継ぐ。

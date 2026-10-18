@@ -269,6 +269,10 @@ def _status_pending_analysis(work: Path) -> list[str]:
 
 # age_policy の検出記録（未裁定の件数を数える。detect/zh2ja.py と同名）
 AGE_POLICY_REPORT_TOML = "age_policy_report-[ネタバレあり].toml"
+AGE_POLICY_REPORT_MD = "age_policy_report-[ネタバレあり].md"
+
+#: 年齢方針の裁定を記録する house_style のルール id（spicy の age_policy と共通）
+AGE_POLICY_RULE_IDS = ("age_keep_author_setting",)
 
 
 def _count_unsettled_age_policy(work: Path) -> int:
@@ -281,6 +285,64 @@ def _count_unsettled_age_policy(work: Path) -> int:
         if isinstance(m, dict) and not str(m.get("ruling") or "").strip():
             n += 1
     return n
+
+
+def _age_policy_ruling(work: Path) -> tuple[str, bool] | None:
+    """house_style の locked な年齢方針ルール (id, 誤配置か)。無ければ None。
+
+    誤配置（作品直下の house_style.toml）でも裁定を取りこぼさないよう、その場合だけ
+    直下も読む（読み取りは警告つき。移動は house_style.py init）。
+    """
+    try:
+        from vocab import house_style_misplaced, house_style_paths
+    except Exception:
+        return None
+    paths = house_style_paths(work)
+    misplaced = False
+    if not paths:
+        mp = house_style_misplaced(work)
+        if mp is not None:
+            paths = [mp]
+            misplaced = True
+    for p in paths:
+        data = _load_toml_safe(p)
+        if not isinstance(data, dict):
+            continue
+        for r in data.get("rules") or []:
+            if not isinstance(r, dict):
+                continue
+            if (str(r.get("id") or "") in AGE_POLICY_RULE_IDS
+                    and str(r.get("status") or "") == "locked"):
+                return str(r.get("id")), misplaced
+    return None
+
+
+def _age_policy_summary(work: Path) -> str:
+    """status の age_policy 欄（裁定済み／未裁定 n件／記録の片寄り）。"""
+    ruling = _age_policy_ruling(work)
+    if ruling is not None:
+        rid, misplaced = ruling
+        tail = "・誤配置なので house_style.py init で移す" if misplaced else ""
+        return f"裁定済み（house_style: {rid}{tail}）"
+    toml_p = work / "analysis" / AGE_POLICY_REPORT_TOML
+    if toml_p.is_file():
+        n = _count_unsettled_age_policy(work)
+        return f"未裁定 {n}件" if n else "検出 0件（裁定不要）"
+    if (work / "analysis" / AGE_POLICY_REPORT_MD).is_file():
+        # .md だけある＝機械用の .toml が無い。0件ではなく「不明」と出す（静かなゼロを防ぐ）
+        return "記録あり（.toml が無いため件数不明。age_policy を再実行して .toml を作る）"
+    return "—（未実施）"
+
+
+def _age_policy_warning(work: Path) -> str | None:
+    """age_policy の記録が片寄っているときの警告（無ければ None）。"""
+    if (work / "analysis" / AGE_POLICY_REPORT_TOML).is_file():
+        return None
+    if not (work / "analysis" / AGE_POLICY_REPORT_MD).is_file():
+        return None
+    return ("analysis/" + AGE_POLICY_REPORT_MD + " はありますが " + AGE_POLICY_REPORT_TOML +
+            " がありません（未裁定件数を数えられません）。age_policy を再実行すると"
+            " .toml も作られます（本体 detect/zh2ja.py、spicy は age_policy.py）")
 
 
 def _count_unacked_confirms(work: Path, cid: str, bid: str) -> str:
@@ -427,7 +489,7 @@ def _status_resume_ticket(work: Path, meta: dict, chapters: list[dict],
         pending_s = f"confirm {conf}件・語彙 candidates {vocab_n}件（対象ブロックのドラフトから検査）"
     else:
         pending_s = "confirm —・語彙 candidates —（ドラフト未配置）"
-    out.append(f"[status]   未裁定: {pending_s} / age_policy {_count_unsettled_age_policy(work)}件（作品全体）")
+    out.append(f"[status]   未裁定: {pending_s} / age_policy {_age_policy_summary(work)}（作品全体）")
 
     # draft-append の受領済み範囲（未完了の記録がある場合だけ出す）
     pending_records = _list_incomplete_draft_parts(work)
@@ -599,6 +661,12 @@ def _cmd_status_impl(work: Path) -> int:
 
     # 本文の二重取り込み（split の重複検査）を承知で続行した作品は、毎回出す。
     # 弱いモデルが「同じ話を2回訳す」事故を再発させないための常設の注意。
+    # age_policy の記録が片寄っている（.md だけ）と未裁定件数が常に0に見える。
+    # assemble 済みの作品は再開票を出さないため、ここ（早期 return の前）で出す。
+    _age_warn = _age_policy_warning(work)
+    if _age_warn:
+        print(f"[status] 警告: {_age_warn}")
+
     dup = (meta.get("work") or {}).get("duplicate_check") or {}
     if dup.get("accepted") and float(dup.get("ratio") or 0) >= 0.10:
         print(f"[status] 警告: 本文の重複率 {float(dup['ratio']):.0%} を承知で分割されています"
@@ -3226,6 +3294,16 @@ def _finalize_block(work: Path, chapter: str, block: str,
             return 1
 
         print(f"[commit] QA: PASS")
+
+        # 擬音の訳し残しは警告のみ（止めない）。文脈で言い換えるのが正解のことが多く、
+        # 停止させると弱いモデルが語を置換して本文を壊す。
+        _ono = (qa_report["checks"].get("onomatopoeia") or {})
+        if _ono.get("found"):
+            from ono import describe as _ono_describe
+            print(f"[commit] 警告: 擬音が中国語のまま残っています"
+                  f"（{len(_ono['found'])}段落。止めません）: {_ono_describe(_ono['found'])}。"
+                  f"訳すか文脈に合わせて言い換えてください（訳語の目安は拡張スキルの"
+                  f"references/V7-onoma.md）")
 
         # 3.5) 旧形式ルビ 親{読み} の警告（G11/T20）。VFM {親|読み} ではないため
         #      台帳にも review の初出検査にも載らない。自動変換はしない（語中ルビの

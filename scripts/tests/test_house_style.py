@@ -232,6 +232,26 @@ class TestValidate(unittest.TestCase):
         )
         self.assertEqual(rc, 0)
 
+    def test_naming_stopwords_accepts_list(self):
+        """[naming] stopwords は文字列の配列なら通る。"""
+        p = self.td / "naming.toml"
+        p.write_text(_valid_toml([_valid_rule()]) +
+                     '\n[naming]\nstopwords = ["甲種", "乙種"]\n', encoding="utf-8")
+        rc = house_style.cmd_validate(
+            type("Args", (), {"toml_path": str(p)})()
+        )
+        self.assertEqual(rc, 0)
+
+    def test_naming_stopwords_rejects_string(self):
+        """[naming] stopwords が配列でない → 終了コード 1。"""
+        p = self.td / "naming_bad.toml"
+        p.write_text(_valid_toml([_valid_rule()]) +
+                     '\n[naming]\nstopwords = "甲種"\n', encoding="utf-8")
+        rc = house_style.cmd_validate(
+            type("Args", (), {"toml_path": str(p)})()
+        )
+        self.assertEqual(rc, 1)
+
     def test_missing_version_returns_1(self):
         """version 欠落 → 終了コード 1。"""
         p = self.td / "no_version.toml"

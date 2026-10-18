@@ -383,6 +383,18 @@ def run_qa(work: Path, cid: str, bid: str, draft: Path, strict: bool = True) -> 
             if (found or blk["flag"]) and sev == "fatal":
                 ok = False
 
+    # 擬音が中国語のまま残っていないか（**警告のみ**。pass は常に True）。
+    # 文脈で訳し分ける語なので fatal にしない（弱いモデルが置換で本文を壊す）。
+    try:
+        from ono import check_paras as _ono_check, enabled as _ono_enabled
+        if _ono_enabled(load_config()):
+            report["checks"]["onomatopoeia"] = {
+                "pass": True, "severity": "warn",
+                "found": _ono_check(items)[:30],
+            }
+    except Exception:
+        pass
+
     # [Pn] の境界を1つでも消す融合は原文と1対1の原則を壊すため、全て fatal にする
     # （2段落の融合も通過させない）。同一 [Pn] 内の複数行（歌・詩・折り返し）は
     # 境界を消さないため検出対象外。失敗理由の分類は timeline の
@@ -559,6 +571,9 @@ def _stage_impl(args: argparse.Namespace) -> None:
             extra = f" 旧形式(警告): {forms}"
         if k == "ruby_not_applied" and v.get("note"):
             extra = f" {v['note']}"
+        if k == "onomatopoeia" and v.get("found"):
+            from ono import describe as _ono_describe
+            extra = f" 警告(止めません): {_ono_describe(v['found'])}"
         print(f"[qa] {k}: {'PASS' if v['pass'] else 'FAIL'} {'' if v['pass'] else v}{extra}")
     print(f"[qa] result: {'PASS' if report['pass'] else 'FAIL'}")
     sys.exit(0 if report["pass"] else 1)

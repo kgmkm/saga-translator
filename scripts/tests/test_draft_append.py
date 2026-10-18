@@ -404,7 +404,7 @@ source_line = "妹妹在哭。"
         self.assertIn("分析の版: 未分析", out)
         self.assertIn("辞書の版: none", out)
         self.assertIn("confirm —・語彙 candidates —（ドラフト未配置）", out)
-        self.assertIn("age_policy 1件（作品全体）", out)
+        self.assertIn("age_policy 未裁定 1件（作品全体）", out)
         self.assertIn("draft-append 受領済み（未完了）:", out)
         self.assertIn("ch001/b1: 受領 P1-P2 / 全体 P1-P3（残り P3）", out)
 

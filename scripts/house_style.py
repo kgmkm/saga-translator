@@ -331,6 +331,19 @@ def cmd_validate(args: Namespace) -> int:
                 if v is not None and not isinstance(v, str):
                     errors.append(f"[naming_policy]: '{key}' は文字列であるべきです (実際: {type(v).__name__})")
 
+    # [naming]（任意）: lock_prep の固有名候補から除く語（作品固有の普通名詞）。
+    nm = data.get("naming")
+    if nm is not None:
+        if not isinstance(nm, dict):
+            errors.append("[naming]: テーブルであるべきです")
+        else:
+            sw = nm.get("stopwords")
+            if sw is not None:
+                if not isinstance(sw, list):
+                    errors.append("[naming]: 'stopwords' は配列であるべきです")
+                elif not all(isinstance(x, str) for x in sw):
+                    errors.append("[naming]: 'stopwords' の要素は文字列であるべきです")
+
     if errors:
         for e in errors:
             print(e, file=sys.stderr)

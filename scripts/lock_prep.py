@@ -90,9 +90,51 @@ ZH_STOPWORDS_EXACT = frozenset({
 })
 
 
+#: 語頭・語尾に来たら機能語の N-gram（人的・彻底・了一 等）とみなす字。
+#: 「人」「男」など名前にも普通名詞にも出る字は入れない（誤って名前を落とさない）。
+ZH_EDGE_FUNCTION_CHARS = frozenset("的着过了地得之吗呢吧啊们个些")
+
+#: 固有名詞ではない頻出の普通名詞。全部分文字列を数える方式では、これらが
+#: top_n の枠を食って固有名が入らない（実測で上位が普通名詞で埋まる）。
+#: 追加は「人名に使われる字を含む語を入れない」方針で。
+ZH_COMMON_NOUNS = frozenset("""
+男人 女人 身体 声音 眼睛 衣服 房间 时候 事情 办法 感觉 味道 东西 地方 世界
+少女 少年 女子 男子 学生 老师 朋友 妹妹 姐姐 哥哥 弟弟 母亲 父亲 脸色 表情
+目光 视线 手指 手腕 胸口 呼吸 空气 汗水 眼泪 笑容 语气 手掌 大腿 腰部 皮肤
+彻底 发出 这样 这种 一次 开始 意识 瞬间 早已 完全 仿佛 无法 几乎 深处 起来
+时候 事情 地方 东西 感觉 声音 样子 意思 办法 关系 情况 问题 结果 原因 全部
+甚至 虽然 不断 同时 一边 每一 突然 立刻 忽然 刚才 一直 始终 依然 仍然
+只有 只要 不过 而且 并且 或者 因此 于是 接着 最后 终于
+出来 变成 微微 慢慢 轻轻 渐渐 越来越
+""".split())
+
+
 def _is_stopword(word: str) -> bool:
-    """中国語の機能語・N-gram ノイズか（固有名詞候補から除外する）。"""
-    return word in ZH_STOPWORDS_EXACT or all(ch in ZH_STOPWORD_CHARS for ch in word)
+    """中国語の機能語・普通名詞・N-gram ノイズか（固有名詞候補から除外する）。"""
+    if word in ZH_COMMON_NOUNS or word in ZH_STOPWORDS_EXACT:
+        return True
+    if word[0] in ZH_EDGE_FUNCTION_CHARS or word[-1] in ZH_EDGE_FUNCTION_CHARS:
+        return True
+    return all(ch in ZH_STOPWORD_CHARS for ch in word)
+
+
+def _suppress_nested(words: list[str], counter: Counter[str]) -> list[str]:
+    """等頻度の入れ子を落とす（久津 ⊂ 久津間泠苑 のような断片を候補から除く）。
+
+    長い語の頻度が同じか多いときだけ落とす。短い語が単独でより多く出ていれば
+    別の固有名（姓だけの呼び方など）として残す。
+    """
+    cand = set(words)
+    suppressed: set[str] = set()
+    for w in words:
+        if len(w) < 3:
+            continue
+        for i in range(len(w)):
+            for j in range(2, len(w) - i + 1):
+                sub = w[i:i + j]
+                if sub != w and sub in cand and counter[w] >= counter[sub]:
+                    suppressed.add(sub)
+    return [w for w in words if w not in suppressed]
 
 
 # 代号（コードネーム）の明示抽出（G13 / T2）。固有名詞抽出の頻度・長さの
@@ -154,6 +196,7 @@ def _gather_proper_nouns(
     paras: list[tuple[str, int, str]],
     src: str,
     top_n: int,
+    extra_stopwords: set[str] | None = None,
 ) -> list[dict]:
     """2〜6字漢字連続で top_n 件の頻出語を返す。既存分析ファイルは呼び出し側でマージ。
 
@@ -173,14 +216,17 @@ def _gather_proper_nouns(
                 for j in range(2, max_len + 1):
                     if i + j <= len(fragment):
                         cand = fragment[i:i + j]
-                        if _is_stopword(cand):
+                        if _is_stopword(cand) or cand in (extra_stopwords or ()):
                             continue
                         counter[cand] += 1
-    # 頻度でソート、top_n 件
+    # 頻度でソート → 入れ子の断片を落とす → top_n 件。
+    # 先に多めに取らないと、断片を落とした分だけ recall が下がる。
+    pool = counter.most_common(top_n * 4)
+    words = [w for w, f in pool if f >= 3]
+    words = _suppress_nested(words, counter)
     results: list[dict] = []
-    for word, freq in counter.most_common(top_n):
-        if freq < 3:
-            break
+    for word in words[:top_n]:
+        freq = counter[word]
         first = _first_appearance(word, paras)
         results.append({
             "word": word,
@@ -397,6 +443,27 @@ def _naming_category(form: str) -> str:
     if han > kata:
         return NAMING_CATEGORY_HAN
     return NAMING_CATEGORY_OTHER
+
+
+def _load_extra_stopwords(work: Path) -> set[str]:
+    """house_style の `[naming] stopwords` / `[naming_policy] stopwords`（作品ごとの除外語）。
+
+    作品固有の普通名詞（ジャンル語など）は共通リストに入れず、作品側で足す。
+    探索先は #19 の house_style_paths。
+    """
+    from vocab import house_style_paths
+
+    out: set[str] = set()
+    for p in house_style_paths(work):
+        try:
+            data = load_toml(p)
+        except Exception:
+            continue
+        for sec in ("naming", "naming_policy"):
+            block = data.get(sec)
+            if isinstance(block, dict) and isinstance(block.get("stopwords"), list):
+                out.update(str(x) for x in block["stopwords"] if str(x).strip())
+    return out
 
 
 def _load_naming_policy(work: Path) -> dict | None:
@@ -700,7 +767,8 @@ def main(argv: list[str] | None = None) -> int:
     existing = _build_existing_map(work)
 
     # 1. 固有名詞候補
-    proper_nouns = _gather_proper_nouns(all_paras, src, args.top_n)
+    proper_nouns = _gather_proper_nouns(all_paras, src, args.top_n,
+                                        extra_stopwords=_load_extra_stopwords(work))
     proper_nouns = _mark_existing(proper_nouns, existing)
 
     # 1b. コードネーム候補（「代号」の明示抽出。頻度・長さの足切りなし。G13）
