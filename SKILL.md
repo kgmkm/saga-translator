@@ -1,7 +1,7 @@
 ---
 name: saga-translator
 description: Use when a novel file needs translating into Japanese or Simplified Chinese.
-version: 0.13.0
+version: 0.14.0
 author: saga-translator
 license: MIT
 tags: [translation, novel, japanese, pipeline]
@@ -48,6 +48,7 @@ saga-translator はユーザが所持する小説ファイルを個人的な閲�
 - 成功判定は exit コードだけでなく出力本文（例: `[commit] align: PASS`）で行う。PowerShell では python の stderr 出力により、成功でも exit 非0 に見えることがある（`references/env-windows.md`）。
 - 実行環境ごとの注意（git-bash / PowerShell / goose・長文書き込み）は `references/env-windows.md`。
 - 委譲（サブエージェント）の運用は `references/agent-delegation.md`（ハーネス対応表を含む）。
+- **ファイルの置き場所の正本は `scripts/paths.py`**（どのパスが purge され、どこに何を置くか）。`python3 scripts/paths.py` で一覧、`--md` で木。md に構造を書き足さない。
 
 ## パイプライン（通常フロー）
 

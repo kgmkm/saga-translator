@@ -11,39 +11,19 @@
 
 ## ディレクトリ
 
-作業中:
+**構造の正本は `scripts/paths.py`**（ツールが読み書きするパス・寿命・作成者・旧配置・作業領域）。ここに木を書き写さない（写すと必ずズレる）。確認は:
 
 ```
-<作品ID>/
-├── manifest.toml
-├── originals/source.md      # 完了後に削除
-├── chapters/
-│   └── chNNN.paras.toml     # 段落原文。完了後も残す（改訂路 --revise の受け皿）
-├── chapters_meta.toml
-├── analysis/
-│   ├── characters-[ネタバレあり].toml
-│   ├── terms.toml
-│   ├── plot-[ネタバレあり].toml
-│   └── titles.toml
-├── translation_input/       # 完了後に削除
-├── output/
-│   ├── images/              # 画像置き場。訳文からは常に images/… で参照
-│   ├── chNNN/bY_<dst>.md     # 完了後に章ファイルへ吸収（単章作品は復元用に残す）
-│   ├── chNNN/bY_parallel.md # 対訳の中間物。assemble が章・全文対訳を作る（単章作品は残す）
-│   ├── chNNN_<dst>.md        # 同上
-│   ├── chNNN_parallel.md    # 対訳（既定で出力。--no-parallel で抑制）
-│   ├── 全文_訳文.md
-│   ├── 全文_対訳.md         # 同上。> [Pnnn] 付きで原文と訳文を対にする
-│   ├── 目次.md
-│   └── _work/               # 確定後に削除
-└── logs/
+python3 scripts/paths.py          # 一覧（ツール管理 / 旧配置 / 作業領域）
+python3 scripts/paths.py --md     # md 用の木
+python3 scripts/saga.py paths     # 同上
 ```
 
-完了後（assemble 既定）: 入力元（originals）・翻訳入力（translation_input）・ブロック訳は無い（単章作品の `output/<ch>/` ブロック訳だけは残す＝復元・改訂の受け皿。G23）。**`chapters/*.paras.toml`（段落原文）は残す**（assemble 後の改訂路 `commit --revise` と調査が原文を要求するため。G23）。対訳（`全文_対訳.md`・章対訳）は既定で出力・保持する（`--no-parallel` で抑制）。残るのは訳文・output/images・分析・manifest・目次。入力元ファイルは触らない。
+- `paths.py` の `lifetime`: `keep`（完成後も残る）/ `work`（assemble の purge で消える）/ `transient`（実行中だけ現れる）
+- コードに新しい `work / "…"` を足したら `paths.py` にも登録する（`scripts/tests/test_paths_layout.py` が不一致を検出する）
+- 旧配置（`manifest.json`・`characters.toml`・`output/_done`・`images/` など）は読むが新規に作らない。誤配置の `house_style.toml`（作品直下）は**読まれない**
 
-`assemble.py --keep-source` は手順7（全ブロック確定後の assemble）のオプションで、作業中のまま（originals・translation_input・output/_work・章別出力を含めて）全部残す。**後から `commit --revise` → 再 assemble で改訂する予定があるなら `--keep-source` を推奨**（既定の assemble は原文と中間物を消すため、改訂は `chapters/*.paras.toml` と `output/_work/done/` の残存物に頼ることになる）。旧配置 `work/images/` があれば assemble が output/images/ へ移動する。
-
-※ 旧 `.json` / 旧 `characters.toml` も読む。新規は TOML。JSONテンプレは置かない。
+完了後（assemble 既定）は `lifetime=work` のパスが消える（入力元・翻訳入力・ブロック訳。単章作品の `output/<ch>/` だけは復元・改訂の受け皿として残す。G23）。**`chapters/*.paras.toml`（段落原文）は残す**（改訂路 `commit --revise` と調査が原文を要求するため。G23）。対訳（`全文_対訳.md`・章対訳）は既定で出力・保持する（`--no-parallel` で抑制）。`assemble.py --keep-source` は作業中のまま全部残す（改訂予定があるなら推奨）。
 
 ## TOML構造（analysis配下）
 

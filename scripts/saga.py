@@ -4226,6 +4226,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="saga-translator CLI")
     sub = ap.add_subparsers(dest="command", required=True)
 
+    # paths（レイアウトの正本を表示）
+    p_paths = sub.add_parser("paths", help="作品ディレクトリのレイアウト（正本: scripts/paths.py）")
+    p_paths.add_argument("--md", action="store_true", help="md 用の木を出力")
+
     # status
     p_status = sub.add_parser("status", help="進捗確認")
     p_status.add_argument("work", help="作品ディレクトリ")
@@ -4308,6 +4312,16 @@ def main() -> None:
     p_lo.add_argument("--context", default="", help="注記（任意）")
 
     args = ap.parse_args()
+
+    if args.command == "paths":
+        from paths import format_list, format_md
+        if args.md:
+            format_md()
+        else:
+            print("レイアウトの正本: scripts/paths.py")
+            print()
+            format_list()
+        raise SystemExit(0)
 
     work = Path(args.work).resolve()
 

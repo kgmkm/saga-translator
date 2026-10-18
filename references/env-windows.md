@@ -14,7 +14,7 @@ saga-translator を Windows（git-bash・PowerShell 等）で動かすときの�
 - **1コマンドの標準出力は 2KB 以下に留める。**
   大量の出力（ファイル一覧・全文ダンプ）を stdout に出すと、会話キャッシュに積もって
   以後の全コールで再読され、コンテキストを圧迫する（実測は「Hermes 節」）。
-  代わりに `_work/logs/` にファイルとして出力し、stdout には要約だけを出す。
+  代わりに `logs/` にファイルとして出力し、stdout には要約だけを出す。
 
 ## PowerShell
 
@@ -64,7 +64,7 @@ Hermes Agent（Windows 11 の git-bash）で動かすときの固有事項。
 - **文字コードは UTF-8（BOM なし・LF 改行）を維持する。**
   Windows 標準のメモ帳で開くときは文字化けしない。CRLF が混入すると TOML パーサーや
   regex の `$` アンカーがずれる（実例：`analysis_done_at` の重複ガード無効化）。
-- **長いリストは `_work/logs/` 下にファイルとして出し、stdout には要約のみを出す。**
+- **長いリストは `logs/` 下にファイルとして出し、stdout には要約のみを出す。**
   - 良い例：`[ingest] work: ... / title: ... / paras: 123 / chars: 45678`
   - 悪い例：全段落の原文を stdout にダンプする
 

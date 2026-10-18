@@ -81,7 +81,7 @@
 
 ## 5. 数値の記録方法
 
-### `_work/logs/timeline.jsonl`
+### `logs/timeline.jsonl`
 
 `saga.py` の各サブコマンドが自動で書き込む。1行1エントリで、工程・ブロック・開始・終了・終了コード・再試行回数・commit ID を含む。
 
